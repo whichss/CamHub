@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Brand Colors -->
+    <color name="primary">#FF137FEC</color>
+    <color name="primary_light">#FF4DA3FF</color>
+    <color name="primary_dark">#FF0A5BB5</color>
+
+    <!-- Background -->
+    <color name="background_dark">#FF101922</color>
+    <color name="background_darker">#FF0A1118</color>
+    <color name="surface_dark">#FF1A2736</color>
+    <color name="surface_light">#FF243447</color>
+
+    <!-- Neon / Status -->
+    <color name="neon_green">#FF39FF14</color>
+    <color name="electric_red">#FFFF3B30</color>
+    <color name="amber_yellow">#FFFFCC00</color>
+    <color name="cyan_accent">#FF00D4FF</color>
+
+    <!-- Glassmorphism -->
+    <color name="glass_surface">#08FFFFFF</color>
+    <color name="glass_border">#1AFFFFFF</color>
+
+    <!-- Tally -->
+    <color name="tally_pgm">#FFFF3B30</color>
+    <color name="tally_pvw">#FF39FF14</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+    <color name="text_tertiary">#66FFFFFF</color>
+    <color name="text_muted">#33FFFFFF</color>
+
+    <!-- LED Meter -->
+    <color name="led_green">#FF39FF14</color>
+    <color name="led_yellow">#FFFFCC00</color>
+    <color name="led_red">#FFFF3B30</color>
+    <color name="led_off">#FF1A2736</color>
+</resources>
