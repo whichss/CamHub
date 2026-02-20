@@ -79,7 +79,7 @@ fun LedMeter(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(4.dp)
+                    .height(3.dp)
                     .clip(RoundedCornerShape(1.dp))
                     .background(segmentColor)
             )

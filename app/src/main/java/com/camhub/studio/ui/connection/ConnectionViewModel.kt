@@ -205,7 +205,9 @@ class ConnectionViewModel @Inject constructor(
             hotspotManager.stopHotspot()
         } else {
             nsdManager.unregisterService()
-            audioCaptureService.stop()
+            // Don't stop audioCaptureService here — it's a singleton that must
+            // survive navigation to CameraHudScreen. Cleanup happens in
+            // CameraHudViewModel.onCleared() instead.
         }
     }
 }

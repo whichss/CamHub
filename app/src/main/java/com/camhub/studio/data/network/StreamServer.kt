@@ -60,6 +60,7 @@ class StreamServer @Inject constructor() {
     private sealed class ClientConnection {
         abstract var needsConfig: Boolean
         @Volatile var isSending: Boolean = false
+        @Volatile var pendingKeyframe: ByteArray? = null
         abstract fun sendFrame(data: ByteArray)
         abstract fun close()
 
@@ -290,7 +291,7 @@ class StreamServer @Inject constructor() {
             } else {
                 h264OutputCount++
                 val payload = buildH264Payload(frame.data, width, height, rotation, frame.isKeyFrame, false)
-                broadcastFrame(payload)
+                broadcastFrame(payload, frame.isKeyFrame)
                 sentData = true
             }
         }
@@ -454,19 +455,28 @@ class StreamServer @Inject constructor() {
 
     private val broadcastPool = Executors.newCachedThreadPool()
 
-    private fun broadcastFrame(payload: ByteArray) {
+    private fun broadcastFrame(payload: ByteArray, isKeyFrame: Boolean = false) {
         val dataToSend = if (usingSrt) payload  // SRT handles encryption via passphrase
                          else frameCipher?.encrypt(payload) ?: payload
 
         for (client in clients) {
             if (client.isSending) {
-                // Skip frame for this client — it's still sending previous frame
+                // Buffer keyframes so slow clients can resync (never drop keyframes)
+                if (isKeyFrame) {
+                    client.pendingKeyframe = dataToSend
+                }
                 continue
             }
             client.isSending = true
             broadcastPool.execute {
                 try {
                     client.sendFrame(dataToSend)
+                    // After sending, flush any buffered keyframe for this client
+                    val pending = client.pendingKeyframe
+                    if (pending != null) {
+                        client.pendingKeyframe = null
+                        client.sendFrame(pending)
+                    }
                 } catch (e: Exception) {
                     clients.remove(client)
                     try { client.close() } catch (_: Exception) {}
@@ -511,7 +521,7 @@ class StreamServer @Inject constructor() {
             }
         } else {
             val payload = buildH264Payload(frame.data, width, height, rotation, frame.isKeyFrame, false)
-            broadcastFrame(payload)
+            broadcastFrame(payload, frame.isKeyFrame)
         }
     }
 

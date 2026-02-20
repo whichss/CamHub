@@ -122,11 +122,16 @@ fun ViewportCard(
                 }
             }
 
-            // Preview area with 16:9 aspect ratio
+            // Preview area — adapts aspect ratio to stream content
+            val bitmapAspect = if (previewBitmap != null) {
+                previewBitmap.width.toFloat() / previewBitmap.height.toFloat()
+            } else {
+                16f / 9f
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                    .aspectRatio(bitmapAspect)
                     .background(BackgroundDarker),
                 contentAlignment = Alignment.Center
             ) {

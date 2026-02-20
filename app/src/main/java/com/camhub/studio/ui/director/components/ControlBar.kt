@@ -19,7 +19,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -228,8 +227,7 @@ private fun ControlBarHorizontal(
                     label = "REC",
                     backgroundColor = ElectricRed,
                     textColor = TextPrimary,
-                    onClick = onRecord,
-                    icon = Icons.Filled.FiberManualRecord
+                    onClick = onRecord
                 )
             } else {
                 ControlButton(
@@ -259,17 +257,17 @@ private fun ControlBarHorizontal(
             }
         }
 
-        // Transition controls (CUT / AUTO)
+        // Transition controls
         ControlButton(
             label = "CUT",
-            backgroundColor = ElectricRed.copy(alpha = 0.2f),
-            textColor = ElectricRed,
+            backgroundColor = SurfaceLight,
+            textColor = TextPrimary,
             onClick = onCut
         )
         ControlButton(
             label = "AUTO",
             backgroundColor = NeonGreen.copy(alpha = 0.2f),
-            textColor = NeonGreen,
+            textColor = TextPrimary,
             onClick = onAuto
         )
 
@@ -331,8 +329,7 @@ private fun ControlBarVertical(
                 label = "REC",
                 backgroundColor = ElectricRed,
                 textColor = TextPrimary,
-                onClick = onRecord,
-                icon = Icons.Filled.FiberManualRecord
+                onClick = onRecord
             )
         } else {
             ControlButton(
@@ -366,14 +363,14 @@ private fun ControlBarVertical(
         // Transition buttons
         ControlButton(
             label = "CUT",
-            backgroundColor = ElectricRed.copy(alpha = 0.2f),
-            textColor = ElectricRed,
+            backgroundColor = SurfaceLight,
+            textColor = TextPrimary,
             onClick = onCut
         )
         ControlButton(
             label = "AUTO",
             backgroundColor = NeonGreen.copy(alpha = 0.2f),
-            textColor = NeonGreen,
+            textColor = TextPrimary,
             onClick = onAuto
         )
 

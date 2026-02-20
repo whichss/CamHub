@@ -35,9 +35,13 @@ data class CameraUiState(
     val zoomRatio: Float = 1f,
     val minZoomRatio: Float = 1f,
     val maxZoomRatio: Float = 1f,
+    val zoomSteps: List<String> = listOf("1.0x"),
+    val selectedZoomIndex: Int = 0,
     // Tap-to-focus indicator
     val focusPointX: Float? = null,
-    val focusPointY: Float? = null
+    val focusPointY: Float? = null,
+    // Portrait preview mode: true = 9:16 (tall), false = 16:9 (landscape strip)
+    val isPortraitFullPreview: Boolean = true
 )
 
 data class LensInfo(

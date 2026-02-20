@@ -5,7 +5,6 @@ import android.content.res.Configuration
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,24 +13,16 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -43,8 +34,6 @@ import com.camhub.studio.ui.director.components.ControlBar
 import com.camhub.studio.ui.director.components.StatusBar
 import com.camhub.studio.ui.director.components.ViewportPanel
 import com.camhub.studio.ui.theme.BackgroundDark
-import com.camhub.studio.ui.theme.SurfaceLight
-import com.camhub.studio.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
 
 /**
@@ -131,7 +120,8 @@ fun DirectorScreen(
                     isRecording = uiState.isRecording,
                     isPaused = uiState.isPaused,
                     wifiStrength = uiState.wifiStrength,
-                    batteryPercent = uiState.batteryPercent
+                    batteryPercent = uiState.batteryPercent,
+                    onNavigateToSettings = onNavigateToSettings
                 )
 
                 Row(modifier = Modifier.weight(1f)) {
@@ -190,7 +180,8 @@ fun DirectorScreen(
                     isRecording = uiState.isRecording,
                     isPaused = uiState.isPaused,
                     wifiStrength = uiState.wifiStrength,
-                    batteryPercent = uiState.batteryPercent
+                    batteryPercent = uiState.batteryPercent,
+                    onNavigateToSettings = onNavigateToSettings
                 )
 
                 // Viewport panel (horizontal PVW+PGM)
@@ -234,25 +225,6 @@ fun DirectorScreen(
                         .weight(1f)
                 )
             }
-        }
-
-        // Settings button (top-right overlay)
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 4.dp, end = 4.dp)
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(SurfaceLight.copy(alpha = 0.6f))
-                .clickable(onClick = onNavigateToSettings),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Settings,
-                contentDescription = "Settings",
-                tint = TextSecondary,
-                modifier = Modifier.size(16.dp)
-            )
         }
 
         // Audio mixer bottom sheet overlay

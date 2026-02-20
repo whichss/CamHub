@@ -18,7 +18,7 @@ data class EncodedFrame(
 class H264Encoder(
     private val width: Int,
     private val height: Int,
-    private val bitrate: Int = 2_000_000,
+    private val bitrate: Int = 4_000_000,
     private val frameRate: Int = 30,
     private val iFrameInterval: Int = 1
 ) {

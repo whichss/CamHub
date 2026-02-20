@@ -72,9 +72,10 @@ class PeerConnectionManager @Inject constructor(
     companion object {
         private const val TAG = "PeerConnection"
         private const val HEARTBEAT_INTERVAL_MS = 3000L
-        private const val HEARTBEAT_TIMEOUT_MS = 15000L
+        private const val HEARTBEAT_TIMEOUT_MS = 20000L
         private const val MAX_LINE_LENGTH = 4096
         private const val AES_KEY_SIZE = 32 // AES-256
+        private const val MAX_PARSE_ERRORS = 5 // Disconnect after repeated parse failures
     }
 
     /** Read a line with maximum length to prevent memory exhaustion attacks */
@@ -339,6 +340,7 @@ class PeerConnectionManager @Inject constructor(
 
             // Pong receiver / message reader
             val messageReader = launch {
+                var parseErrors = 0
                 try {
                     while (isActive) {
                         val line = try {
@@ -346,13 +348,22 @@ class PeerConnectionManager @Inject constructor(
                         } catch (e: java.net.SocketTimeoutException) {
                             // soTimeout fired — not fatal, timeout checker handles disconnect
                             continue
+                        } catch (e: IOException) {
+                            Log.d(TAG, "Read error for $peerName: ${e.message}")
+                            break
                         } ?: break
                         val msg = try {
                             json.decodeFromString<HandshakeMessage>(line)
                         } catch (e: Exception) {
-                            Log.w(TAG, "Invalid heartbeat JSON from $peerName")
-                            break
+                            parseErrors++
+                            Log.w(TAG, "Invalid heartbeat JSON from $peerName ($parseErrors/$MAX_PARSE_ERRORS)")
+                            if (parseErrors >= MAX_PARSE_ERRORS) {
+                                Log.w(TAG, "Too many parse errors from $peerName, disconnecting")
+                                break
+                            }
+                            continue
                         }
+                        parseErrors = 0 // Reset on successful parse
                         when (msg.type) {
                             "ping" -> {
                                 val pong = HandshakeMessage(type = "pong")

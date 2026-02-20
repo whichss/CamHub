@@ -14,7 +14,6 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,7 +22,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,11 +38,10 @@ import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.CameraFront
 import androidx.compose.material.icons.filled.CameraRear
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Exposure
-import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -54,7 +51,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -79,7 +75,6 @@ import com.camhub.studio.ui.theme.ElectricRed
 import com.camhub.studio.ui.theme.NeonGreen
 import com.camhub.studio.ui.theme.Primary
 import com.camhub.studio.ui.theme.SurfaceDark
-import com.camhub.studio.ui.theme.SurfaceLight
 import com.camhub.studio.ui.theme.TextMuted
 import com.camhub.studio.ui.theme.TextPrimary
 import com.camhub.studio.ui.theme.TextSecondary
@@ -195,11 +190,14 @@ private fun PortraitLayout(
                 .padding(top = 8.dp, bottom = 4.dp)
         )
 
-        // 2. Camera preview (16:9)
+        // 2. Camera preview — 9:16 (full) or 16:9 (compact), GL renderer handles aspect ratio
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+                .then(
+                    if (uiState.isPortraitFullPreview) Modifier.weight(1f)
+                    else Modifier.aspectRatio(16f / 9f)
+                )
                 .clip(RoundedCornerShape(4.dp))
         ) {
             CameraPreview(
@@ -223,14 +221,17 @@ private fun PortraitLayout(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .then(
+                    if (!uiState.isPortraitFullPreview) Modifier.weight(1f)
+                    else Modifier
+                )
                 .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Record button + Audio meters
+            // Record button + Audio meters + Status
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 RecordButton(
@@ -241,19 +242,28 @@ private fun PortraitLayout(
                     levels = uiState.audioLevels,
                     modifier = Modifier.weight(1f)
                 )
+                // Compact status info
+                CameraStatusBar(
+                    bitrate = uiState.bitrate,
+                    wifiStrength = uiState.wifiStrength,
+                    storageUsedGb = uiState.storageUsedGb,
+                    storageTotalGb = uiState.storageTotalGb
+                )
             }
 
             // Camera params bar
             CameraParamsBar(uiState = uiState)
 
-            // Tool icons row
+            // Tool icons row + aspect ratio toggle
             ToolIconsRow(
                 isFrontCamera = uiState.isFrontCamera,
                 showExposure = uiState.showExposurePanel,
                 showFocus = uiState.showFocusPanel,
+                isPortraitFull = uiState.isPortraitFullPreview,
                 onSwitchCamera = { viewModel.switchCamera() },
                 onToggleExposure = { viewModel.toggleExposurePanel() },
-                onToggleFocus = { viewModel.toggleFocusPanel() }
+                onToggleFocus = { viewModel.toggleFocusPanel() },
+                onToggleAspect = { viewModel.togglePreviewAspect() }
             )
 
             // Exposure panel (animated show/hide)
@@ -288,31 +298,31 @@ private fun PortraitLayout(
             }
 
             // Zoom control
-            if (uiState.maxZoomRatio > uiState.minZoomRatio) {
+            if (uiState.zoomSteps.size > 1) {
                 ZoomControl(
-                    zoomRatio = uiState.zoomRatio,
-                    minZoomRatio = uiState.minZoomRatio,
-                    maxZoomRatio = uiState.maxZoomRatio,
-                    onZoomChanged = { viewModel.setZoom(it) }
+                    zoomSteps = uiState.zoomSteps,
+                    selectedZoomIndex = uiState.selectedZoomIndex,
+                    onZoomIndexChanged = { viewModel.setZoomByIndex(it) }
                 )
             }
 
-            Spacer(modifier = Modifier.weight(1f))
-
-            // Stream status + storage bar at bottom
-            CameraStatusBar(
-                bitrate = uiState.bitrate,
-                wifiStrength = uiState.wifiStrength,
-                storageUsedGb = uiState.storageUsedGb,
-                storageTotalGb = uiState.storageTotalGb,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
+            // In 16:9 mode, push remaining space down
+            if (!uiState.isPortraitFullPreview) {
+                Spacer(modifier = Modifier.weight(1f))
+                CameraStatusBar(
+                    bitrate = uiState.bitrate,
+                    wifiStrength = uiState.wifiStrength,
+                    storageUsedGb = uiState.storageUsedGb,
+                    storageTotalGb = uiState.storageTotalGb,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+            }
         }
     }
 }
 
 // ──────────────────────────────────────────────────────────────────
-// LANDSCAPE LAYOUT
+// LANDSCAPE LAYOUT — Blackmagic-style full-screen overlay
 // ──────────────────────────────────────────────────────────────────
 
 @ExperimentalCamera2Interop
@@ -329,170 +339,348 @@ private fun LandscapeLayout(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDarker)
-            .windowInsetsPadding(safeInsets)
     ) {
-        // Full-screen preview + right sidebar
-        Row(modifier = Modifier.fillMaxSize()) {
-            // Preview area (fills remaining space)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-            ) {
-                CameraPreview(
-                    viewModel = viewModel,
-                    lifecycleOwner = lifecycleOwner,
-                    scaleGestureDetector = scaleGestureDetector,
-                    onTapToFocus = { x, y, w, h ->
-                        viewModel.tapToFocus(x, y, w, h)
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-                ViewfinderOverlay(
-                    isPgm = uiState.isPgm,
-                    focusPointX = uiState.focusPointX,
-                    focusPointY = uiState.focusPointY,
-                    modifier = Modifier.fillMaxSize()
-                )
+        // 1. Full-screen camera preview
+        CameraPreview(
+            viewModel = viewModel,
+            lifecycleOwner = lifecycleOwner,
+            scaleGestureDetector = scaleGestureDetector,
+            onTapToFocus = { x, y, w, h ->
+                viewModel.tapToFocus(x, y, w, h)
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+        ViewfinderOverlay(
+            isPgm = uiState.isPgm,
+            focusPointX = uiState.focusPointX,
+            focusPointY = uiState.focusPointY,
+            modifier = Modifier.fillMaxSize()
+        )
 
-                // Top overlay: params bar + timecode
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                ) {
-                    CameraParamsBar(
-                        uiState = uiState,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                    TimecodeBar(
-                        timecode = uiState.timecode,
-                        isRecording = uiState.isRecording,
-                        modifier = Modifier
-                            .align(Alignment.CenterHorizontally)
-                            .padding(top = 2.dp)
-                    )
-                }
-
-                // Bottom overlay: minimal status line
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .background(BackgroundDark.copy(alpha = 0.5f))
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // LIVE / OFF indicator
-                    Text(
-                        text = uiState.bitrate,
-                        color = if (uiState.bitrate == "LIVE") NeonGreen else TextTertiary,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    // Storage
-                    val storagePct = if (uiState.storageTotalGb > 0f)
-                        ((uiState.storageUsedGb / uiState.storageTotalGb) * 100).toInt() else 0
-                    Text(
-                        text = "${String.format("%.0f", uiState.storageTotalGb)}GB ${storagePct}%",
-                        color = TextTertiary,
-                        fontSize = 8.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    // Compact audio meters
-                    AudioMetersPanel(
-                        levels = uiState.audioLevels,
-                        compact = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                // Exposure/Focus panels overlay
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(start = 8.dp, bottom = 36.dp)
-                        .width(240.dp)
-                ) {
-                    AnimatedVisibility(
-                        visible = uiState.showExposurePanel,
-                        enter = fadeIn(),
-                        exit = fadeOut()
-                    ) {
-                        ExposurePanel(
-                            isoValues = uiState.isoValues,
-                            selectedIsoIndex = uiState.selectedIsoIndex,
-                            onIsoChanged = { viewModel.updateIso(it) },
-                            shutterValues = uiState.shutterValues,
-                            selectedShutterIndex = uiState.selectedShutterIndex,
-                            onShutterChanged = { viewModel.updateShutter(it) }
-                        )
-                    }
-                    AnimatedVisibility(
-                        visible = uiState.showFocusPanel,
-                        enter = fadeIn(),
-                        exit = fadeOut()
-                    ) {
-                        FocusPanel(
-                            focusDistances = uiState.focusDistances,
-                            selectedFocusIndex = uiState.selectedFocusIndex,
-                            onFocusChanged = { viewModel.updateFocus(it) },
-                            isPeakingEnabled = uiState.isPeakingEnabled,
-                            onTogglePeaking = { viewModel.togglePeaking() }
-                        )
-                    }
-                }
-            }
-
-            // Right sidebar (compact)
+        // All HUD overlays respect safe insets
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(safeInsets)
+        ) {
+            // 2. Left side: camera info labels
             Column(
                 modifier = Modifier
-                    .width(44.dp)
-                    .fillMaxHeight()
-                    .background(BackgroundDark.copy(alpha = 0.85f))
-                    .padding(vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically)
+                    .align(Alignment.CenterStart)
+                    .padding(start = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                RecordButton(
-                    isRecording = uiState.isRecording,
-                    onClick = { viewModel.toggleRecording() }
+                InfoPill(value = "30", label = "FPS")
+                InfoPill(value = "FHD", label = "RES")
+                InfoPill(value = "H.264", label = "")
+            }
+
+            // 3. Left bottom: status info
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 12.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // LIVE/OFF
+                Text(
+                    text = uiState.bitrate,
+                    color = if (uiState.bitrate == "LIVE") NeonGreen else TextTertiary,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(BackgroundDark.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                // Storage
+                val storagePct = if (uiState.storageTotalGb > 0f)
+                    ((uiState.storageUsedGb / uiState.storageTotalGb) * 100).toInt() else 0
+                Text(
+                    text = "${String.format("%.0f", uiState.storageTotalGb)}GB ${storagePct}%",
+                    color = NeonGreen,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(BackgroundDark.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+                // Battery
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .background(BackgroundDark.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.BatteryFull,
+                        contentDescription = "Battery",
+                        tint = when {
+                            uiState.batteryPercent <= 15 -> ElectricRed
+                            uiState.batteryPercent <= 30 -> AmberYellow
+                            else -> NeonGreen
+                        },
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = "${uiState.batteryPercent}%",
+                        color = TextSecondary,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            // 4. Right side: circular control buttons
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                // Camera switch
+                HudCircleButton(
+                    icon = if (uiState.isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
+                    label = "",
+                    onClick = { viewModel.switchCamera() }
                 )
 
-                Icon(
-                    imageVector = if (uiState.isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
-                    contentDescription = "Switch Camera",
-                    tint = TextSecondary,
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clip(CircleShape)
-                        .clickable { viewModel.switchCamera() }
+                // Focus / AF
+                HudCircleButton(
+                    icon = Icons.Default.CenterFocusStrong,
+                    label = uiState.focusDistances.getOrElse(uiState.selectedFocusIndex) { "AF" },
+                    isActive = uiState.showFocusPanel,
+                    activeColor = CyanAccent,
+                    onClick = { viewModel.toggleFocusPanel() }
                 )
 
-                Icon(
-                    imageVector = Icons.Default.Exposure,
-                    contentDescription = "Exposure",
-                    tint = if (uiState.showExposurePanel) Primary else TextSecondary,
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clip(CircleShape)
-                        .clickable { viewModel.toggleExposurePanel() }
+                // Exposure
+                HudCircleButton(
+                    icon = Icons.Default.Exposure,
+                    label = uiState.isoValues.getOrElse(uiState.selectedIsoIndex) { "--" },
+                    isActive = uiState.showExposurePanel,
+                    activeColor = Primary,
+                    onClick = { viewModel.toggleExposurePanel() }
                 )
 
-                Icon(
-                    imageVector = Icons.Default.CenterFocusStrong,
-                    contentDescription = "Focus",
-                    tint = if (uiState.showFocusPanel) CyanAccent else TextSecondary,
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clip(CircleShape)
-                        .clickable { viewModel.toggleFocusPanel() }
+                // Shutter
+                val shutterVal = uiState.shutterValues.getOrElse(uiState.selectedShutterIndex) { "--" }
+                HudCircleButton(
+                    icon = null,
+                    label = shutterVal,
+                    customText = "SHTR",
+                    onClick = { viewModel.toggleExposurePanel() }
+                )
+
+                // Zoom
+                HudCircleButton(
+                    icon = null,
+                    label = "${String.format("%.1f", uiState.zoomRatio)}x",
+                    customText = "ZOOM",
+                    onClick = { /* zoom control via pinch */ }
                 )
             }
+
+            // 5. Bottom center: Record button + timecode
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Timecode above record button
+                Text(
+                    text = uiState.timecode,
+                    color = if (uiState.isRecording) ElectricRed else TextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(BackgroundDark.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+                // Big record button
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(SurfaceDark.copy(alpha = 0.5f), CircleShape)
+                        .border(2.5.dp, TextMuted.copy(alpha = 0.7f), CircleShape)
+                        .clickable { viewModel.toggleRecording() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (uiState.isRecording) {
+                        // Stop square
+                        Box(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .background(ElectricRed, RoundedCornerShape(4.dp))
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(ElectricRed, CircleShape)
+                        )
+                    }
+                }
+            }
+
+            // 6. Bottom right: compact audio meters
+            AudioMetersPanel(
+                levels = uiState.audioLevels,
+                compact = true,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 10.dp, bottom = 12.dp)
+                    .width(100.dp)
+            )
+
+            // 7. Remote override indicator
+            if (uiState.isRemoteOverride) {
+                Text(
+                    text = "REMOTE",
+                    color = AmberYellow,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 6.dp)
+                        .background(AmberYellow.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
+
+            // 8. Exposure/Focus panels overlay (center-left)
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 60.dp)
+                    .width(240.dp)
+            ) {
+                AnimatedVisibility(
+                    visible = uiState.showExposurePanel,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    ExposurePanel(
+                        isoValues = uiState.isoValues,
+                        selectedIsoIndex = uiState.selectedIsoIndex,
+                        onIsoChanged = { viewModel.updateIso(it) },
+                        shutterValues = uiState.shutterValues,
+                        selectedShutterIndex = uiState.selectedShutterIndex,
+                        onShutterChanged = { viewModel.updateShutter(it) }
+                    )
+                }
+                AnimatedVisibility(
+                    visible = uiState.showFocusPanel,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    FocusPanel(
+                        focusDistances = uiState.focusDistances,
+                        selectedFocusIndex = uiState.selectedFocusIndex,
+                        onFocusChanged = { viewModel.updateFocus(it) },
+                        isPeakingEnabled = uiState.isPeakingEnabled,
+                        onTogglePeaking = { viewModel.togglePeaking() }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Info pill label used on the left side of landscape HUD */
+@Composable
+private fun InfoPill(
+    value: String,
+    label: String
+) {
+    Row(
+        modifier = Modifier
+            .background(BackgroundDark.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = value,
+            color = TextPrimary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
+        )
+        if (label.isNotEmpty()) {
+            Text(
+                text = label,
+                color = TextTertiary,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+/** Circular HUD button used on the right side of landscape layout */
+@Composable
+private fun HudCircleButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector?,
+    label: String,
+    onClick: () -> Unit,
+    isActive: Boolean = false,
+    activeColor: androidx.compose.ui.graphics.Color = Primary,
+    customText: String? = null
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(
+                    if (isActive) activeColor.copy(alpha = 0.2f)
+                    else BackgroundDark.copy(alpha = 0.7f),
+                    CircleShape
+                )
+                .then(
+                    if (isActive) Modifier.border(1.5.dp, activeColor, CircleShape)
+                    else Modifier
+                )
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = if (isActive) activeColor else TextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            } else if (customText != null) {
+                Text(
+                    text = customText,
+                    color = TextSecondary,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+        if (label.isNotEmpty()) {
+            Text(
+                text = label,
+                color = if (isActive) activeColor else TextSecondary,
+                fontSize = 8.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
@@ -761,9 +949,11 @@ private fun ToolIconsRow(
     isFrontCamera: Boolean,
     showExposure: Boolean,
     showFocus: Boolean,
+    isPortraitFull: Boolean = true,
     onSwitchCamera: () -> Unit,
     onToggleExposure: () -> Unit,
     onToggleFocus: () -> Unit,
+    onToggleAspect: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -803,5 +993,28 @@ private fun ToolIconsRow(
                 .clip(CircleShape)
                 .clickable { onToggleFocus() }
         )
+
+        // Aspect ratio toggle (portrait only)
+        if (onToggleAspect != null) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(
+                        if (!isPortraitFull) Primary.copy(alpha = 0.15f)
+                        else BackgroundDark.copy(alpha = 0.5f),
+                        RoundedCornerShape(4.dp)
+                    )
+                    .clickable { onToggleAspect() }
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = if (isPortraitFull) "9:16" else "16:9",
+                    color = if (!isPortraitFull) Primary else TextSecondary,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
     }
 }

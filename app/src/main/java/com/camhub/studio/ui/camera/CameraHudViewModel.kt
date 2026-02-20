@@ -103,7 +103,11 @@ class CameraHudViewModel @Inject constructor(
                             isFrontCamera = cameraController.isFrontCamera(),
                             zoomRatio = cameraController.getCurrentZoomRatio(),
                             minZoomRatio = cameraController.getMinZoomRatio(),
-                            maxZoomRatio = cameraController.getMaxZoomRatio()
+                            maxZoomRatio = cameraController.getMaxZoomRatio(),
+                            zoomSteps = CameraValueMapper.generateZoomSteps(
+                                cameraController.getMinZoomRatio(),
+                                cameraController.getMaxZoomRatio()
+                            )
                         )
                     }
                 }
@@ -208,8 +212,9 @@ class CameraHudViewModel @Inject constructor(
             }
 
             // 2. Start GL renderer: camera buffer at 16:9 → [viewfinder, encoder]
+            //    Viewfinder uses actual surface dimensions; encoder uses 16-aligned dims
             val glRenderer = CameraGlRenderer()
-            glRenderer.start(encW, encH, viewfinderSurface, encoderInputSurface)
+            glRenderer.start(encW, encH, viewfinderSurface, encoderInputSurface, viewW, viewH)
 
             // Wait briefly for GL thread to create cameraSurface
             Thread.sleep(100)
@@ -224,7 +229,7 @@ class CameraHudViewModel @Inject constructor(
             }
 
             // 3. Encoding callback: drain encoded frames → broadcast (off GL thread)
-            // Rotation is already applied in GL renderer, so always send rotation=0
+            // Rotation is applied in GL renderer, so always send rotation=0
             val broadcastExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
             glRenderer.onFrameEncoded = {
                 val frames = encoder.drainOutput()
@@ -237,11 +242,15 @@ class CameraHudViewModel @Inject constructor(
                 }
             }
 
-            // 4. No extra GL rotation needed — surface is rebuilt with correct dimensions
-            // on each orientation change (onSurfaceTextureSizeChanged), and the
-            // SurfaceTexture transform matrix handles sensor→buffer mapping automatically.
+            // 4. CameraX TransformationInfo callback → GL renderer rotation
+            // CameraX tells us exactly how many degrees to rotate the raw sensor output
+            // to get the correct orientation for the current display rotation.
+            cameraController.onPreviewTransformChanged = { degrees ->
+                glRenderer.updateRotation(degrees)
+            }
 
-            // 5. Bind CameraX to GL renderer's surface at 16:9
+            // 5. Bind CameraX to GL renderer's surface
+            // Don't hardcode targetRotation — CameraController uses actual display rotation
             cameraController.bindCameraWithSurface(lifecycleOwner, cameraSurface, Size(encW, encH))
 
             cameraGlRenderer = glRenderer
@@ -348,7 +357,17 @@ class CameraHudViewModel @Inject constructor(
     fun setZoom(ratio: Float) {
         val clamped = ratio.coerceIn(_uiState.value.minZoomRatio, _uiState.value.maxZoomRatio)
         cameraController.setZoomRatio(clamped)
-        _uiState.update { it.copy(zoomRatio = clamped) }
+        val steps = _uiState.value.zoomSteps
+        val closestIndex = steps.indices.minByOrNull {
+            kotlin.math.abs(CameraValueMapper.zoomStepToFloat(steps[it]) - clamped)
+        } ?: 0
+        _uiState.update { it.copy(zoomRatio = clamped, selectedZoomIndex = closestIndex) }
+    }
+
+    fun setZoomByIndex(index: Int) {
+        val zoomStr = _uiState.value.zoomSteps.getOrNull(index) ?: return
+        val ratio = CameraValueMapper.zoomStepToFloat(zoomStr)
+        setZoom(ratio)
     }
 
     fun onPinchZoom(scaleFactor: Float) {
@@ -363,6 +382,10 @@ class CameraHudViewModel @Inject constructor(
             delay(1500)
             _uiState.update { it.copy(focusPointX = null, focusPointY = null) }
         }
+    }
+
+    fun togglePreviewAspect() {
+        _uiState.update { it.copy(isPortraitFullPreview = !it.isPortraitFullPreview) }
     }
 
     fun toggleRecording() {
@@ -380,5 +403,6 @@ class CameraHudViewModel @Inject constructor(
         cleanupSurfacePipeline()
         cameraController.unbindCamera()
         deviceMonitor.stopMonitoring()
+        audioCaptureService.stop()
     }
 }

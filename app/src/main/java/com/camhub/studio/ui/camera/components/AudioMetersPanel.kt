@@ -18,6 +18,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.camhub.studio.ui.theme.LedGreen
@@ -26,33 +27,22 @@ import com.camhub.studio.ui.theme.LedRed
 import com.camhub.studio.ui.theme.LedYellow
 import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.TextSecondary
-import com.camhub.studio.ui.theme.TextTertiary
 
-private const val TOTAL_SEGMENTS = 40
+private const val TOTAL_SEGMENTS = 24
 private const val DB_MIN = -45f
 private const val DB_MAX = 3f
 private val DB_RANGE = DB_MAX - DB_MIN
 
-/**
- * Convert a 0..1 linear level to dB value in range -45..+3
- */
 private fun levelToDb(level: Float): Float {
     if (level <= 0f) return DB_MIN
     return DB_MIN + (DB_RANGE * level.coerceIn(0f, 1f))
 }
 
-/**
- * Convert dB value to segment index (0..TOTAL_SEGMENTS)
- */
 private fun dbToSegment(db: Float): Int {
     val normalized = ((db - DB_MIN) / DB_RANGE).coerceIn(0f, 1f)
     return (normalized * TOTAL_SEGMENTS).toInt()
 }
 
-/**
- * Determine segment color based on dB threshold.
- * Green: below -10dB, Yellow: -10 to -3dB, Red: above -3dB
- */
 private fun segmentColor(segmentIndex: Int): androidx.compose.ui.graphics.Color {
     val db = DB_MIN + (segmentIndex.toFloat() / TOTAL_SEGMENTS) * DB_RANGE
     return when {
@@ -76,23 +66,24 @@ fun AudioMetersPanel(
     val ch2Lit = dbToSegment(ch2Db)
 
     if (compact) {
+        // Landscape compact: thin bars, no labels
         Column(
             modifier = modifier.padding(horizontal = 2.dp),
             verticalArrangement = Arrangement.spacedBy(1.dp)
         ) {
-            MeterRow(label = "L", litSegments = ch1Lit, barHeight = 5.dp)
-            MeterRow(label = "R", litSegments = ch2Lit, barHeight = 5.dp)
+            MeterBar(litSegments = ch1Lit, barHeight = 4.dp)
+            MeterBar(litSegments = ch2Lit, barHeight = 4.dp)
         }
     } else {
+        // Portrait standard: L/R labels, slightly thicker bars
         Column(
             modifier = modifier
                 .background(SurfaceDark.copy(alpha = 0.85f), RoundedCornerShape(8.dp))
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            MeterRow(label = "1", litSegments = ch1Lit)
-            MeterRow(label = "2", litSegments = ch2Lit)
-            DbScaleLabels()
+            MeterRow(label = "L", litSegments = ch1Lit, barHeight = 6.dp)
+            MeterRow(label = "R", litSegments = ch2Lit, barHeight = 6.dp)
         }
     }
 }
@@ -101,7 +92,7 @@ fun AudioMetersPanel(
 private fun MeterRow(
     label: String,
     litSegments: Int,
-    barHeight: androidx.compose.ui.unit.Dp = 8.dp
+    barHeight: Dp = 6.dp
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -111,50 +102,39 @@ private fun MeterRow(
         Text(
             text = label,
             color = TextSecondary,
-            fontSize = if (barHeight < 8.dp) 7.sp else 10.sp,
+            fontSize = 8.sp,
             fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace
         )
-        Canvas(
-            modifier = Modifier
-                .weight(1f)
-                .height(barHeight)
-        ) {
-            val w = size.width
-            val h = size.height
-            val gap = 1.5f
-            val segWidth = (w - gap * (TOTAL_SEGMENTS - 1)) / TOTAL_SEGMENTS
-
-            for (i in 0 until TOTAL_SEGMENTS) {
-                val isLit = i < litSegments
-                val color = if (isLit) segmentColor(i) else LedOff
-                val x = i * (segWidth + gap)
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(x, 0f),
-                    size = Size(segWidth, h),
-                    cornerRadius = CornerRadius(1f)
-                )
-            }
-        }
+        MeterBar(litSegments = litSegments, barHeight = barHeight, modifier = Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun DbScaleLabels() {
-    val labels = listOf("-45", "-30", "-20", "-10", "-6", "-3", "0", "+3")
-    Row(
-        modifier = Modifier
+private fun MeterBar(
+    litSegments: Int,
+    barHeight: Dp,
+    modifier: Modifier = Modifier
+) {
+    Canvas(
+        modifier = modifier
             .fillMaxWidth()
-            .padding(start = 14.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+            .height(barHeight)
     ) {
-        labels.forEach { db ->
-            Text(
-                text = db,
-                color = TextTertiary,
-                fontSize = 7.sp,
-                fontFamily = FontFamily.Monospace
+        val w = size.width
+        val h = size.height
+        val gap = 1f
+        val segWidth = (w - gap * (TOTAL_SEGMENTS - 1)) / TOTAL_SEGMENTS
+
+        for (i in 0 until TOTAL_SEGMENTS) {
+            val isLit = i < litSegments
+            val color = if (isLit) segmentColor(i) else LedOff
+            val x = i * (segWidth + gap)
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, 0f),
+                size = Size(segWidth, h),
+                cornerRadius = CornerRadius(1f)
             )
         }
     }

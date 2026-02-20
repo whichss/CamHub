@@ -71,6 +71,32 @@ object CameraValueMapper {
     }
 
     /**
+     * Generate discrete zoom steps from [minZoom] to [maxZoom] in 0.5x increments.
+     */
+    fun generateZoomSteps(minZoom: Float, maxZoom: Float): List<String> {
+        if (maxZoom <= minZoom) return listOf("${minZoom}x")
+        val steps = mutableListOf<String>()
+        var z = minZoom
+        while (z <= maxZoom + 0.01f) {
+            steps.add(String.format("%.1fx", z))
+            z += 0.5f
+        }
+        // Ensure max is included if it doesn't land on a 0.5 boundary
+        val lastStep = String.format("%.1fx", maxZoom)
+        if (steps.last() != lastStep) {
+            steps.add(lastStep)
+        }
+        return steps
+    }
+
+    /**
+     * Parse zoom step string like "2.5x" to float value.
+     */
+    fun zoomStepToFloat(step: String): Float {
+        return step.removeSuffix("x").toFloatOrNull() ?: 1f
+    }
+
+    /**
      * Format elapsed recording time in milliseconds to broadcast timecode HH:MM:SS:FF at given fps.
      */
     fun formatTimecode(elapsedMs: Long, fps: Int = 30): String {

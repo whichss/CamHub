@@ -23,7 +23,6 @@ import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
-import androidx.camera.core.SurfaceRequest
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
@@ -80,7 +79,15 @@ class CameraController @Inject constructor(
         private set
 
     private var currentCameraSurface: Surface? = null
+    private var currentSurfaceResolution: Size? = null
+    private var currentSensorOrientation: Int = 90
     var onRotationChanged: ((Int) -> Unit)? = null
+    /**
+     * Callback with device rotation degrees for GL renderer.
+     * The SurfaceTexture's getTransformMatrix() already handles sensor orientation,
+     * so we only pass the device rotation to compensate for orientation changes.
+     */
+    var onPreviewTransformChanged: ((Int) -> Unit)? = null
 
     @androidx.camera.camera2.interop.ExperimentalCamera2Interop
     fun bindCameraWithSurface(
@@ -90,6 +97,7 @@ class CameraController @Inject constructor(
     ) {
         currentLifecycleOwner = lifecycleOwner
         currentCameraSurface = cameraSurface
+        currentSurfaceResolution = resolution
         currentPreviewView = null
 
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -102,6 +110,10 @@ class CameraController @Inject constructor(
                 val provider = providerFuture.get()
                 cameraProvider = provider
 
+                // Use actual display rotation so CameraX selects correct resolution
+                val display = (context as? android.app.Activity)?.windowManager?.defaultDisplay
+                val actualDisplayRotation = display?.rotation ?: Surface.ROTATION_0
+
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
@@ -110,6 +122,7 @@ class CameraController @Inject constructor(
                     .build()
 
                 val preview = Preview.Builder()
+                    .setTargetRotation(actualDisplayRotation)
                     .setResolutionSelector(resolutionSelector)
                     .build().also { prev ->
                         prev.surfaceProvider = Preview.SurfaceProvider { request ->
@@ -125,13 +138,17 @@ class CameraController @Inject constructor(
                 orientationListener = object : OrientationEventListener(context) {
                     override fun onOrientationChanged(orientation: Int) {
                         if (orientation == ORIENTATION_UNKNOWN) return
-                        val rotation = when {
-                            orientation < 45 || orientation >= 315 -> 0
-                            orientation < 135 -> 270
-                            orientation < 225 -> 180
-                            else -> 90
+                        val surfaceRotation = when {
+                            orientation < 45 || orientation >= 315 -> Surface.ROTATION_0
+                            orientation < 135 -> Surface.ROTATION_270
+                            orientation < 225 -> Surface.ROTATION_180
+                            else -> Surface.ROTATION_90
                         }
-                        onRotationChanged?.invoke(rotation)
+                        currentPreview?.targetRotation = surfaceRotation
+                        // SurfaceTexture's getTransformMatrix() already handles sensor orientation.
+                        // Only pass device rotation so GL renderer compensates for orientation changes.
+                        onPreviewTransformChanged?.invoke(surfaceRotationToDegrees(surfaceRotation))
+                        onRotationChanged?.invoke(orientation)
                     }
                 }.also { it.enable() }
 
@@ -178,6 +195,14 @@ class CameraController @Inject constructor(
 
                     // Enable continuous AF by default
                     enableContinuousAf()
+
+                    // Store sensor orientation for reference
+                    currentSensorOrientation = camera2Info.getCameraCharacteristic(
+                        CameraCharacteristics.SENSOR_ORIENTATION
+                    ) ?: 90
+                    // SurfaceTexture's getTransformMatrix() handles sensor orientation.
+                    // Only pass device rotation for orientation change compensation.
+                    onPreviewTransformChanged?.invoke(surfaceRotationToDegrees(actualDisplayRotation))
 
                     _hardwareState.value = CameraHardwareState(
                         isBound = true,
@@ -321,11 +346,15 @@ class CameraController @Inject constructor(
         } else {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
-        // Rebind with new selector
-        val lifecycle = currentLifecycleOwner
+        // Rebind with new selector — handle both PreviewView and Surface modes
+        val lifecycle = currentLifecycleOwner ?: return
         val preview = currentPreviewView
-        if (lifecycle != null && preview != null) {
+        val surface = currentCameraSurface
+        val resolution = currentSurfaceResolution
+        if (preview != null) {
             bindCamera(lifecycle, preview)
+        } else if (surface != null && resolution != null) {
+            bindCameraWithSurface(lifecycle, surface, resolution)
         }
     }
 
@@ -335,6 +364,7 @@ class CameraController @Inject constructor(
         stopRecording()
         onFrameCallback = null
         onRotationChanged = null
+        onPreviewTransformChanged = null
         orientationListener?.disable()
         orientationListener = null
         try { cameraProvider?.unbindAll() } catch (_: Exception) {}
@@ -344,6 +374,7 @@ class CameraController @Inject constructor(
         currentPreview = null
         currentPreviewView = null
         currentCameraSurface = null
+        currentSurfaceResolution = null
         currentLifecycleOwner = null
         lastManualIso = null
         lastManualShutterNanos = null
@@ -493,4 +524,13 @@ class CameraController @Inject constructor(
 
     fun getCurrentZoomRatio(): Float =
         camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
+
+    private fun surfaceRotationToDegrees(rotation: Int): Int = when (rotation) {
+        Surface.ROTATION_0 -> 0
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
+    }
+
 }
