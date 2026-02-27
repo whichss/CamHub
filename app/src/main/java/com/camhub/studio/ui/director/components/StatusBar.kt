@@ -9,16 +9,20 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.NetworkCheck
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
@@ -41,6 +45,10 @@ import com.camhub.studio.ui.theme.CyanAccent
 import com.camhub.studio.ui.theme.ElectricRed
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
 import com.camhub.studio.ui.theme.NeonGreen
+import com.camhub.studio.ui.theme.LedGreen
+import com.camhub.studio.ui.theme.LedRed
+import com.camhub.studio.ui.theme.LedYellow
+import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.SurfaceLight
 import com.camhub.studio.ui.theme.TextPrimary
 import com.camhub.studio.ui.theme.TextSecondary
@@ -85,7 +93,10 @@ fun StatusBar(
     isPaused: Boolean,
     wifiStrength: Int,
     batteryPercent: Int,
+    audioMasterLevel: Float = 0f,
+    connectedCameraCount: Int = 0,
     onNavigateToSettings: (() -> Unit)? = null,
+    onToggleDeviceManager: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Blinking animation for recording indicator
@@ -183,6 +194,21 @@ fun StatusBar(
             )
         }
 
+        // Audio meter (compact)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(
+                text = "AU",
+                color = TextTertiary,
+                fontSize = 8.sp,
+                fontFamily = JetBrainsMonoFamily,
+                fontWeight = FontWeight.Bold
+            )
+            MiniAudioMeter(level = audioMasterLevel)
+        }
+
         // Right section: WiFi + Battery
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -222,6 +248,25 @@ fun StatusBar(
                 )
             }
 
+            // Devices button
+            if (onToggleDeviceManager != null) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(SurfaceLight.copy(alpha = 0.6f))
+                        .clickable(onClick = onToggleDeviceManager),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Devices,
+                        contentDescription = "Devices",
+                        tint = if (connectedCameraCount > 0) CyanAccent else TextSecondary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+
             // Settings button (if callback provided)
             if (onNavigateToSettings != null) {
                 Box(
@@ -240,6 +285,36 @@ fun StatusBar(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MiniAudioMeter(
+    level: Float,
+    modifier: Modifier = Modifier
+) {
+    val segments = 10
+    val filledSegments = (level * segments).toInt().coerceIn(0, segments)
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(1.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(segments) { i ->
+            val isActive = i < filledSegments
+            val color = when {
+                i >= 8 -> if (isActive) LedRed else SurfaceDark
+                i >= 6 -> if (isActive) LedYellow else SurfaceDark
+                else -> if (isActive) LedGreen else SurfaceDark
+            }
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(10.dp)
+                    .background(color, RoundedCornerShape(1.dp))
+            )
         }
     }
 }

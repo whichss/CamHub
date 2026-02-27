@@ -40,6 +40,7 @@ import com.camhub.studio.ui.audio.components.ChannelStrip
 import com.camhub.studio.ui.audio.components.MasterStrip
 import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.GlassBorder
+import com.camhub.studio.ui.theme.JetBrainsMonoFamily
 import com.camhub.studio.ui.theme.SpaceGroteskFamily
 import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.SurfaceLight
@@ -109,13 +110,27 @@ fun AudioMixerPanel(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Audio Mixer",
-                    color = TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = SpaceGroteskFamily
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "AUDIO MIXER",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = JetBrainsMonoFamily,
+                        letterSpacing = 1.sp
+                    )
+                    if (uiState.channels.isNotEmpty()) {
+                        Text(
+                            text = "${uiState.channels.size}ch",
+                            color = TextTertiary,
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFamily
+                        )
+                    }
+                }
                 IconButton(
                     onClick = onDismiss,
                     modifier = Modifier
@@ -162,7 +177,7 @@ fun AudioMixerPanel(
                     Box(
                         modifier = Modifier
                             .width(1.dp)
-                            .height(280.dp)
+                            .height(300.dp)
                             .background(GlassBorder)
                     )
                 }

@@ -57,6 +57,9 @@ class CameraGlRenderer {
     private var renderHeight = 0
     private var viewfinderWidth = 0
     private var viewfinderHeight = 0
+    private var bufferWidth = 0
+    private var bufferHeight = 0
+    private var useCenterCrop = false
 
     var cameraSurface: Surface? = null
         private set
@@ -71,7 +74,10 @@ class CameraGlRenderer {
         viewfinderSurface: Surface,
         encoderSurface: Surface,
         vfWidth: Int = width,
-        vfHeight: Int = height
+        vfHeight: Int = height,
+        bufW: Int = width,
+        bufH: Int = height,
+        centerCrop: Boolean = false
     ) {
         val thread = HandlerThread("CameraGL").also { it.start() }
         glThread = thread
@@ -100,15 +106,17 @@ class CameraGlRenderer {
                     .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD_COORDS).also { it.position(0) }
                 texCoordBuffer = ByteBuffer.allocateDirect(TEX_COORDS.size * 4)
                     .order(ByteOrder.nativeOrder()).asFloatBuffer().put(TEX_COORDS).also { it.position(0) }
-
                 renderWidth = width
                 renderHeight = height
                 viewfinderWidth = vfWidth
                 viewfinderHeight = vfHeight
+                bufferWidth = bufW
+                bufferHeight = bufH
+                useCenterCrop = centerCrop
 
                 oesTexId = EglHelper.createTexture()
                 val st = SurfaceTexture(oesTexId)
-                st.setDefaultBufferSize(width, height)
+                st.setDefaultBufferSize(bufW, bufH)
                 surfaceTexture = st
                 cameraSurface = Surface(st)
 
@@ -157,23 +165,26 @@ class CameraGlRenderer {
                 System.arraycopy(combined, 0, texMatrix, 0, 16)
             }
 
-            // Draw to viewfinder with aspect-ratio-preserving viewport
+            // Draw to viewfinder
             egl.makeCurrent(vfSurface)
-            // Clear full surface with black
             GLES20.glViewport(0, 0, viewfinderWidth, viewfinderHeight)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            // Calculate letterboxed viewport based on content orientation
-            val vp = calculateViewport(viewfinderWidth, viewfinderHeight)
+            val vp = if (useCenterCrop) calculateCropViewport(viewfinderWidth, viewfinderHeight)
+                     else calculateViewport(viewfinderWidth, viewfinderHeight)
             GLES20.glViewport(vp[0], vp[1], vp[2], vp[3])
             drawQuad()
             egl.swapBuffers(vfSurface)
 
-            // Draw to encoder (always full viewport, no letterboxing)
+            // Draw to encoder
             egl.makeCurrent(encSurface)
             GLES20.glViewport(0, 0, renderWidth, renderHeight)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            if (useCenterCrop) {
+                val encVp = calculateCropViewport(renderWidth, renderHeight)
+                GLES20.glViewport(encVp[0], encVp[1], encVp[2], encVp[3])
+            }
             drawQuad()
             egl.swapBuffers(encSurface)
 
@@ -199,9 +210,9 @@ class CameraGlRenderer {
 
         // Determine the effective content aspect ratio (width/height)
         val contentAspect = if (isContentRotated) {
-            renderHeight.toFloat() / renderWidth.toFloat()
+            bufferHeight.toFloat() / bufferWidth.toFloat()
         } else {
-            renderWidth.toFloat() / renderHeight.toFloat()
+            bufferWidth.toFloat() / bufferHeight.toFloat()
         }
 
         val viewAspect = surfaceW.toFloat() / surfaceH.toFloat()
@@ -221,6 +232,39 @@ class CameraGlRenderer {
             val fitH = (surfaceW / contentAspect).toInt()
             val offsetY = (surfaceH - fitH) / 2
             intArrayOf(0, offsetY, surfaceW, fitH)
+        }
+    }
+
+    /**
+     * Calculate center-crop viewport that fills the target surface.
+     * Content is scaled to fill (not fit), cropping overflow.
+     */
+    private fun calculateCropViewport(surfaceW: Int, surfaceH: Int): IntArray {
+        val isContentRotated = kotlin.math.abs(texMatrix[0]) < 0.3f &&
+                kotlin.math.abs(texMatrix[5]) < 0.3f
+
+        val contentAspect = if (isContentRotated) {
+            bufferHeight.toFloat() / bufferWidth.toFloat()
+        } else {
+            bufferWidth.toFloat() / bufferHeight.toFloat()
+        }
+
+        val viewAspect = surfaceW.toFloat() / surfaceH.toFloat()
+
+        if (kotlin.math.abs(contentAspect - viewAspect) < 0.05f) {
+            return intArrayOf(0, 0, surfaceW, surfaceH)
+        }
+
+        return if (contentAspect < viewAspect) {
+            // Content narrower than viewport → fill width, crop top/bottom
+            val fitH = (surfaceW / contentAspect).toInt()
+            val offsetY = (surfaceH - fitH) / 2
+            intArrayOf(0, offsetY, surfaceW, fitH)
+        } else {
+            // Content wider than viewport → fill height, crop left/right
+            val fitW = (surfaceH * contentAspect).toInt()
+            val offsetX = (surfaceW - fitW) / 2
+            intArrayOf(offsetX, 0, fitW, surfaceH)
         }
     }
 

@@ -31,6 +31,11 @@ data class SettingsUiState(
     val screenTimeoutMinutes: Int = 10,
     val isNavigationLocked: Boolean = false,
 
+    // Streaming quality
+    val streamFps: Int = 30,
+    val streamMaxResolution: Int = 1080,
+    val streamBitrateMbps: Int = 4,
+
     // Bottom bar
     val droppedFrames: Int = 0
 )

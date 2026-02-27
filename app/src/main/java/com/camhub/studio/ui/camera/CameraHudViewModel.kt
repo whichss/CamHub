@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.os.Build
 import com.camhub.studio.data.DeviceMonitor
+import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.audio.AudioCaptureService
 import com.camhub.studio.data.camera.CameraController
 import com.camhub.studio.data.camera.CameraValueMapper
@@ -36,7 +37,8 @@ class CameraHudViewModel @Inject constructor(
     private val streamServer: StreamServer,
     private val connectionManager: PeerConnectionManager,
     private val deviceMonitor: DeviceMonitor,
-    private val audioCaptureService: AudioCaptureService
+    private val audioCaptureService: AudioCaptureService,
+    private val streamingConfig: StreamingConfig
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -47,7 +49,10 @@ class CameraHudViewModel @Inject constructor(
             lens = LensInfo(),
             shutterValues = CameraValueMapper.generateShutterSpeeds(),
             selectedShutterIndex = 0,
-            audioLevels = listOf(0f, 0f)
+            audioLevels = listOf(0f, 0f),
+            streamFps = streamingConfig.fps,
+            streamMaxResolution = streamingConfig.maxResolution,
+            streamBitrateMbps = streamingConfig.bitrateMbps
         )
     )
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
@@ -68,6 +73,16 @@ class CameraHudViewModel @Inject constructor(
                 "set_focus" -> {
                     val idx = _uiState.value.focusDistances.indexOf(msg.stringValue)
                     if (idx >= 0) updateFocus(idx)
+                }
+                "start_recording" -> {
+                    if (!cameraController.hardwareState.value.isRecording) {
+                        cameraController.startRecording(filePrefix = msg.stringValue)
+                    }
+                }
+                "stop_recording" -> {
+                    if (cameraController.hardwareState.value.isRecording) {
+                        cameraController.stopRecording()
+                    }
                 }
             }
             _uiState.update { it.copy(isRemoteOverride = true) }
@@ -176,26 +191,42 @@ class CameraHudViewModel @Inject constructor(
     private var usingSurfaceMode = false
 
     @ExperimentalCamera2Interop
-    fun onViewfinderSurfaceReady(lifecycleOwner: LifecycleOwner, viewfinderSurface: Surface, size: Size) {
+    fun onViewfinderSurfaceReady(lifecycleOwner: LifecycleOwner, viewfinderSurface: Surface, size: Size, isDevicePortrait: Boolean = false) {
         try {
             val viewW = size.width
             val viewH = size.height
 
             // Force 16:9 encode resolution, aligned to 16 for H.264 encoder compatibility
+            val maxRes = streamingConfig.maxResolution
             val encW: Int
             val encH: Int
             if (viewW >= viewH) {
-                // Landscape: 16:9
-                encH = (minOf(viewH, 1080) / 16) * 16
+                // Landscape (or portrait 16:9 view): 16:9
+                encH = (minOf(viewH, maxRes) / 16) * 16
                 encW = (encH * 16 / 9 + 15) / 16 * 16
             } else {
                 // Portrait: 9:16
-                encW = (minOf(viewW, 1080) / 16) * 16
+                encW = (minOf(viewW, maxRes) / 16) * 16
                 encH = (encW * 16 / 9 + 15) / 16 * 16
             }
 
+            // Portrait 16:9 mode: use portrait camera buffer for consistent
+            // texMatrix with 9:16 mode (prevents content inversion)
+            val isPortrait16x9 = isDevicePortrait && viewW >= viewH
+            val bufW: Int
+            val bufH: Int
+            if (isPortrait16x9) {
+                bufW = (minOf(viewW, maxRes) / 16) * 16
+                bufH = (bufW * 16 / 9 + 15) / 16 * 16
+            } else {
+                bufW = encW
+                bufH = encH
+            }
+
             // 1. Start Surface-mode encoder at 16:9
-            val encoder = H264Encoder(encW, encH, frameRate = 30)
+            val fps = streamingConfig.fps
+            val bitrate = streamingConfig.bitrateBytes
+            val encoder = H264Encoder(encW, encH, bitrate = bitrate, frameRate = fps)
             if (!encoder.startSurface()) {
                 Log.w(TAG, "Surface encoder failed, falling back to buffer mode")
                 encoder.release()
@@ -214,10 +245,14 @@ class CameraHudViewModel @Inject constructor(
             // 2. Start GL renderer: camera buffer at 16:9 → [viewfinder, encoder]
             //    Viewfinder uses actual surface dimensions; encoder uses 16-aligned dims
             val glRenderer = CameraGlRenderer()
-            glRenderer.start(encW, encH, viewfinderSurface, encoderInputSurface, viewW, viewH)
+            glRenderer.start(encW, encH, viewfinderSurface, encoderInputSurface, viewW, viewH, bufW, bufH, isDevicePortrait)
 
-            // Wait briefly for GL thread to create cameraSurface
-            Thread.sleep(100)
+            // Wait for GL thread to create cameraSurface (poll instead of fixed sleep)
+            var waitMs = 0
+            while (glRenderer.cameraSurface == null && waitMs < 200) {
+                Thread.sleep(5)
+                waitMs += 5
+            }
 
             val cameraSurface = glRenderer.cameraSurface
             if (cameraSurface == null) {
@@ -242,16 +277,11 @@ class CameraHudViewModel @Inject constructor(
                 }
             }
 
-            // 4. CameraX TransformationInfo callback → GL renderer rotation
-            // CameraX tells us exactly how many degrees to rotate the raw sensor output
-            // to get the correct orientation for the current display rotation.
-            cameraController.onPreviewTransformChanged = { degrees ->
-                glRenderer.updateRotation(degrees)
-            }
-
-            // 5. Bind CameraX to GL renderer's surface
+            // 4. Bind CameraX to GL renderer's surface
+            // SurfaceTexture.getTransformMatrix() already includes sensor→display rotation,
+            // so no additional rotation is needed from TransformationInfo.
             // Don't hardcode targetRotation — CameraController uses actual display rotation
-            cameraController.bindCameraWithSurface(lifecycleOwner, cameraSurface, Size(encW, encH))
+            cameraController.bindCameraWithSurface(lifecycleOwner, cameraSurface, Size(bufW, bufH))
 
             cameraGlRenderer = glRenderer
             surfaceEncoder = encoder
@@ -382,6 +412,25 @@ class CameraHudViewModel @Inject constructor(
             delay(1500)
             _uiState.update { it.copy(focusPointX = null, focusPointY = null) }
         }
+    }
+
+    fun toggleSettingsPanel() {
+        _uiState.update { it.copy(showSettingsPanel = !it.showSettingsPanel) }
+    }
+
+    fun updateStreamFps(fps: Int) {
+        streamingConfig.fps = fps
+        _uiState.update { it.copy(streamFps = fps) }
+    }
+
+    fun updateStreamResolution(resolution: Int) {
+        streamingConfig.maxResolution = resolution
+        _uiState.update { it.copy(streamMaxResolution = resolution) }
+    }
+
+    fun updateStreamBitrate(mbps: Int) {
+        streamingConfig.bitrateMbps = mbps
+        _uiState.update { it.copy(streamBitrateMbps = mbps) }
     }
 
     fun togglePreviewAspect() {

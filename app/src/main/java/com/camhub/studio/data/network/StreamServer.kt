@@ -1,13 +1,9 @@
 package com.camhub.studio.data.network
 
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.util.Log
 import androidx.camera.core.ImageProxy
 import io.github.thibaultbee.srtdroid.core.models.SrtSocket
 import kotlinx.coroutines.*
-import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -24,16 +20,12 @@ class StreamServer @Inject constructor() {
     companion object {
         private const val TAG = "StreamServer"
         private const val MAX_CLIENTS = 4
-        private const val META_HEADER_V1: Byte = 1
-        private const val META_HEADER_V1_SIZE = 6
         private const val META_HEADER_V2: Byte = 2
         private const val META_HEADER_V2_SIZE = 7
         private const val FLAG_KEYFRAME: Byte = 0x01
         private const val FLAG_CODEC_CONFIG: Byte = 0x02
-        private const val H264_WARMUP_FRAMES = 90 // ~4 sec at 24fps before giving up
     }
 
-    var jpegQuality: Int = 70
     private var lastFrameTimeMs: Long = 0
     private val maxFps: Int = 30
 
@@ -49,11 +41,8 @@ class StreamServer @Inject constructor() {
 
     private var encoder: H264Encoder? = null
     private var useH264 = false
-    private var h264Failed = false // permanently disabled after too many failures
     private var encoderWidth = 0
     private var encoderHeight = 0
-    private var h264InputCount = 0
-    private var h264OutputCount = 0
 
     // --- Polymorphic client connection (SRT / TCP) ---
 
@@ -210,29 +199,7 @@ class StreamServer @Inject constructor() {
             val rotation = imageProxy.imageInfo.rotationDegrees
             val width = imageProxy.width
             val height = imageProxy.height
-
-            // Try H.264 if not permanently failed
-            var h264Sent = false
-            if (!h264Failed) {
-                try {
-                    h264Sent = tryH264Frame(imageProxy, width, height, rotation)
-                } catch (e: Exception) {
-                    Log.e(TAG, "H264 encoding error, falling back to JPEG", e)
-                }
-            }
-
-            // JPEG fallback: always send if H.264 produced nothing
-            if (!h264Sent) {
-                try {
-                    val jpegBytes = imageProxyToJpeg(imageProxy)
-                    if (jpegBytes != null) {
-                        val payload = buildJpegPayload(jpegBytes, width, height, rotation)
-                        broadcastFrame(payload)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "JPEG encoding error", e)
-                }
-            }
+            tryH264Frame(imageProxy, width, height, rotation)
         } catch (e: Exception) {
             Log.e(TAG, "Frame processing error", e)
         } finally {
@@ -246,8 +213,6 @@ class StreamServer @Inject constructor() {
             encoder?.release()
             encoder = null
             useH264 = false
-            h264InputCount = 0
-            h264OutputCount = 0
 
             val newEncoder = H264Encoder(width, height, frameRate = maxFps)
             if (newEncoder.start()) {
@@ -257,8 +222,7 @@ class StreamServer @Inject constructor() {
                 encoderHeight = height
                 Log.d(TAG, "H.264 encoder initialized: ${width}x${height}")
             } else {
-                Log.w(TAG, "H.264 encoder failed to start, using JPEG only")
-                h264Failed = true
+                Log.w(TAG, "H.264 encoder failed to start")
                 return false
             }
         }
@@ -269,27 +233,15 @@ class StreamServer @Inject constructor() {
         val nv12 = imageProxyToNv12(imageProxy) ?: return false
         val pts = System.nanoTime() / 1000
         val frames = enc.encode(nv12, pts)
-        h264InputCount++
 
-        if (frames.isEmpty()) {
-            // Check if encoder is permanently failing
-            if (h264InputCount > H264_WARMUP_FRAMES && h264OutputCount == 0) {
-                Log.w(TAG, "H.264 encoder produced no output after $h264InputCount frames, disabling")
-                h264Failed = true
-                encoder?.release()
-                encoder = null
-                useH264 = false
-            }
-            return false // caller will send JPEG
-        }
+        if (frames.isEmpty()) return false
 
-        // H.264 produced output — broadcast it
+        // Broadcast encoded frames
         var sentData = false
         for (frame in frames) {
             if (frame.isConfig) {
                 sendConfigToNewClients(frame.data, width, height, rotation)
             } else {
-                h264OutputCount++
                 val payload = buildH264Payload(frame.data, width, height, rotation, frame.isKeyFrame, false)
                 broadcastFrame(payload, frame.isKeyFrame)
                 sentData = true
@@ -355,18 +307,6 @@ class StreamServer @Inject constructor() {
         return header.array() + data
     }
 
-    private fun buildJpegPayload(jpeg: ByteArray, width: Int, height: Int, rotationDegrees: Int): ByteArray {
-        val rotationCode: Byte = when (rotationDegrees) {
-            90 -> 1; 180 -> 2; 270 -> 3; else -> 0
-        }
-        val header = ByteBuffer.allocate(META_HEADER_V1_SIZE)
-        header.put(META_HEADER_V1)
-        header.putShort(width.toShort())
-        header.putShort(height.toShort())
-        header.put(rotationCode)
-        return header.array() + jpeg
-    }
-
     private fun imageProxyToNv12(imageProxy: ImageProxy): ByteArray? {
         val width = imageProxy.width
         val height = imageProxy.height
@@ -404,53 +344,6 @@ class StreamServer @Inject constructor() {
         }
 
         return nv12
-    }
-
-    private fun imageProxyToJpeg(imageProxy: ImageProxy): ByteArray? {
-        val width = imageProxy.width
-        val height = imageProxy.height
-        val yPlane = imageProxy.planes[0]
-        val uPlane = imageProxy.planes[1]
-        val vPlane = imageProxy.planes[2]
-
-        val yBuffer = yPlane.buffer
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-
-        val yRowStride = yPlane.rowStride
-        val uvRowStride = uPlane.rowStride
-        val uvPixelStride = uPlane.pixelStride
-
-        val nv21 = ByteArray(width * height * 3 / 2)
-
-        var pos = 0
-        for (row in 0 until height) {
-            yBuffer.position(row * yRowStride)
-            yBuffer.get(nv21, pos, width)
-            pos += width
-        }
-
-        val uvHeight = height / 2
-        if (uvPixelStride == 2) {
-            for (row in 0 until uvHeight) {
-                vBuffer.position(row * uvRowStride)
-                vBuffer.get(nv21, pos, Math.min(width, vBuffer.remaining()))
-                pos += width
-            }
-        } else {
-            for (row in 0 until uvHeight) {
-                for (col in 0 until width / 2) {
-                    val uvIdx = row * uvRowStride + col * uvPixelStride
-                    nv21[pos++] = vBuffer.get(uvIdx)
-                    nv21[pos++] = uBuffer.get(uvIdx)
-                }
-            }
-        }
-
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, width, height), jpegQuality, out)
-        return out.toByteArray()
     }
 
     private val broadcastPool = Executors.newCachedThreadPool()
@@ -544,11 +437,8 @@ class StreamServer @Inject constructor() {
         encoder?.release()
         encoder = null
         useH264 = false
-        h264Failed = false
         encoderWidth = 0
         encoderHeight = 0
-        h264InputCount = 0
-        h264OutputCount = 0
     }
 
     fun cleanup() {

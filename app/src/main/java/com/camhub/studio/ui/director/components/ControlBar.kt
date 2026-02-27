@@ -40,6 +40,7 @@ import com.camhub.studio.ui.theme.ElectricRed
 import com.camhub.studio.ui.theme.GlassBorder
 import com.camhub.studio.ui.theme.GlassSurface
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
+import com.camhub.studio.ui.theme.AmberYellow
 import com.camhub.studio.ui.theme.NeonGreen
 import com.camhub.studio.ui.theme.Primary
 import com.camhub.studio.ui.theme.SurfaceDark
@@ -150,6 +151,7 @@ fun ControlBar(
     isPaused: Boolean,
     selectedTransition: TransitionType,
     isVertical: Boolean = false,
+    autoRecordCameras: Boolean = false,
     onRecord: () -> Unit,
     onStop: () -> Unit,
     onPause: () -> Unit,
@@ -158,6 +160,7 @@ fun ControlBar(
     onAuto: () -> Unit,
     onSelectTransition: (TransitionType) -> Unit,
     onToggleAudioMixer: () -> Unit,
+    onToggleAutoRecord: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (isVertical) {
@@ -165,6 +168,7 @@ fun ControlBar(
             isRecording = isRecording,
             isPaused = isPaused,
             selectedTransition = selectedTransition,
+            autoRecordCameras = autoRecordCameras,
             onRecord = onRecord,
             onStop = onStop,
             onPause = onPause,
@@ -173,6 +177,7 @@ fun ControlBar(
             onAuto = onAuto,
             onSelectTransition = onSelectTransition,
             onToggleAudioMixer = onToggleAudioMixer,
+            onToggleAutoRecord = onToggleAutoRecord,
             modifier = modifier
         )
     } else {
@@ -180,6 +185,7 @@ fun ControlBar(
             isRecording = isRecording,
             isPaused = isPaused,
             selectedTransition = selectedTransition,
+            autoRecordCameras = autoRecordCameras,
             onRecord = onRecord,
             onStop = onStop,
             onPause = onPause,
@@ -188,6 +194,7 @@ fun ControlBar(
             onAuto = onAuto,
             onSelectTransition = onSelectTransition,
             onToggleAudioMixer = onToggleAudioMixer,
+            onToggleAutoRecord = onToggleAutoRecord,
             modifier = modifier
         )
     }
@@ -198,6 +205,7 @@ private fun ControlBarHorizontal(
     isRecording: Boolean,
     isPaused: Boolean,
     selectedTransition: TransitionType,
+    autoRecordCameras: Boolean = false,
     onRecord: () -> Unit,
     onStop: () -> Unit,
     onPause: () -> Unit,
@@ -206,6 +214,7 @@ private fun ControlBarHorizontal(
     onAuto: () -> Unit,
     onSelectTransition: (TransitionType) -> Unit,
     onToggleAudioMixer: () -> Unit,
+    onToggleAutoRecord: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -259,12 +268,6 @@ private fun ControlBarHorizontal(
 
         // Transition controls
         ControlButton(
-            label = "CUT",
-            backgroundColor = SurfaceLight,
-            textColor = TextPrimary,
-            onClick = onCut
-        )
-        ControlButton(
             label = "AUTO",
             backgroundColor = NeonGreen.copy(alpha = 0.2f),
             textColor = TextPrimary,
@@ -296,6 +299,14 @@ private fun ControlBarHorizontal(
                 modifier = Modifier.size(18.dp)
             )
         }
+
+        // Auto-record cameras toggle
+        ControlButton(
+            label = "CAM REC",
+            backgroundColor = if (autoRecordCameras) AmberYellow.copy(alpha = 0.2f) else GlassSurface,
+            textColor = if (autoRecordCameras) AmberYellow else TextTertiary,
+            onClick = onToggleAutoRecord
+        )
     }
 }
 
@@ -304,6 +315,7 @@ private fun ControlBarVertical(
     isRecording: Boolean,
     isPaused: Boolean,
     selectedTransition: TransitionType,
+    autoRecordCameras: Boolean = false,
     onRecord: () -> Unit,
     onStop: () -> Unit,
     onPause: () -> Unit,
@@ -312,6 +324,7 @@ private fun ControlBarVertical(
     onAuto: () -> Unit,
     onSelectTransition: (TransitionType) -> Unit,
     onToggleAudioMixer: () -> Unit,
+    onToggleAutoRecord: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -360,13 +373,7 @@ private fun ControlBarVertical(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // Transition buttons
-        ControlButton(
-            label = "CUT",
-            backgroundColor = SurfaceLight,
-            textColor = TextPrimary,
-            onClick = onCut
-        )
+        // Transition button
         ControlButton(
             label = "AUTO",
             backgroundColor = NeonGreen.copy(alpha = 0.2f),
@@ -403,5 +410,6 @@ private fun ControlBarVertical(
                 modifier = Modifier.size(18.dp)
             )
         }
+
     }
 }

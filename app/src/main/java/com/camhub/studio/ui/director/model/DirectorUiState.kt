@@ -1,6 +1,7 @@
 package com.camhub.studio.ui.director.model
 
 import androidx.compose.ui.graphics.ImageBitmap
+import com.camhub.studio.data.network.DiscoveredPeer
 
 data class DirectorUiState(
     val bitrateKbps: Int = 0,
@@ -24,7 +25,11 @@ data class DirectorUiState(
     val transitionProgress: Float = 0f,
     val isTransitioning: Boolean = false,
     val showCameraControl: Boolean = false,
-    val controlCameraIndex: Int = -1
+    val controlCameraIndex: Int = -1,
+    val audioMasterLevel: Float = 0f,
+    val autoRecordCameras: Boolean = false,
+    val showDeviceManager: Boolean = false,
+    val discoveredPeers: List<DiscoveredPeer> = emptyList()
 )
 
 data class CameraNode(
@@ -39,7 +44,8 @@ data class CameraNode(
     val previewBitmap: ImageBitmap? = null,
     val frameWidth: Int = 0,
     val frameHeight: Int = 0,
-    val bitrateKbps: Int = 0
+    val bitrateKbps: Int = 0,
+    val isRecording: Boolean = false
 )
 
 enum class ConnectionStatus { LIVE, STANDBY, OFFLINE }

@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.camhub.studio.ui.components.DrumDial
 import com.camhub.studio.ui.theme.BackgroundDarker
+import com.camhub.studio.ui.theme.ElectricRed
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
 import com.camhub.studio.ui.theme.Primary
 import com.camhub.studio.ui.theme.SpaceGroteskFamily
@@ -55,6 +56,7 @@ private val zoomValues = listOf("1.0x", "1.5x", "2.0x", "2.5x", "3.0x", "3.5x", 
 @Composable
 fun CameraControlPanel(
     cameraName: String,
+    isRecording: Boolean = false,
     onDismiss: () -> Unit,
     onSendCommand: (command: String, value: Float, stringValue: String) -> Unit,
     modifier: Modifier = Modifier
@@ -171,6 +173,47 @@ fun CameraControlPanel(
                         onSendCommand("set_zoom", zoomVal, "")
                     }
                 )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // REC / STOP button
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isRecording) SurfaceLight else ElectricRed)
+                    .clickable {
+                        if (isRecording) {
+                            onSendCommand("stop_recording", 0f, "")
+                        } else {
+                            onSendCommand("start_recording", 0f, "")
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (!isRecording) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(TextPrimary)
+                        )
+                    }
+                    Text(
+                        text = if (isRecording) "STOP REC" else "REC",
+                        color = TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = JetBrainsMonoFamily,
+                        letterSpacing = 1.sp
+                    )
+                }
             }
         }
     }

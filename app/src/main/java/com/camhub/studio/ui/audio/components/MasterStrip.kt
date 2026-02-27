@@ -1,11 +1,11 @@
 package com.camhub.studio.ui.audio.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -21,25 +21,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.camhub.studio.ui.theme.AmberYellow
+import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.ElectricRed
-import com.camhub.studio.ui.theme.GlassBorder
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
-import com.camhub.studio.ui.theme.Primary
 import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.SurfaceLight
 import com.camhub.studio.ui.theme.TextPrimary
-import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
 
 /**
- * Master fader strip with label, LED meter, fader slider, dB value, and MUTE button.
- *
- * @param level Normalized master audio level (0.0 - 1.0).
- * @param faderValue Master fader position (0.0 - 1.0).
- * @param dbValue Current decibel value for display.
- * @param isMuted Whether the master output is muted.
- * @param onFaderChange Callback when master fader position changes.
- * @param onToggleMute Callback when MUTE button is toggled.
+ * Master fader strip — professional console style with gold accent.
  */
 @Composable
 fun MasterStrip(
@@ -53,38 +44,56 @@ fun MasterStrip(
 ) {
     Column(
         modifier = modifier
-            .width(62.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .width(72.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(SurfaceDark)
-            .padding(vertical = 8.dp, horizontal = 4.dp),
+            .border(1.dp, AmberYellow.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+            .padding(vertical = 10.dp, horizontal = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // MST label
+        // MST label badge
         Box(
             modifier = Modifier
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(4.dp))
                 .background(AmberYellow.copy(alpha = 0.15f))
-                .padding(horizontal = 8.dp, vertical = 3.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = "MST",
                 color = AmberYellow,
-                fontSize = 9.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = JetBrainsMonoFamily,
-                letterSpacing = 1.sp
+                letterSpacing = 2.sp
             )
         }
-
-        Spacer(modifier = Modifier.height(2.dp))
 
         // LED Meter
         LedMeter(
             level = if (isMuted) 0f else level,
-            modifier = Modifier.height(64.dp)
+            modifier = Modifier.height(72.dp)
         )
+
+        // dB value in dark recessed display
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(3.dp))
+                .background(BackgroundDarker)
+                .padding(vertical = 3.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = formatMasterDb(dbValue),
+                color = if (isMuted) ElectricRed else TextPrimary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = JetBrainsMonoFamily
+            )
+        }
 
         // Fader
         FaderSlider(
@@ -95,29 +104,20 @@ fun MasterStrip(
             inactiveTrackColor = SurfaceLight
         )
 
-        // dB value
-        Text(
-            text = formatMasterDb(dbValue),
-            color = if (isMuted) ElectricRed else TextSecondary,
-            fontSize = 8.sp,
-            fontFamily = JetBrainsMonoFamily,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-
         // MUTE button
         Box(
             modifier = Modifier
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(4.dp))
                 .background(if (isMuted) ElectricRed else SurfaceLight)
                 .clickable(onClick = onToggleMute)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+                .padding(vertical = 5.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = "MUTE",
                 color = if (isMuted) TextPrimary else TextTertiary,
-                fontSize = 8.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = JetBrainsMonoFamily
             )
@@ -130,8 +130,8 @@ fun MasterStrip(
  */
 private fun formatMasterDb(db: Float): String {
     return when {
-        db <= -59f -> "-inf"
-        db >= 0f -> "+${String.format("%.1f", db)}"
-        else -> String.format("%.1f", db)
+        db <= -59f -> "-∞"
+        db >= 0f -> "+${String.format("%.0f", db)}"
+        else -> String.format("%.0f", db)
     }
 }

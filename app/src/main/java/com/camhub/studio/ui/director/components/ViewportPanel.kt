@@ -16,14 +16,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.camhub.studio.ui.director.model.TransitionType
 import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.ElectricRed
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
@@ -31,7 +35,6 @@ import com.camhub.studio.ui.theme.NeonGreen
 import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.TallyGreen
 import com.camhub.studio.ui.theme.TallyRed
-import com.camhub.studio.ui.theme.TextPrimary
 import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
 
@@ -66,6 +69,7 @@ fun TallyBorder(
 
 /**
  * A single viewport card showing a camera preview with tally border, label, camera name, and FPS.
+ * Supports transition overlay rendering for MIX, DIP, and WIPE effects.
  */
 @Composable
 fun ViewportCard(
@@ -76,7 +80,10 @@ fun ViewportCard(
     previewBitmap: ImageBitmap?,
     isPgm: Boolean,
     isPvw: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    transitionBitmap: ImageBitmap? = null,
+    transitionProgress: Float = 0f,
+    transitionType: TransitionType = TransitionType.CUT
 ) {
     TallyBorder(
         isPgm = isPgm,
@@ -122,34 +129,122 @@ fun ViewportCard(
                 }
             }
 
-            // Preview area — adapts aspect ratio to stream content
-            val bitmapAspect = if (previewBitmap != null) {
-                previewBitmap.width.toFloat() / previewBitmap.height.toFloat()
-            } else {
-                16f / 9f
-            }
+            // Preview area with fixed 16:9 aspect ratio
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(bitmapAspect)
-                    .background(BackgroundDarker),
+                    .aspectRatio(16f / 9f)
+                    .background(BackgroundDarker)
+                    .clipToBounds(),
                 contentAlignment = Alignment.Center
             ) {
-                if (previewBitmap != null) {
-                    Image(
-                        bitmap = previewBitmap,
-                        contentDescription = "$label preview",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit
-                    )
-                } else {
-                    Text(
-                        text = "NO SIGNAL",
-                        color = TextTertiary,
-                        fontSize = 10.sp,
-                        fontFamily = JetBrainsMonoFamily,
-                        letterSpacing = 2.sp
-                    )
+                val isTransitioning = transitionProgress > 0f && transitionBitmap != null
+
+                when {
+                    isTransitioning && transitionType == TransitionType.MIX -> {
+                        // MIX: Crossfade - old PGM fades out, PVW fades in
+                        if (previewBitmap != null) {
+                            Image(
+                                bitmap = previewBitmap,
+                                contentDescription = "$label preview",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .alpha(1f - transitionProgress),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        Image(
+                            bitmap = transitionBitmap!!,
+                            contentDescription = "$label transition",
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(transitionProgress),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                    isTransitioning && transitionType == TransitionType.DIP -> {
+                        // DIP: Fade to black (0-0.5) then fade in new source (0.5-1.0)
+                        if (transitionProgress <= 0.5f) {
+                            val fadeOut = 1f - (transitionProgress * 2f)
+                            if (previewBitmap != null) {
+                                Image(
+                                    bitmap = previewBitmap,
+                                    contentDescription = "$label preview",
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .alpha(fadeOut),
+                                    contentScale = ContentScale.Fit
+                                )
+                            }
+                        } else {
+                            val fadeIn = (transitionProgress - 0.5f) * 2f
+                            Image(
+                                bitmap = transitionBitmap!!,
+                                contentDescription = "$label transition",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .alpha(fadeIn),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                    }
+                    isTransitioning && transitionType == TransitionType.WIPE -> {
+                        // WIPE: PVW slides in from left over PGM
+                        if (previewBitmap != null) {
+                            Image(
+                                bitmap = previewBitmap,
+                                contentDescription = "$label preview",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        Image(
+                            bitmap = transitionBitmap!!,
+                            contentDescription = "$label transition",
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clipToBounds()
+                                .alpha(1f),
+                            contentScale = ContentScale.Fit,
+                            alignment = Alignment.CenterStart
+                        )
+                        // Black cover for the un-wiped portion
+                        val coverFraction = 1f - transitionProgress
+                        if (coverFraction > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(start = ((1f - coverFraction) * 1000).dp.coerceAtMost(1000.dp))
+                            ) {
+                                // Overlay PGM on right side
+                                if (previewBitmap != null) {
+                                    Image(
+                                        bitmap = previewBitmap,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Fit
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    previewBitmap != null -> {
+                        Image(
+                            bitmap = previewBitmap,
+                            contentDescription = "$label preview",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                    else -> {
+                        Text(
+                            text = "NO SIGNAL",
+                            color = TextTertiary,
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFamily,
+                            letterSpacing = 2.sp
+                        )
+                    }
                 }
             }
         }
@@ -158,14 +253,7 @@ fun ViewportCard(
 
 /**
  * PGM and PVW viewport cards displayed side by side (horizontal) or stacked (vertical).
- *
- * @param pgmCameraName Name of the camera on PGM.
- * @param pvwCameraName Name of the camera on PVW.
- * @param pgmFps Frames per second for PGM camera.
- * @param pvwFps Frames per second for PVW camera.
- * @param pgmBitmap Preview bitmap for PGM camera.
- * @param pvwBitmap Preview bitmap for PVW camera.
- * @param isVertical When true, cards are stacked vertically (landscape layout).
+ * During transitions, the PGM card renders the transition effect.
  */
 @Composable
 fun ViewportPanel(
@@ -176,6 +264,9 @@ fun ViewportPanel(
     pgmBitmap: ImageBitmap?,
     pvwBitmap: ImageBitmap?,
     isVertical: Boolean = false,
+    transitionProgress: Float = 0f,
+    isTransitioning: Boolean = false,
+    selectedTransition: TransitionType = TransitionType.CUT,
     modifier: Modifier = Modifier
 ) {
     if (isVertical) {
@@ -184,16 +275,6 @@ fun ViewportPanel(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             ViewportCard(
-                label = "PVW",
-                labelColor = NeonGreen,
-                cameraName = pvwCameraName,
-                fps = pvwFps,
-                previewBitmap = pvwBitmap,
-                isPgm = false,
-                isPvw = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            ViewportCard(
                 label = "PGM",
                 labelColor = ElectricRed,
                 cameraName = pgmCameraName,
@@ -201,6 +282,19 @@ fun ViewportPanel(
                 previewBitmap = pgmBitmap,
                 isPgm = true,
                 isPvw = false,
+                modifier = Modifier.fillMaxWidth(),
+                transitionBitmap = if (isTransitioning) pvwBitmap else null,
+                transitionProgress = if (isTransitioning) transitionProgress else 0f,
+                transitionType = selectedTransition
+            )
+            ViewportCard(
+                label = "PVW",
+                labelColor = NeonGreen,
+                cameraName = pvwCameraName,
+                fps = pvwFps,
+                previewBitmap = pvwBitmap,
+                isPgm = false,
+                isPvw = true,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -210,16 +304,6 @@ fun ViewportPanel(
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             ViewportCard(
-                label = "PVW",
-                labelColor = NeonGreen,
-                cameraName = pvwCameraName,
-                fps = pvwFps,
-                previewBitmap = pvwBitmap,
-                isPgm = false,
-                isPvw = true,
-                modifier = Modifier.weight(1f)
-            )
-            ViewportCard(
                 label = "PGM",
                 labelColor = ElectricRed,
                 cameraName = pgmCameraName,
@@ -227,6 +311,19 @@ fun ViewportPanel(
                 previewBitmap = pgmBitmap,
                 isPgm = true,
                 isPvw = false,
+                modifier = Modifier.weight(1f),
+                transitionBitmap = if (isTransitioning) pvwBitmap else null,
+                transitionProgress = if (isTransitioning) transitionProgress else 0f,
+                transitionType = selectedTransition
+            )
+            ViewportCard(
+                label = "PVW",
+                labelColor = NeonGreen,
+                cameraName = pvwCameraName,
+                fps = pvwFps,
+                previewBitmap = pvwBitmap,
+                isPgm = false,
+                isPvw = true,
                 modifier = Modifier.weight(1f)
             )
         }

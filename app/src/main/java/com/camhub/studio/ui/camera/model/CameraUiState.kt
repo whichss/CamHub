@@ -41,7 +41,12 @@ data class CameraUiState(
     val focusPointX: Float? = null,
     val focusPointY: Float? = null,
     // Portrait preview mode: true = 9:16 (tall), false = 16:9 (landscape strip)
-    val isPortraitFullPreview: Boolean = true
+    val isPortraitFullPreview: Boolean = true,
+    // Streaming quality settings panel
+    val showSettingsPanel: Boolean = false,
+    val streamFps: Int = 30,
+    val streamMaxResolution: Int = 1080,
+    val streamBitrateMbps: Int = 4
 )
 
 data class LensInfo(

@@ -1,7 +1,10 @@
 package com.camhub.studio.ui.settings
 
 import android.app.Activity
+import android.content.Intent
 import android.content.res.Configuration
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -40,6 +43,7 @@ import com.camhub.studio.ui.settings.components.RecordingSettings
 import com.camhub.studio.ui.settings.components.SettingsBottomBar
 import com.camhub.studio.ui.settings.components.SettingsSidebar
 import com.camhub.studio.ui.settings.components.SettingsTabBar
+import com.camhub.studio.ui.settings.components.StreamingSettings
 import com.camhub.studio.ui.settings.components.SystemSettings
 import com.camhub.studio.ui.theme.BackgroundDark
 import com.camhub.studio.ui.theme.BackgroundDarker
@@ -202,6 +206,17 @@ private fun ConnectionTabContent(
     DiscoveryPanel(
         nodes = uiState.discoveredNodes
     )
+
+    Spacer(modifier = Modifier.height(8.dp))
+
+    StreamingSettings(
+        fps = uiState.streamFps,
+        maxResolution = uiState.streamMaxResolution,
+        bitrateMbps = uiState.streamBitrateMbps,
+        onFpsChange = { viewModel.updateStreamFps(it) },
+        onResolutionChange = { viewModel.updateStreamResolution(it) },
+        onBitrateChange = { viewModel.updateStreamBitrate(it) }
+    )
 }
 
 @Composable
@@ -254,11 +269,25 @@ private fun RecordingTabContent(
     viewModel: SettingsViewModel
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+
+    val storagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        uri?.let {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            try {
+                context.contentResolver.takePersistableUriPermission(it, flags)
+            } catch (_: SecurityException) { /* best effort */ }
+            viewModel.updateStoragePath(it.toString())
+        }
+    }
 
     RecordingSettings(
         storagePath = uiState.recordingStoragePath,
         onChangeStoragePath = {
-            // Storage path change is handled externally via SAF / file picker
+            storagePicker.launch(null)
         },
         selectedFormat = uiState.recordingFormat,
         onSelectFormat = { viewModel.selectRecordingFormat(it) },

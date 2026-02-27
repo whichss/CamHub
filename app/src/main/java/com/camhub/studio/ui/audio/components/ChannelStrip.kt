@@ -1,13 +1,11 @@
 package com.camhub.studio.ui.audio.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -27,8 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.camhub.studio.ui.theme.AmberYellow
-import com.camhub.studio.ui.theme.ElectricRed
+import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.GlassBorder
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
 import com.camhub.studio.ui.theme.LedGreen
@@ -40,18 +37,15 @@ import com.camhub.studio.ui.theme.Primary
 import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.SurfaceLight
 import com.camhub.studio.ui.theme.TextPrimary
-import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
 
 /**
  * Number of LED segments in the meter.
  */
-private const val LED_SEGMENT_COUNT = 16
+private const val LED_SEGMENT_COUNT = 20
 
 /**
  * A vertical LED meter showing audio levels with green/yellow/red segments.
- *
- * @param level Normalized audio level (0.0 - 1.0).
  */
 @Composable
 fun LedMeter(
@@ -62,24 +56,22 @@ fun LedMeter(
 
     Column(
         modifier = modifier
-            .width(12.dp),
+            .width(14.dp),
         verticalArrangement = Arrangement.spacedBy(1.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Render from top (hot) to bottom (cold)
         for (i in LED_SEGMENT_COUNT - 1 downTo 0) {
-            val segmentIndex = i
-            val isActive = segmentIndex < activeSegments
+            val isActive = i < activeSegments
             val segmentColor = when {
                 !isActive -> LedOff
-                segmentIndex >= (LED_SEGMENT_COUNT * 0.875f).toInt() -> LedRed      // top 2 = red (clip)
-                segmentIndex >= (LED_SEGMENT_COUNT * 0.75f).toInt() -> LedYellow    // next 2 = yellow
-                else -> LedGreen                                                     // rest = green
+                i >= (LED_SEGMENT_COUNT * 0.9f).toInt() -> LedRed
+                i >= (LED_SEGMENT_COUNT * 0.75f).toInt() -> LedYellow
+                else -> LedGreen
             }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(3.dp)
+                    .weight(1f)
                     .clip(RoundedCornerShape(1.dp))
                     .background(segmentColor)
             )
@@ -89,9 +81,6 @@ fun LedMeter(
 
 /**
  * A vertical fader slider styled for audio mixing.
- *
- * @param value Current fader value (0.0 - 1.0).
- * @param onValueChange Callback when fader position changes.
  */
 @Composable
 fun FaderSlider(
@@ -102,7 +91,6 @@ fun FaderSlider(
     activeTrackColor: Color = Primary,
     inactiveTrackColor: Color = SurfaceLight
 ) {
-    // Vertical slider via rotation
     Box(
         modifier = modifier
             .height(120.dp)
@@ -129,23 +117,13 @@ fun FaderSlider(
  * Converts a fader value (0-1) to a decibel display value.
  */
 private fun faderToDb(value: Float): String {
-    if (value <= 0.001f) return "-inf"
-    // Map 0-1 to -60dB to +6dB using a logarithmic-like curve
+    if (value <= 0.001f) return "-∞"
     val db = (value * 66f - 60f).coerceIn(-60f, 6f)
-    return if (db >= 0f) "+${String.format("%.1f", db)}" else String.format("%.1f", db)
+    return if (db >= 0f) "+${String.format("%.0f", db)}" else String.format("%.0f", db)
 }
 
 /**
- * Vertical channel strip for audio mixing, containing a channel name, LED meter,
- * fader slider, dB value display, AFV toggle, and sync offset display.
- *
- * @param channelName Display name of the audio channel.
- * @param level Normalized audio level (0.0 - 1.0).
- * @param faderValue Fader position (0.0 - 1.0).
- * @param isAfv Whether Audio Follow Video is enabled.
- * @param syncOffsetMs Audio sync offset in milliseconds.
- * @param onFaderChange Callback when fader position changes.
- * @param onToggleAfv Callback when AFV button is toggled.
+ * Vertical channel strip for audio mixing — professional console style.
  */
 @Composable
 fun ChannelStrip(
@@ -160,33 +138,58 @@ fun ChannelStrip(
 ) {
     Column(
         modifier = modifier
-            .width(56.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .width(64.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(SurfaceDark)
-            .padding(vertical = 8.dp, horizontal = 4.dp),
+            .border(1.dp, GlassBorder.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+            .padding(vertical = 10.dp, horizontal = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Channel name label
-        Text(
-            text = channelName,
-            color = TextPrimary,
-            fontSize = 8.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = JetBrainsMonoFamily,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Spacer(modifier = Modifier.height(2.dp))
+        // Channel name badge
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(Primary.copy(alpha = 0.1f))
+                .padding(horizontal = 4.dp, vertical = 3.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = channelName,
+                color = Primary,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = JetBrainsMonoFamily,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+        }
 
         // LED Meter
         LedMeter(
             level = level,
-            modifier = Modifier.height(64.dp)
+            modifier = Modifier.height(72.dp)
         )
+
+        // dB value in dark recessed display
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(3.dp))
+                .background(BackgroundDarker)
+                .padding(vertical = 3.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = faderToDb(faderValue),
+                color = TextPrimary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = JetBrainsMonoFamily
+            )
+        }
 
         // Fader
         FaderSlider(
@@ -194,42 +197,35 @@ fun ChannelStrip(
             onValueChange = onFaderChange
         )
 
-        // dB value text
-        Text(
-            text = faderToDb(faderValue),
-            color = TextSecondary,
-            fontSize = 8.sp,
-            fontFamily = JetBrainsMonoFamily,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-
         // AFV toggle button
         Box(
             modifier = Modifier
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(4.dp))
                 .background(if (isAfv) NeonGreen.copy(alpha = 0.2f) else SurfaceLight)
                 .clickable(onClick = onToggleAfv)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+                .padding(vertical = 5.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = "AFV",
                 color = if (isAfv) NeonGreen else TextTertiary,
-                fontSize = 8.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = JetBrainsMonoFamily
             )
         }
 
-        // Sync offset text
-        Text(
-            text = if (syncOffsetMs >= 0) "+${syncOffsetMs}ms" else "${syncOffsetMs}ms",
-            color = TextTertiary,
-            fontSize = 7.sp,
-            fontFamily = JetBrainsMonoFamily,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
+        // Sync offset (only when non-zero)
+        if (syncOffsetMs != 0) {
+            Text(
+                text = if (syncOffsetMs >= 0) "+${syncOffsetMs}ms" else "${syncOffsetMs}ms",
+                color = TextTertiary,
+                fontSize = 7.sp,
+                fontFamily = JetBrainsMonoFamily,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }

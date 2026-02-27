@@ -36,8 +36,8 @@ class AudioStreamClient @Inject constructor() {
         private const val RECONNECT_BASE_DELAY_MS = 500L
         private const val RECONNECT_MAX_DELAY_MS = 10_000L
         private const val META_HEADER_SIZE = 2
-        // Ring buffer: 500ms capacity = 25 chunks
-        private const val RING_BUFFER_CHUNKS = 25
+        // Ring buffer: 100ms capacity = 5 chunks (low-latency)
+        private const val RING_BUFFER_CHUNKS = 5
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

@@ -1,7 +1,6 @@
 package com.camhub.studio.data.network
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.util.Log
 import com.camhub.studio.data.gl.DecoderGlRenderer
@@ -147,9 +146,10 @@ class StreamClient @Inject constructor() {
     private suspend fun connectTcp(cameraName: String, ip: String, port: Int, sessionKey: ByteArray?) {
         val cipher = if (sessionKey != null) FrameCipher(sessionKey) else null
         val socket = Socket(ip, port).apply {
-            soTimeout = 15_000
+            soTimeout = 2_000
             keepAlive = true
             tcpNoDelay = true
+            receiveBufferSize = 256 * 1024
         }
         try {
             val input = DataInputStream(socket.getInputStream())
@@ -194,22 +194,13 @@ class StreamClient @Inject constructor() {
         if (decrypted.size < 6) return
 
         val version = decrypted[0].toInt()
-        val bitmap: Bitmap?
-
-        when (version) {
-            1 -> {
-                // JPEG (v1): version(1)+width(2)+height(2)+rotation(1)+JPEG
-                bitmap = decodeV1Jpeg(cameraName, decrypted)
-            }
-            2 -> {
-                // H.264 (v2): version(1)+width(2)+height(2)+rotation(1)+flags(1)+H264
-                bitmap = decodeV2H264(cameraName, decrypted)
-            }
-            else -> {
-                Log.w(TAG, "Unknown frame version: $version")
-                return
-            }
+        if (version != 2) {
+            Log.w(TAG, "Unknown frame version: $version")
+            return
         }
+
+        // H.264 (v2): version(1)+width(2)+height(2)+rotation(1)+flags(1)+H264
+        val bitmap = decodeV2H264(cameraName, decrypted)
 
         // Always calculate bitrate from received bytes
         val bitrateKbps = calculateBitrate(cameraName)
@@ -237,11 +228,6 @@ class StreamClient @Inject constructor() {
         }
     }
 
-    private fun decodeV1Jpeg(cameraName: String, decrypted: ByteArray): Bitmap? {
-        val jpegBytes = decrypted.copyOfRange(6, decrypted.size)
-        return BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-    }
-
     private fun decodeV2H264(cameraName: String, decrypted: ByteArray): Bitmap? {
         if (decrypted.size < 7) return null
 
@@ -265,8 +251,12 @@ class StreamClient @Inject constructor() {
             try {
                 val glRenderer = DecoderGlRenderer(width, height)
                 glRenderer.start()
-                // Wait briefly for GL thread to initialize surface
-                Thread.sleep(100)
+                // Wait for GL thread to initialize surface (poll instead of fixed sleep)
+                var waitMs = 0
+                while (glRenderer.surface == null && waitMs < 200) {
+                    Thread.sleep(5)
+                    waitMs += 5
+                }
                 val surface = glRenderer.surface
                 if (surface != null && decoder.configureSurface(width, height, h264Data, surface)) {
                     glRenderer.onBitmapReady = { bitmap ->

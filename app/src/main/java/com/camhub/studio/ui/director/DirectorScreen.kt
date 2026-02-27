@@ -31,6 +31,7 @@ import com.camhub.studio.ui.audio.AudioMixerPanel
 import com.camhub.studio.ui.director.components.CameraControlPanel
 import com.camhub.studio.ui.director.components.CameraGrid
 import com.camhub.studio.ui.director.components.ControlBar
+import com.camhub.studio.ui.director.components.DeviceManagerPanel
 import com.camhub.studio.ui.director.components.StatusBar
 import com.camhub.studio.ui.director.components.ViewportPanel
 import com.camhub.studio.ui.theme.BackgroundDark
@@ -121,7 +122,10 @@ fun DirectorScreen(
                     isPaused = uiState.isPaused,
                     wifiStrength = uiState.wifiStrength,
                     batteryPercent = uiState.batteryPercent,
-                    onNavigateToSettings = onNavigateToSettings
+                    audioMasterLevel = uiState.audioMasterLevel,
+                    connectedCameraCount = uiState.cameras.size,
+                    onNavigateToSettings = onNavigateToSettings,
+                    onToggleDeviceManager = { viewModel.toggleDeviceManager() }
                 )
 
                 Row(modifier = Modifier.weight(1f)) {
@@ -134,6 +138,9 @@ fun DirectorScreen(
                         pgmBitmap = pgmCamera?.previewBitmap,
                         pvwBitmap = pvwCamera?.previewBitmap,
                         isVertical = true,
+                        transitionProgress = uiState.transitionProgress,
+                        isTransitioning = uiState.isTransitioning,
+                        selectedTransition = uiState.selectedTransition,
                         modifier = Modifier
                             .weight(1.4f)
                             .fillMaxHeight()
@@ -145,6 +152,7 @@ fun DirectorScreen(
                         isPaused = uiState.isPaused,
                         selectedTransition = uiState.selectedTransition,
                         isVertical = true,
+                        autoRecordCameras = uiState.autoRecordCameras,
                         onRecord = { viewModel.toggleRecording() },
                         onStop = { viewModel.toggleRecording() },
                         onPause = { viewModel.pauseRecording() },
@@ -153,6 +161,7 @@ fun DirectorScreen(
                         onAuto = { viewModel.executeAuto() },
                         onSelectTransition = { viewModel.selectTransition(it) },
                         onToggleAudioMixer = { viewModel.toggleAudioMixer() },
+                        onToggleAutoRecord = { viewModel.toggleAutoRecordCameras() },
                         modifier = Modifier.fillMaxHeight()
                     )
 
@@ -181,7 +190,10 @@ fun DirectorScreen(
                     isPaused = uiState.isPaused,
                     wifiStrength = uiState.wifiStrength,
                     batteryPercent = uiState.batteryPercent,
-                    onNavigateToSettings = onNavigateToSettings
+                    audioMasterLevel = uiState.audioMasterLevel,
+                    connectedCameraCount = uiState.cameras.size,
+                    onNavigateToSettings = onNavigateToSettings,
+                    onToggleDeviceManager = { viewModel.toggleDeviceManager() }
                 )
 
                 // Viewport panel (horizontal PVW+PGM)
@@ -193,6 +205,9 @@ fun DirectorScreen(
                     pgmBitmap = pgmCamera?.previewBitmap,
                     pvwBitmap = pvwCamera?.previewBitmap,
                     isVertical = false,
+                    transitionProgress = uiState.transitionProgress,
+                    isTransitioning = uiState.isTransitioning,
+                    selectedTransition = uiState.selectedTransition,
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -202,6 +217,7 @@ fun DirectorScreen(
                     isPaused = uiState.isPaused,
                     selectedTransition = uiState.selectedTransition,
                     isVertical = false,
+                    autoRecordCameras = uiState.autoRecordCameras,
                     onRecord = { viewModel.toggleRecording() },
                     onStop = { viewModel.toggleRecording() },
                     onPause = { viewModel.pauseRecording() },
@@ -210,6 +226,7 @@ fun DirectorScreen(
                     onAuto = { viewModel.executeAuto() },
                     onSelectTransition = { viewModel.selectTransition(it) },
                     onToggleAudioMixer = { viewModel.toggleAudioMixer() },
+                    onToggleAutoRecord = { viewModel.toggleAutoRecordCameras() },
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -234,11 +251,25 @@ fun DirectorScreen(
             )
         }
 
+        // Device manager panel overlay
+        if (uiState.showDeviceManager) {
+            DeviceManagerPanel(
+                discoveredPeers = uiState.discoveredPeers,
+                onConnect = { viewModel.connectToPeer(it) },
+                onDisconnect = { viewModel.disconnectPeer(it) },
+                onConnectAll = { viewModel.connectToAllPeers() },
+                onAddManual = { viewModel.addManualConnection(it) },
+                onRescan = { viewModel.rescanDevices() },
+                onDismiss = { viewModel.toggleDeviceManager() }
+            )
+        }
+
         // Camera control panel overlay
         if (uiState.showCameraControl) {
             val controlCamera = uiState.cameras.getOrNull(uiState.controlCameraIndex)
             CameraControlPanel(
                 cameraName = controlCamera?.name ?: "Unknown",
+                isRecording = controlCamera?.isRecording ?: false,
                 onDismiss = { viewModel.hideCameraControl() },
                 onSendCommand = { command, value, stringValue ->
                     viewModel.sendCameraCommand(command, value, stringValue)

@@ -7,6 +7,7 @@ import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Log
 import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -74,6 +75,10 @@ class CameraController @Inject constructor(
     private var currentPreview: Preview? = null
     private var currentPreviewView: PreviewView? = null
     private var orientationListener: OrientationEventListener? = null
+
+    companion object {
+        private const val TAG = "CameraController"
+    }
 
     var selectedCameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
         private set
@@ -449,11 +454,19 @@ class CameraController @Inject constructor(
     }
 
     @androidx.annotation.OptIn(androidx.camera.video.ExperimentalPersistentRecording::class)
-    fun startRecording() {
-        val vc = videoCapture ?: return
+    fun startRecording(filePrefix: String = "") {
+        val vc = videoCapture
+        if (vc == null) {
+            Log.w(TAG, "Cannot start recording: VideoCapture not available")
+            return
+        }
         if (activeRecording != null) return
 
-        val name = "CamHub_${System.currentTimeMillis()}.mp4"
+        val name = if (filePrefix.isNotEmpty()) {
+            "$filePrefix.mp4"
+        } else {
+            "CamHub_${System.currentTimeMillis()}.mp4"
+        }
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -467,26 +480,40 @@ class CameraController @Inject constructor(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         ).setContentValues(contentValues).build()
 
-        activeRecording = vc.output
-            .prepareRecording(context, outputOptions)
-            .withAudioEnabled()
-            .start(ContextCompat.getMainExecutor(context)) { event ->
-                when (event) {
-                    is VideoRecordEvent.Start -> {
-                        _hardwareState.value = _hardwareState.value.copy(
-                            isRecording = true,
-                            recordingStartTimeMs = System.currentTimeMillis()
-                        )
-                    }
-                    is VideoRecordEvent.Finalize -> {
-                        _hardwareState.value = _hardwareState.value.copy(
-                            isRecording = false,
-                            recordingStartTimeMs = 0L
-                        )
-                        activeRecording = null
+        try {
+            val pendingRecording = vc.output.prepareRecording(context, outputOptions)
+            try {
+                pendingRecording.withAudioEnabled()
+            } catch (e: SecurityException) {
+                Log.w(TAG, "RECORD_AUDIO permission not granted, recording without audio")
+            }
+            activeRecording = pendingRecording
+                .start(ContextCompat.getMainExecutor(context)) { event ->
+                    when (event) {
+                        is VideoRecordEvent.Start -> {
+                            Log.d(TAG, "Recording started: $name")
+                            _hardwareState.value = _hardwareState.value.copy(
+                                isRecording = true,
+                                recordingStartTimeMs = System.currentTimeMillis()
+                            )
+                        }
+                        is VideoRecordEvent.Finalize -> {
+                            if (event.hasError()) {
+                                Log.e(TAG, "Recording error: code=${event.error}, cause=${event.cause?.message}")
+                            } else {
+                                Log.d(TAG, "Recording saved: ${event.outputResults.outputUri}")
+                            }
+                            _hardwareState.value = _hardwareState.value.copy(
+                                isRecording = false,
+                                recordingStartTimeMs = 0L
+                            )
+                            activeRecording = null
+                        }
                     }
                 }
-            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start recording", e)
+        }
     }
 
     fun stopRecording() {

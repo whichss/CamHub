@@ -26,7 +26,7 @@ class H264Encoder(
     companion object {
         private const val TAG = "H264Encoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val TIMEOUT_US = 5_000L
+        private const val TIMEOUT_US = 10_000L
     }
 
     private var encoder: MediaCodec? = null
@@ -50,15 +50,15 @@ class H264Encoder(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
                 )
                 setInteger(
                     MediaFormat.KEY_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
                 )
                 setInteger(
                     MediaFormat.KEY_LEVEL,
-                    MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel31
                 )
                 // Low-latency hints
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -95,15 +95,15 @@ class H264Encoder(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
                 )
                 setInteger(
                     MediaFormat.KEY_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
                 )
                 setInteger(
                     MediaFormat.KEY_LEVEL,
-                    MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel31
                 )
                 // Low-latency hints
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

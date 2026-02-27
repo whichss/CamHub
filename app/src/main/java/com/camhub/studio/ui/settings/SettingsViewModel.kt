@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.camhub.studio.data.DeviceMonitor
 import com.camhub.studio.data.DirectorRecorder
 import com.camhub.studio.data.ExternalDisplayManager
+import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.network.PeerConnectionManager
 import com.camhub.studio.data.network.StreamClient
 import com.camhub.studio.ui.settings.model.DiscoveredNode
@@ -35,7 +36,8 @@ class SettingsViewModel @Inject constructor(
     private val streamClient: StreamClient,
     private val deviceMonitor: DeviceMonitor,
     private val recorder: DirectorRecorder,
-    private val externalDisplayManager: ExternalDisplayManager
+    private val externalDisplayManager: ExternalDisplayManager,
+    private val streamingConfig: StreamingConfig
 ) : ViewModel() {
 
     private val prefs: SharedPreferences =
@@ -124,6 +126,7 @@ class SettingsViewModel @Inject constructor(
 
     fun updateStoragePath(displayPath: String) {
         _uiState.update { it.copy(recordingStoragePath = displayPath) }
+        prefs.edit().putString("recording_storage_path", displayPath).apply()
     }
 
     // Display
@@ -171,6 +174,22 @@ class SettingsViewModel @Inject constructor(
         prefs.edit().putInt("screen_timeout", minutes).apply()
     }
 
+    // Streaming quality
+    fun updateStreamFps(fps: Int) {
+        streamingConfig.fps = fps
+        _uiState.update { it.copy(streamFps = fps) }
+    }
+
+    fun updateStreamResolution(resolution: Int) {
+        streamingConfig.maxResolution = resolution
+        _uiState.update { it.copy(streamMaxResolution = resolution) }
+    }
+
+    fun updateStreamBitrate(mbps: Int) {
+        streamingConfig.bitrateMbps = mbps
+        _uiState.update { it.copy(streamBitrateMbps = mbps) }
+    }
+
     fun toggleNavigationLock() {
         val newValue = !_uiState.value.isNavigationLocked
         _uiState.update { it.copy(isNavigationLocked = newValue) }
@@ -193,6 +212,7 @@ class SettingsViewModel @Inject constructor(
             try { RecordingFormat.valueOf(it) } catch (_: Exception) { null }
         }
         val bitrate = prefs.getInt("recording_bitrate", 10)
+        val storagePath = prefs.getString("recording_storage_path", null)
         val kioskMode = prefs.getBoolean("kiosk_mode", false)
         val autoStart = prefs.getBoolean("auto_start", false)
         val screenTimeout = prefs.getInt("screen_timeout", 10)
@@ -207,10 +227,14 @@ class SettingsViewModel @Inject constructor(
             it.copy(
                 recordingFormat = format ?: it.recordingFormat,
                 recordingBitrateMbps = bitrate,
+                recordingStoragePath = storagePath ?: it.recordingStoragePath,
                 isKioskModeEnabled = kioskMode,
                 isAutoStartEnabled = autoStart,
                 screenTimeoutMinutes = screenTimeout,
-                isNavigationLocked = navLock
+                isNavigationLocked = navLock,
+                streamFps = streamingConfig.fps,
+                streamMaxResolution = streamingConfig.maxResolution,
+                streamBitrateMbps = streamingConfig.bitrateMbps
             )
         }
     }

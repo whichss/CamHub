@@ -10,14 +10,20 @@ import com.camhub.studio.data.ExternalDisplayManager
 import com.camhub.studio.data.audio.AudioStreamClient
 import com.camhub.studio.data.camera.CameraValueMapper
 import com.camhub.studio.data.network.ConnectedPeer
+import com.camhub.studio.data.network.DiscoveredPeer
+import com.camhub.studio.data.network.NsdDiscoveryManager
 import com.camhub.studio.data.network.PeerConnectionManager
 import com.camhub.studio.data.network.StreamClient
 import com.camhub.studio.ui.director.model.CameraNode
 import com.camhub.studio.ui.director.model.ConnectionStatus
 import com.camhub.studio.ui.director.model.DirectorUiState
 import com.camhub.studio.ui.director.model.TransitionType
+import android.os.Build
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,8 +40,11 @@ class DirectorViewModel @Inject constructor(
     private val audioStreamClient: AudioStreamClient,
     private val deviceMonitor: DeviceMonitor,
     private val recorder: DirectorRecorder,
-    private val externalDisplayManager: ExternalDisplayManager
+    private val externalDisplayManager: ExternalDisplayManager,
+    private val nsdManager: NsdDiscoveryManager
 ) : ViewModel() {
+
+    private val directorName = "${Build.MODEL}-Director"
 
     private val _uiState = MutableStateFlow(DirectorUiState())
     val uiState: StateFlow<DirectorUiState> = _uiState.asStateFlow()
@@ -167,11 +176,45 @@ class DirectorViewModel @Inject constructor(
             }
         }
 
+        // Audio master level for status bar
+        viewModelScope.launch {
+            audioStreamClient.masterLevel.collect { level ->
+                _uiState.update { it.copy(audioMasterLevel = level) }
+            }
+        }
+
         // Propagate PGM camera to audio mixer for AFV logic
         viewModelScope.launch {
             _uiState.collect { state ->
                 val pgmName = state.cameras.getOrNull(state.pgmCameraIndex)?.name
                 audioStreamClient.setPgmCameras(if (pgmName != null) setOf(pgmName) else emptySet())
+            }
+        }
+
+        // Start NSD discovery for device manager
+        nsdManager.startDiscovery()
+
+        // Observe discovered peers (merge with connected state)
+        viewModelScope.launch {
+            nsdManager.discoveredPeers.collect { peers ->
+                val connectedIps = connectionManager.connectedPeers.value.map { it.ip }.toSet()
+                val updatedPeers = peers.map { peer ->
+                    peer.copy(isConnected = peer.ip in connectedIps)
+                }
+                _uiState.update { it.copy(discoveredPeers = updatedPeers) }
+            }
+        }
+
+        // Refresh discovered peers' connected status when connections change
+        viewModelScope.launch {
+            connectionManager.connectedPeers.collect { connectedList ->
+                val connectedIps = connectedList.map { it.ip }.toSet()
+                _uiState.update { state ->
+                    val updatedPeers = state.discoveredPeers.map { peer ->
+                        peer.copy(isConnected = peer.ip in connectedIps)
+                    }
+                    state.copy(discoveredPeers = updatedPeers)
+                }
             }
         }
     }
@@ -266,12 +309,11 @@ class DirectorViewModel @Inject constructor(
         val transition = _uiState.value.selectedTransition
         when (transition) {
             TransitionType.CUT -> executeCut()
-            TransitionType.MIX -> executeMixTransition()
-            else -> executeCut() // DIP and WIPE fall back to CUT for now
+            else -> executeTransition()
         }
     }
 
-    private fun executeMixTransition() {
+    private fun executeTransition() {
         if (_uiState.value.isTransitioning) return
         transitionJob?.cancel()
         _uiState.update { it.copy(isTransitioning = true) }
@@ -288,7 +330,6 @@ class DirectorViewModel @Inject constructor(
                 delay(stepDelay)
             }
 
-            // Complete: swap PGM/PVW
             performSwap()
             _uiState.update {
                 it.copy(
@@ -350,19 +391,60 @@ class DirectorViewModel @Inject constructor(
     }
 
     fun sendCameraCommand(command: String, value: Float = 0f, stringValue: String = "") {
-        val cam = _uiState.value.cameras.getOrNull(_uiState.value.controlCameraIndex) ?: return
+        val idx = _uiState.value.controlCameraIndex
+        val cam = _uiState.value.cameras.getOrNull(idx) ?: return
         connectionManager.sendCommand(cam.name, command, value, stringValue)
+
+        // Optimistic UI update for recording state
+        if (command == "start_recording" || command == "stop_recording") {
+            val isRec = command == "start_recording"
+            _uiState.update { state ->
+                val updatedCameras = state.cameras.toMutableList()
+                updatedCameras[idx] = updatedCameras[idx].copy(isRecording = isRec)
+                state.copy(cameras = updatedCameras)
+            }
+        }
     }
 
     fun toggleAudioMixer() {
         _uiState.update { it.copy(showAudioMixer = !it.showAudioMixer) }
     }
 
+    fun toggleAutoRecordCameras() {
+        _uiState.update { it.copy(autoRecordCameras = !it.autoRecordCameras) }
+    }
+
     fun toggleRecording() {
-        if (recorder.recordingInfo.value.isRecording) {
+        val wasRecording = recorder.recordingInfo.value.isRecording
+        if (wasRecording) {
             recorder.stopRecording()
+            // Auto-stop camera recording if enabled
+            if (_uiState.value.autoRecordCameras) {
+                connectionManager.sendCommandToAll("stop_recording")
+                _uiState.update { state ->
+                    state.copy(cameras = state.cameras.map { it.copy(isRecording = false) })
+                }
+            }
         } else {
-            recorder.startRecording()
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+            // Use actual PGM frame dimensions if available
+            val pgmCam = _uiState.value.cameras.getOrNull(_uiState.value.pgmCameraIndex)
+            val w = if (pgmCam != null && pgmCam.frameWidth > 0) pgmCam.frameWidth else 1920
+            val h = if (pgmCam != null && pgmCam.frameHeight > 0) pgmCam.frameHeight else 1080
+            recorder.startRecording(width = w, height = h, sessionTimestamp = timestamp)
+
+            // Auto-start camera recording with per-camera numbered filenames
+            if (_uiState.value.autoRecordCameras) {
+                val cameras = _uiState.value.cameras
+                cameras.forEachIndexed { index, cam ->
+                    val filePrefix = "CamHub_$timestamp-CAM${index + 1}"
+                    connectionManager.sendCommand(cam.name, "start_recording", stringValue = filePrefix)
+                }
+                _uiState.update { state ->
+                    state.copy(cameras = state.cameras.map { it.copy(isRecording = true) })
+                }
+            }
         }
     }
 
@@ -374,8 +456,51 @@ class DirectorViewModel @Inject constructor(
         recorder.resumeRecording()
     }
 
+    fun toggleDeviceManager() {
+        _uiState.update { it.copy(showDeviceManager = !it.showDeviceManager) }
+    }
+
+    fun connectToPeer(peer: DiscoveredPeer) {
+        connectionManager.connectToCamera(peer, directorName)
+    }
+
+    fun disconnectPeer(name: String) {
+        connectionManager.disconnectPeer(name)
+        streamClient.disconnectStream(name)
+        audioStreamClient.disconnectAudioStream(name)
+    }
+
+    fun connectToAllPeers() {
+        val connectedNames = connectionManager.connectedPeers.value.map { it.name }.toSet()
+        val unconnected = _uiState.value.discoveredPeers.filter { it.name !in connectedNames }
+        for (peer in unconnected) {
+            connectionManager.connectToCamera(peer, directorName)
+        }
+    }
+
+    fun addManualConnection(ipPort: String) {
+        val parts = ipPort.trim().split(":")
+        if (parts.size == 2) {
+            val ip = parts[0].trim()
+            val port = parts[1].trim().toIntOrNull() ?: return
+            if (port > 0 && ip.isNotEmpty()) {
+                nsdManager.addManualPeer(ip, port)
+            }
+        }
+    }
+
+    fun rescanDevices() {
+        val connectedNames = connectionManager.connectedPeers.value.map { it.name }.toSet()
+        _uiState.update { state ->
+            state.copy(discoveredPeers = state.discoveredPeers.filter { it.name in connectedNames })
+        }
+        nsdManager.stopDiscovery()
+        nsdManager.startDiscovery()
+    }
+
     override fun onCleared() {
         super.onCleared()
+        nsdManager.stopDiscovery()
         deviceMonitor.stopMonitoring()
         externalDisplayManager.stopListening()
         externalDisplayManager.disableOutput()
