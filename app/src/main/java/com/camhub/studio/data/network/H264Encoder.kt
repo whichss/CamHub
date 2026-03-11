@@ -50,7 +50,7 @@ class H264Encoder(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
                 setInteger(
                     MediaFormat.KEY_PROFILE,
@@ -95,7 +95,7 @@ class H264Encoder(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
                 setInteger(
                     MediaFormat.KEY_PROFILE,
