@@ -186,6 +186,11 @@ class H264Encoder(
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
+                // Intra refresh: spread keyframe data across multiple frames
+                // for smoother bitrate distribution and faster error recovery
+                try {
+                    setInteger("intra-refresh-period", frameRate / 2)
+                } catch (_: Exception) { /* not all encoders support this */ }
             }
         }
     }
