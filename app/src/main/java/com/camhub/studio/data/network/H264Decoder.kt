@@ -14,7 +14,7 @@ class H264Decoder {
     companion object {
         private const val TAG = "H264Decoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val TIMEOUT_US = 10_000L
+        private const val TIMEOUT_US = 0L
     }
 
     private var decoder: MediaCodec? = null
