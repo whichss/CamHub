@@ -307,6 +307,9 @@ class StreamServer @Inject constructor() {
         return header.array() + data
     }
 
+    // Reusable NV12 buffer to avoid per-frame allocation
+    private var nv12Buffer: ByteArray? = null
+
     private fun imageProxyToNv12(imageProxy: ImageProxy): ByteArray? {
         val width = imageProxy.width
         val height = imageProxy.height
@@ -322,7 +325,8 @@ class StreamServer @Inject constructor() {
         val uvRowStride = uPlane.rowStride
         val uvPixelStride = uPlane.pixelStride
 
-        val nv12 = ByteArray(width * height * 3 / 2)
+        val nv12Size = width * height * 3 / 2
+        val nv12 = nv12Buffer?.takeIf { it.size >= nv12Size } ?: ByteArray(nv12Size).also { nv12Buffer = it }
 
         // Copy Y plane row by row
         var pos = 0
@@ -439,6 +443,7 @@ class StreamServer @Inject constructor() {
         useH264 = false
         encoderWidth = 0
         encoderHeight = 0
+        nv12Buffer = null
     }
 
     fun cleanup() {
