@@ -30,6 +30,10 @@ class H264Decoder {
     private var bitmapB: Bitmap? = null
     private var useA = true
 
+    // Reusable buffers to avoid per-frame allocation
+    private var pixelBuffer: IntArray? = null
+    private var yuvBuffer: ByteArray? = null
+
     fun configure(width: Int, height: Int, spsPps: ByteArray): Boolean {
         release()
         this.width = width
@@ -119,7 +123,10 @@ class H264Decoder {
         }
     }
 
-    fun decode(nalUnit: ByteArray, isKeyFrame: Boolean): Bitmap? {
+    fun decode(nalUnit: ByteArray, isKeyFrame: Boolean): Bitmap? =
+        decode(nalUnit, 0, nalUnit.size, isKeyFrame)
+
+    fun decode(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean): Bitmap? {
         val dec = decoder ?: return null
         if (!configured) return null
 
@@ -130,8 +137,8 @@ class H264Decoder {
                 val inputBuffer = dec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    val size = minOf(nalUnit.size, inputBuffer.capacity())
-                    inputBuffer.put(nalUnit, 0, size)
+                    val size = minOf(length, inputBuffer.capacity())
+                    inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     dec.queueInputBuffer(inputIndex, 0, size, 0, flags)
                 }
@@ -185,7 +192,10 @@ class H264Decoder {
         }
     }
 
-    fun decodeSurface(nalUnit: ByteArray, isKeyFrame: Boolean) {
+    fun decodeSurface(nalUnit: ByteArray, isKeyFrame: Boolean) =
+        decodeSurface(nalUnit, 0, nalUnit.size, isKeyFrame)
+
+    fun decodeSurface(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean) {
         val dec = decoder ?: return
         if (!configured || !usingSurface) return
 
@@ -196,8 +206,8 @@ class H264Decoder {
                 val inputBuffer = dec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    val size = minOf(nalUnit.size, inputBuffer.capacity())
-                    inputBuffer.put(nalUnit, 0, size)
+                    val size = minOf(length, inputBuffer.capacity())
+                    inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     dec.queueInputBuffer(inputIndex, 0, size, 0, flags)
                 }
@@ -235,11 +245,15 @@ class H264Decoder {
         val actualSliceH = if (sliceHeight > 0) sliceHeight else h
         val yPlaneSize = actualStride * actualSliceH
         val totalSize = yPlaneSize * 3 / 2
-        val pixels = IntArray(w * h)
+        val pixelCount = w * h
+
+        // Reuse pixel and YUV buffers to avoid per-frame allocation
+        val pixels = pixelBuffer?.takeIf { it.size >= pixelCount } ?: IntArray(pixelCount).also { pixelBuffer = it }
 
         buffer.position(offset)
-        val yuvData = ByteArray(minOf(buffer.remaining(), totalSize))
-        buffer.get(yuvData)
+        val yuvSize = minOf(buffer.remaining(), totalSize)
+        val yuvData = yuvBuffer?.takeIf { it.size >= yuvSize } ?: ByteArray(yuvSize).also { yuvBuffer = it }
+        buffer.get(yuvData, 0, yuvSize)
 
         for (j in 0 until h) {
             val yRowOffset = j * actualStride
@@ -308,6 +322,8 @@ class H264Decoder {
         bitmapB?.recycle()
         bitmapA = null
         bitmapB = null
+        pixelBuffer = null
+        yuvBuffer = null
         Log.d(TAG, "Decoder released")
     }
 }

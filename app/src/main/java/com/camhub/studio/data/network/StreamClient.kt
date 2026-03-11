@@ -238,12 +238,17 @@ class StreamClient @Inject constructor() {
         val isKeyFrame = (flags and FLAG_KEYFRAME) != 0
         val isConfig = (flags and FLAG_CODEC_CONFIG) != 0
 
-        val h264Data = decrypted.copyOfRange(7, decrypted.size)
+        val h264Offset = 7
+        val h264Length = decrypted.size - 7
+        val h264Data = decrypted  // use offset-based access to avoid copy
 
         if (isConfig) {
             // SPS/PPS config frame — configure decoder with GL Surface mode
             decoders.remove(cameraName)?.release()
             glRenderers.remove(cameraName)?.release()
+
+            // Config data needs a copy since decoder stores reference
+            val configData = decrypted.copyOfRange(h264Offset, decrypted.size)
 
             val decoder = H264Decoder()
             var surfaceConfigured = false
@@ -258,7 +263,7 @@ class StreamClient @Inject constructor() {
                     waitMs += 5
                 }
                 val surface = glRenderer.surface
-                if (surface != null && decoder.configureSurface(width, height, h264Data, surface)) {
+                if (surface != null && decoder.configureSurface(width, height, configData, surface)) {
                     glRenderer.onBitmapReady = { bitmap ->
                         val bitrateKbps = calculateBitrate(cameraName)
                         updateStream(cameraName, CameraStreamState(cameraName, bitmap, true, bitrateKbps, bitmap.width, bitmap.height))
@@ -276,7 +281,7 @@ class StreamClient @Inject constructor() {
 
             // Fallback to buffer mode
             if (!surfaceConfigured) {
-                if (decoder.configure(width, height, h264Data)) {
+                if (decoder.configure(width, height, configData)) {
                     decoders[cameraName] = decoder
                     Log.d(TAG, "H.264 decoder configured (CPU buffer) for $cameraName: ${width}x${height}")
                 } else {
@@ -296,12 +301,12 @@ class StreamClient @Inject constructor() {
         // If GL renderer is active, use surface decoding (bitmap via GL callback)
         val glRenderer = glRenderers[cameraName]
         if (glRenderer != null) {
-            decoder.decodeSurface(h264Data, isKeyFrame)
+            decoder.decodeSurface(h264Data, h264Offset, h264Length, isKeyFrame)
             return null // bitmap delivered via onBitmapReady callback
         }
 
         // Buffer mode fallback
-        return decoder.decode(h264Data, isKeyFrame)
+        return decoder.decode(h264Data, h264Offset, h264Length, isKeyFrame)
     }
 
     private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
