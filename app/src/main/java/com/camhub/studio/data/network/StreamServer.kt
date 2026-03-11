@@ -59,7 +59,7 @@ class StreamServer @Inject constructor() {
             override var needsConfig: Boolean = true
         ) : ClientConnection() {
             init {
-                socket.sendBufferSize = 256 * 1024
+                socket.sendBufferSize = 64 * 1024
             }
             override fun sendFrame(data: ByteArray) {
                 output.writeInt(data.size)

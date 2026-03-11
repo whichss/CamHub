@@ -149,7 +149,7 @@ class StreamClient @Inject constructor() {
             soTimeout = 2_000
             keepAlive = true
             tcpNoDelay = true
-            receiveBufferSize = 256 * 1024
+            receiveBufferSize = 64 * 1024
         }
         try {
             val input = DataInputStream(socket.getInputStream())
