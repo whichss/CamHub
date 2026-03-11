@@ -104,7 +104,7 @@ class AudioCaptureService @Inject constructor() {
 
     private fun startCapture() {
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        val bufferSize = maxOf(minBufSize, BYTES_PER_CHUNK * 4)
+        val bufferSize = maxOf(minBufSize, BYTES_PER_CHUNK * 2)
 
         try {
             audioRecord = AudioRecord(

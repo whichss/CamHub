@@ -78,7 +78,7 @@ class AudioStreamClient @Inject constructor() {
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        val bufSize = maxOf(minBuf, BYTES_PER_CHUNK * 4)
+        val bufSize = maxOf(minBuf, BYTES_PER_CHUNK * 2)
 
         try {
             audioTrack = AudioTrack.Builder()
