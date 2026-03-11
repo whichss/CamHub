@@ -294,8 +294,17 @@ private fun MiniAudioMeter(
     level: Float,
     modifier: Modifier = Modifier
 ) {
+    // Smooth decay: animate toward target level so the meter doesn't flicker
+    val animatedLevel by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = level,
+        animationSpec = androidx.compose.animation.core.tween(
+            durationMillis = if (level > 0f) 50 else 150  // fast attack, slow release
+        ),
+        label = "audio_meter"
+    )
+
     val segments = 10
-    val filledSegments = (level * segments).toInt().coerceIn(0, segments)
+    val filledSegments = (animatedLevel * segments).toInt().coerceIn(0, segments)
 
     Row(
         modifier = modifier,

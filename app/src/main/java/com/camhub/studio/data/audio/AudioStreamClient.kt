@@ -36,8 +36,8 @@ class AudioStreamClient @Inject constructor() {
         private const val RECONNECT_BASE_DELAY_MS = 500L
         private const val RECONNECT_MAX_DELAY_MS = 10_000L
         private const val META_HEADER_SIZE = 2
-        // Ring buffer: 60ms capacity = 3 chunks (ultra-low-latency)
-        private const val RING_BUFFER_CHUNKS = 3
+        // Ring buffer: 80ms capacity = 4 chunks (low-latency with jitter margin)
+        private const val RING_BUFFER_CHUNKS = 4
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -109,8 +109,14 @@ class AudioStreamClient @Inject constructor() {
         mixingJob = scope.launch {
             val mixBuffer = FloatArray(SAMPLES_PER_CHUNK)
             val outputBuffer = ShortArray(SAMPLES_PER_CHUNK)
+            val silenceBuffer = ShortArray(SAMPLES_PER_CHUNK) // pre-allocated silence
 
             while (isActive) {
+                // Pace mixing at chunk interval to stay in sync with audio arrival rate.
+                // Without pacing, the loop outruns network delivery → ring buffer starves
+                // → levels stay at zero and AudioTrack underruns.
+                delay(CHUNK_DURATION_MS.toLong())
+
                 // Clear mix buffer
                 mixBuffer.fill(0f)
 
@@ -175,9 +181,8 @@ class AudioStreamClient @Inject constructor() {
                     // Write to AudioTrack
                     audioTrack?.write(outputBuffer, 0, outputBuffer.size)
                 } else {
-                    _masterLevel.value = 0f
-                    // Sleep to avoid busy-wait when no data
-                    delay(CHUNK_DURATION_MS.toLong())
+                    // Feed silence to AudioTrack to prevent underrun
+                    audioTrack?.write(silenceBuffer, 0, silenceBuffer.size)
                 }
             }
         }
