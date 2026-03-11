@@ -405,7 +405,12 @@ class CameraHudViewModel @Inject constructor(
 
     fun setMicDirection(direction: MicDirection) {
         _uiState.update { it.copy(micDirection = direction, activeToolMode = ToolMode.NONE) }
-        // TODO: Apply mic direction via AudioCaptureService.setPreferredMicrophoneDirection()
+        val micDir = when (direction) {
+            MicDirection.FRONT -> android.media.MicrophoneDirection.MIC_DIRECTION_TOWARDS_USER
+            MicDirection.BACK -> android.media.MicrophoneDirection.MIC_DIRECTION_AWAY_FROM_USER
+            MicDirection.EXTERNAL -> android.media.MicrophoneDirection.MIC_DIRECTION_EXTERNAL
+        }
+        audioCaptureService.setPreferredMicrophoneDirection(micDir)
     }
 
     fun setZoom(ratio: Float) {

@@ -72,6 +72,8 @@ fun UnifiedToolbar(
     focusDistances: List<String>,
     selectedFocusIndex: Int,
     onFocusChanged: (Int) -> Unit,
+    isPeakingEnabled: Boolean = false,
+    onTogglePeaking: (() -> Unit)? = null,
     // White Balance
     whiteBalanceValues: List<String>,
     selectedWhiteBalanceIndex: Int,
@@ -124,11 +126,37 @@ fun UnifiedToolbar(
                         selectedIndex = selectedShutterIndex,
                         onIndexChanged = onShutterChanged
                     )
-                    ToolMode.FOCUS -> HorizontalControlSlider(
-                        values = focusDistances,
-                        selectedIndex = selectedFocusIndex,
-                        onIndexChanged = onFocusChanged
-                    )
+                    ToolMode.FOCUS -> Column {
+                        HorizontalControlSlider(
+                            values = focusDistances,
+                            selectedIndex = selectedFocusIndex,
+                            onIndexChanged = onFocusChanged
+                        )
+                        if (onTogglePeaking != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                val peakShape = RoundedCornerShape(6.dp)
+                                Text(
+                                    text = "PEAK",
+                                    color = if (isPeakingEnabled) CyanAccent else TextSecondary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clip(peakShape)
+                                        .background(
+                                            if (isPeakingEnabled) CyanAccent.copy(alpha = 0.15f) else SurfaceDark,
+                                            peakShape
+                                        )
+                                        .clickable { onTogglePeaking() }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
                     ToolMode.WHITE_BALANCE -> HorizontalControlSlider(
                         values = whiteBalanceValues,
                         selectedIndex = selectedWhiteBalanceIndex,

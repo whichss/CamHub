@@ -2,7 +2,9 @@ package com.camhub.studio.data.audio
 
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.MicrophoneDirection
 import android.media.MediaRecorder
+import android.os.Build
 import android.util.Log
 import com.camhub.studio.data.network.FrameCipher
 import kotlinx.coroutines.*
@@ -43,6 +45,7 @@ class AudioCaptureService @Inject constructor() {
     private val clients = CopyOnWriteArrayList<AudioClientConnection>()
 
     private var frameCipher: FrameCipher? = null
+    private var pendingMicDirection: Int? = null
 
     private val _audioLevels = MutableStateFlow<List<Float>>(listOf(0f, 0f))
     val audioLevels: StateFlow<List<Float>> = _audioLevels.asStateFlow()
@@ -126,6 +129,9 @@ class AudioCaptureService @Inject constructor() {
             return
         }
 
+        // Apply pending mic direction if set
+        applyMicDirection()
+
         audioRecord?.startRecording()
 
         captureJob = scope.launch {
@@ -203,6 +209,28 @@ class AudioCaptureService @Inject constructor() {
             clients.remove(client)
             try { client.socket.close() } catch (_: Exception) {}
             Log.d(TAG, "Audio client disconnected")
+        }
+    }
+
+    /**
+     * Set preferred microphone direction.
+     * @param direction MicrophoneDirection constant (FRONT, BACK, EXTERNAL)
+     */
+    fun setPreferredMicrophoneDirection(direction: Int) {
+        pendingMicDirection = direction
+        applyMicDirection()
+    }
+
+    private fun applyMicDirection() {
+        val dir = pendingMicDirection ?: return
+        val recorder = audioRecord ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                recorder.setPreferredMicrophoneDirection(dir)
+                Log.d(TAG, "Mic direction set to $dir")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set mic direction: ${e.message}")
+            }
         }
     }
 
