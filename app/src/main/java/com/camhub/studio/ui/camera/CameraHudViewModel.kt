@@ -263,18 +263,10 @@ class CameraHudViewModel @Inject constructor(
                 return
             }
 
-            // 3. Encoding callback: drain encoded frames → broadcast (off GL thread)
+            // 3. Async encoding callback: encoder delivers frames via callback (zero-latency)
             // Rotation is applied in GL renderer, so always send rotation=0
-            val broadcastExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
-            glRenderer.onFrameEncoded = {
-                val frames = encoder.drainOutput()
-                if (frames.isNotEmpty()) {
-                    broadcastExecutor.execute {
-                        for (frame in frames) {
-                            streamServer.broadcastEncodedFrame(frame, encW, encH, 0)
-                        }
-                    }
-                }
+            encoder.onEncodedFrame = { frame ->
+                streamServer.broadcastEncodedFrame(frame, encW, encH, 0)
             }
 
             // 4. Bind CameraX to GL renderer's surface

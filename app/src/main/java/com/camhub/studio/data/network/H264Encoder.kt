@@ -5,6 +5,8 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
 
@@ -31,6 +33,8 @@ class H264Encoder(
 
     private var encoder: MediaCodec? = null
     private var surfaceMode = false
+    private var asyncMode = false
+    private var callbackThread: HandlerThread? = null
 
     var cachedSpsPps: ByteArray? = null
         private set
@@ -38,42 +42,21 @@ class H264Encoder(
     var inputSurface: Surface? = null
         private set
 
+    /** Async callback for surface mode — called on codec thread when output is available */
+    var onEncodedFrame: ((EncodedFrame) -> Unit)? = null
+
     fun start(): Boolean {
         return try {
-            val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-                )
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-                setInteger(
-                    MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
-                )
-                setInteger(
-                    MediaFormat.KEY_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
-                )
-                setInteger(
-                    MediaFormat.KEY_LEVEL,
-                    MediaCodecInfo.CodecProfileLevel.AVCLevel31
-                )
-                // Low-latency hints
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    setInteger(MediaFormat.KEY_LATENCY, 1)
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    setInteger(MediaFormat.KEY_PRIORITY, 0)
-                }
-            }
+            val format = createFormat(
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+            )
 
             encoder = MediaCodec.createEncoderByType(MIME_TYPE).apply {
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 start()
             }
             surfaceMode = false
+            asyncMode = false
             Log.d(TAG, "Encoder started (buffer mode): ${width}x${height} @ ${bitrate / 1000}kbps")
             true
         } catch (e: Exception) {
@@ -85,48 +68,125 @@ class H264Encoder(
 
     fun startSurface(): Boolean {
         return try {
-            val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-                )
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-                setInteger(
-                    MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
-                )
-                setInteger(
-                    MediaFormat.KEY_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
-                )
-                setInteger(
-                    MediaFormat.KEY_LEVEL,
-                    MediaCodecInfo.CodecProfileLevel.AVCLevel31
-                )
-                // Low-latency hints
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    setInteger(MediaFormat.KEY_LATENCY, 1)
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    setInteger(MediaFormat.KEY_PRIORITY, 0)
-                }
-            }
+            val format = createFormat(
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+            )
 
             val codec = MediaCodec.createEncoderByType(MIME_TYPE)
+
+            // Set async callback before configure for zero-latency output
+            val thread = HandlerThread("EncoderCallback").also { it.start() }
+            callbackThread = thread
+            val handler = Handler(thread.looper)
+
+            codec.setCallback(object : MediaCodec.Callback() {
+                override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
+                    // Surface mode — input is fed via Surface, not buffers
+                }
+
+                override fun onOutputBufferAvailable(
+                    mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo
+                ) {
+                    try {
+                        if (info.size > 0) {
+                            val outputBuffer = mc.getOutputBuffer(index)
+                            if (outputBuffer != null) {
+                                val data = ByteArray(info.size)
+                                outputBuffer.position(info.offset)
+                                outputBuffer.limit(info.offset + info.size)
+                                outputBuffer.get(data)
+
+                                val isKeyFrame =
+                                    (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                                val isConfig =
+                                    (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+
+                                if (isConfig) {
+                                    cachedSpsPps = data
+                                    Log.d(TAG, "SPS/PPS from async callback: ${data.size} bytes")
+                                }
+
+                                val frame = EncodedFrame(
+                                    data = data,
+                                    isKeyFrame = isKeyFrame,
+                                    isConfig = isConfig,
+                                    presentationTimeUs = info.presentationTimeUs
+                                )
+                                onEncodedFrame?.invoke(frame)
+                            }
+                        }
+                        mc.releaseOutputBuffer(index, false)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Async output error", e)
+                    }
+                }
+
+                override fun onOutputFormatChanged(mc: MediaCodec, format: MediaFormat) {
+                    val sps = format.getByteBuffer("csd-0")
+                    val pps = format.getByteBuffer("csd-1")
+                    if (sps != null && pps != null) {
+                        val spsBytes = ByteArray(sps.remaining()).also { sps.get(it) }
+                        val ppsBytes = ByteArray(pps.remaining()).also { pps.get(it) }
+                        cachedSpsPps = spsBytes + ppsBytes
+                        Log.d(TAG, "SPS/PPS cached (async): ${cachedSpsPps!!.size} bytes")
+
+                        val frame = EncodedFrame(
+                            data = cachedSpsPps!!,
+                            isKeyFrame = false,
+                            isConfig = true,
+                            presentationTimeUs = 0
+                        )
+                        onEncodedFrame?.invoke(frame)
+                    }
+                }
+
+                override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
+                    Log.e(TAG, "Async encoder error", e)
+                }
+            }, handler)
+
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = codec.createInputSurface()
             codec.start()
             encoder = codec
             surfaceMode = true
-            Log.d(TAG, "Encoder started (surface mode): ${width}x${height} @ ${bitrate / 1000}kbps")
+            asyncMode = true
+            Log.d(TAG, "Encoder started (surface async mode): ${width}x${height} @ ${bitrate / 1000}kbps")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start surface encoder", e)
             inputSurface = null
             encoder = null
+            callbackThread?.quitSafely()
+            callbackThread = null
             false
+        }
+    }
+
+    private fun createFormat(colorFormat: Int): MediaFormat {
+        return MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
+            setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+            )
+            setInteger(
+                MediaFormat.KEY_PROFILE,
+                MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+            )
+            setInteger(
+                MediaFormat.KEY_LEVEL,
+                MediaCodecInfo.CodecProfileLevel.AVCLevel31
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setInteger(MediaFormat.KEY_LATENCY, 1)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+            }
         }
     }
 
@@ -157,6 +217,7 @@ class H264Encoder(
     }
 
     fun drainOutput(): List<EncodedFrame> {
+        if (asyncMode) return emptyList() // async mode uses callback
         val frames = mutableListOf<EncodedFrame>()
         try {
             drainOutputTo(frames)
@@ -236,6 +297,7 @@ class H264Encoder(
     }
 
     fun release() {
+        onEncodedFrame = null
         try {
             inputSurface?.release()
         } catch (_: Exception) {}
@@ -247,8 +309,11 @@ class H264Encoder(
             encoder?.release()
         } catch (_: Exception) {}
         encoder = null
+        callbackThread?.quitSafely()
+        callbackThread = null
         cachedSpsPps = null
         surfaceMode = false
+        asyncMode = false
         Log.d(TAG, "Encoder released")
     }
 }
