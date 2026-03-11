@@ -62,9 +62,11 @@ class DirectorViewModel @Inject constructor(
                 val currentPeerNames = peers.map { it.name }.toSet()
 
                 // Auto-cleanup: disconnect streams for peers that are no longer connected
-                val activeStreams = streamClient.streams.value.keys
+                val activeStreams = connectedStreamNames.toSet()
                 for (name in activeStreams) {
                     if (name !in currentPeerNames) {
+                        connectedStreamNames.remove(name)
+                        connectedAudioNames.remove(name)
                         streamClient.disconnectStream(name)
                         audioStreamClient.disconnectAudioStream(name)
                     }
@@ -255,11 +257,13 @@ class DirectorViewModel @Inject constructor(
     }
 
     /** Connect to video and audio streams, passing session key for AES decryption */
+    private val connectedStreamNames = mutableSetOf<String>()
+    private val connectedAudioNames = mutableSetOf<String>()
+
     private fun connectToStreams(peers: List<ConnectedPeer>) {
-        val alreadyStreaming = streamClient.streams.value.keys
-        val alreadyAudio = audioStreamClient.channelStates.value.keys
         for (peer in peers) {
-            if (peer.streamPort > 0 && peer.name !in alreadyStreaming) {
+            if (peer.streamPort > 0 && peer.name !in connectedStreamNames) {
+                connectedStreamNames.add(peer.name)
                 streamClient.connectToStream(
                     cameraName = peer.name,
                     ip = peer.ip,
@@ -267,7 +271,8 @@ class DirectorViewModel @Inject constructor(
                     sessionKey = peer.streamKey
                 )
             }
-            if (peer.audioStreamPort > 0 && peer.name !in alreadyAudio) {
+            if (peer.audioStreamPort > 0 && peer.name !in connectedAudioNames) {
+                connectedAudioNames.add(peer.name)
                 audioStreamClient.connectToAudioStream(
                     cameraName = peer.name,
                     ip = peer.ip,
@@ -377,6 +382,8 @@ class DirectorViewModel @Inject constructor(
     fun disconnectCamera(cameraIndex: Int) {
         val camera = _uiState.value.cameras.getOrNull(cameraIndex) ?: return
         val cameraName = camera.name
+        connectedStreamNames.remove(cameraName)
+        connectedAudioNames.remove(cameraName)
         connectionManager.disconnectPeer(cameraName)
         streamClient.disconnectStream(cameraName)
         audioStreamClient.disconnectAudioStream(cameraName)
@@ -465,6 +472,8 @@ class DirectorViewModel @Inject constructor(
     }
 
     fun disconnectPeer(name: String) {
+        connectedStreamNames.remove(name)
+        connectedAudioNames.remove(name)
         connectionManager.disconnectPeer(name)
         streamClient.disconnectStream(name)
         audioStreamClient.disconnectAudioStream(name)
@@ -507,6 +516,8 @@ class DirectorViewModel @Inject constructor(
         if (recorder.recordingInfo.value.isRecording) {
             recorder.stopRecording()
         }
+        connectedStreamNames.clear()
+        connectedAudioNames.clear()
         streamClient.disconnectAll()
         audioStreamClient.disconnectAll()
     }
