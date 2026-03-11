@@ -38,7 +38,6 @@ import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.CameraFront
 import androidx.compose.material.icons.filled.CameraRear
 import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Exposure
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -63,10 +62,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.camhub.studio.ui.camera.components.AudioMetersPanel
 import com.camhub.studio.ui.camera.components.CameraStatusBar
-import com.camhub.studio.ui.camera.components.ExposurePanel
-import com.camhub.studio.ui.camera.components.FocusPanel
+import com.camhub.studio.ui.camera.components.UnifiedToolbar
 import com.camhub.studio.ui.camera.components.ViewfinderOverlay
-import com.camhub.studio.ui.camera.components.ZoomControl
 import com.camhub.studio.ui.components.StatusChip
 import com.camhub.studio.ui.theme.AmberYellow
 import com.camhub.studio.ui.theme.BackgroundDark
@@ -292,7 +289,7 @@ private fun PortraitLayout(
                 )
             }
 
-            // ── Record button + Tool icons ──
+            // ── Record button row ──
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -301,39 +298,16 @@ private fun PortraitLayout(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Left: tool icons
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = if (uiState.isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
-                        contentDescription = "Switch Camera",
-                        tint = TextSecondary,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .clickable { viewModel.switchCamera() }
-                    )
-                    Icon(
-                        imageVector = Icons.Default.Exposure,
-                        contentDescription = "Exposure",
-                        tint = if (uiState.showExposurePanel) Primary else TextSecondary,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .clickable { viewModel.toggleExposurePanel() }
-                    )
-                    Icon(
-                        imageVector = Icons.Default.CenterFocusStrong,
-                        contentDescription = "Focus",
-                        tint = if (uiState.showFocusPanel) CyanAccent else TextSecondary,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .clickable { viewModel.toggleFocusPanel() }
-                    )
-                }
+                // Left: camera switch
+                Icon(
+                    imageVector = if (uiState.isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
+                    contentDescription = "Switch Camera",
+                    tint = TextSecondary,
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .clickable { viewModel.switchCamera() }
+                )
 
                 // Center: big record button
                 Box(
@@ -374,7 +348,6 @@ private fun PortraitLayout(
                             .clip(CircleShape)
                             .clickable { viewModel.toggleSettingsPanel() }
                     )
-                    // Aspect ratio toggle
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
@@ -397,51 +370,42 @@ private fun PortraitLayout(
                 }
             }
 
-            // ── Zoom control ──
-            if (uiState.zoomSteps.size > 1) {
-                ZoomControl(
-                    zoomSteps = uiState.zoomSteps,
-                    selectedZoomIndex = uiState.selectedZoomIndex,
-                    onZoomIndexChanged = { viewModel.setZoomByIndex(it) }
-                )
-            }
+            // ── Unified toolbar (slider + tool tabs) ──
+            UnifiedToolbar(
+                activeToolMode = uiState.activeToolMode,
+                onToggleTool = { viewModel.toggleTool(it) },
+                onResetAuto = { viewModel.resetAllToAuto() },
+                zoomRatio = uiState.zoomRatio,
+                minZoomRatio = uiState.minZoomRatio,
+                maxZoomRatio = uiState.maxZoomRatio,
+                zoomSteps = uiState.zoomSteps,
+                selectedZoomIndex = uiState.selectedZoomIndex,
+                onZoomChanged = { viewModel.setZoom(it) },
+                isoValues = uiState.isoValues,
+                selectedIsoIndex = uiState.selectedIsoIndex,
+                onIsoChanged = { viewModel.updateIso(it) },
+                shutterValues = uiState.shutterValues,
+                selectedShutterIndex = uiState.selectedShutterIndex,
+                onShutterChanged = { viewModel.updateShutter(it) },
+                focusDistances = uiState.focusDistances,
+                selectedFocusIndex = uiState.selectedFocusIndex,
+                onFocusChanged = { viewModel.updateFocus(it) },
+                whiteBalanceValues = uiState.whiteBalanceValues,
+                selectedWhiteBalanceIndex = uiState.selectedWhiteBalanceIndex,
+                onWhiteBalanceChanged = { viewModel.updateWhiteBalance(it) },
+                micDirection = uiState.micDirection,
+                onMicDirectionChanged = { viewModel.setMicDirection(it) }
+            )
         }
 
-        // ── Overlay panels (Exposure / Focus / Settings) ──
+        // ── Overlay panels (Settings) ──
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .windowInsetsPadding(safeInsets)
-                .padding(start = 8.dp, end = 8.dp, bottom = 100.dp)
+                .padding(start = 8.dp, end = 8.dp, bottom = 160.dp)
         ) {
-            AnimatedVisibility(
-                visible = uiState.showExposurePanel,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-            ) {
-                ExposurePanel(
-                    isoValues = uiState.isoValues,
-                    selectedIsoIndex = uiState.selectedIsoIndex,
-                    onIsoChanged = { viewModel.updateIso(it) },
-                    shutterValues = uiState.shutterValues,
-                    selectedShutterIndex = uiState.selectedShutterIndex,
-                    onShutterChanged = { viewModel.updateShutter(it) }
-                )
-            }
-            AnimatedVisibility(
-                visible = uiState.showFocusPanel,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-            ) {
-                FocusPanel(
-                    focusDistances = uiState.focusDistances,
-                    selectedFocusIndex = uiState.selectedFocusIndex,
-                    onFocusChanged = { viewModel.updateFocus(it) },
-                    isPeakingEnabled = uiState.isPeakingEnabled,
-                    onTogglePeaking = { viewModel.togglePeaking() }
-                )
-            }
             AnimatedVisibility(
                 visible = uiState.showSettingsPanel,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -608,18 +572,18 @@ private fun LandscapeLayout(
                 HudCircleButton(
                     icon = Icons.Default.CenterFocusStrong,
                     label = uiState.focusDistances.getOrElse(uiState.selectedFocusIndex) { "AF" },
-                    isActive = uiState.showFocusPanel,
+                    isActive = uiState.activeToolMode == com.camhub.studio.ui.camera.model.ToolMode.FOCUS,
                     activeColor = CyanAccent,
-                    onClick = { viewModel.toggleFocusPanel() }
+                    onClick = { viewModel.toggleTool(com.camhub.studio.ui.camera.model.ToolMode.FOCUS) }
                 )
 
-                // Exposure
+                // Exposure (ISO)
                 HudCircleButton(
                     icon = Icons.Default.Exposure,
                     label = uiState.isoValues.getOrElse(uiState.selectedIsoIndex) { "--" },
-                    isActive = uiState.showExposurePanel,
+                    isActive = uiState.activeToolMode == com.camhub.studio.ui.camera.model.ToolMode.ISO,
                     activeColor = Primary,
-                    onClick = { viewModel.toggleExposurePanel() }
+                    onClick = { viewModel.toggleTool(com.camhub.studio.ui.camera.model.ToolMode.ISO) }
                 )
 
                 // Shutter
@@ -628,7 +592,7 @@ private fun LandscapeLayout(
                     icon = null,
                     label = shutterVal,
                     customText = "SHTR",
-                    onClick = { viewModel.toggleExposurePanel() }
+                    onClick = { viewModel.toggleTool(com.camhub.studio.ui.camera.model.ToolMode.SHUTTER) }
                 )
 
                 // Zoom
@@ -636,7 +600,7 @@ private fun LandscapeLayout(
                     icon = null,
                     label = "${String.format("%.1f", uiState.zoomRatio)}x",
                     customText = "ZOOM",
-                    onClick = { /* zoom control via pinch */ }
+                    onClick = { viewModel.toggleTool(com.camhub.studio.ui.camera.model.ToolMode.ZOOM) }
                 )
             }
 
@@ -712,40 +676,42 @@ private fun LandscapeLayout(
                 )
             }
 
-            // 8. Exposure/Focus panels overlay (center-left)
-            Column(
+            // 8. Unified toolbar overlay (bottom)
+            val showLandscapeSlider = uiState.activeToolMode != com.camhub.studio.ui.camera.model.ToolMode.NONE
+            AnimatedVisibility(
+                visible = showLandscapeSlider,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                 modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = 60.dp)
-                    .width(240.dp)
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 70.dp)
+                    .fillMaxWidth(0.7f)
             ) {
-                AnimatedVisibility(
-                    visible = uiState.showExposurePanel,
-                    enter = fadeIn(),
-                    exit = fadeOut()
-                ) {
-                    ExposurePanel(
-                        isoValues = uiState.isoValues,
-                        selectedIsoIndex = uiState.selectedIsoIndex,
-                        onIsoChanged = { viewModel.updateIso(it) },
-                        shutterValues = uiState.shutterValues,
-                        selectedShutterIndex = uiState.selectedShutterIndex,
-                        onShutterChanged = { viewModel.updateShutter(it) }
-                    )
-                }
-                AnimatedVisibility(
-                    visible = uiState.showFocusPanel,
-                    enter = fadeIn(),
-                    exit = fadeOut()
-                ) {
-                    FocusPanel(
-                        focusDistances = uiState.focusDistances,
-                        selectedFocusIndex = uiState.selectedFocusIndex,
-                        onFocusChanged = { viewModel.updateFocus(it) },
-                        isPeakingEnabled = uiState.isPeakingEnabled,
-                        onTogglePeaking = { viewModel.togglePeaking() }
-                    )
-                }
+                UnifiedToolbar(
+                    activeToolMode = uiState.activeToolMode,
+                    onToggleTool = { viewModel.toggleTool(it) },
+                    onResetAuto = { viewModel.resetAllToAuto() },
+                    zoomRatio = uiState.zoomRatio,
+                    minZoomRatio = uiState.minZoomRatio,
+                    maxZoomRatio = uiState.maxZoomRatio,
+                    zoomSteps = uiState.zoomSteps,
+                    selectedZoomIndex = uiState.selectedZoomIndex,
+                    onZoomChanged = { viewModel.setZoom(it) },
+                    isoValues = uiState.isoValues,
+                    selectedIsoIndex = uiState.selectedIsoIndex,
+                    onIsoChanged = { viewModel.updateIso(it) },
+                    shutterValues = uiState.shutterValues,
+                    selectedShutterIndex = uiState.selectedShutterIndex,
+                    onShutterChanged = { viewModel.updateShutter(it) },
+                    focusDistances = uiState.focusDistances,
+                    selectedFocusIndex = uiState.selectedFocusIndex,
+                    onFocusChanged = { viewModel.updateFocus(it) },
+                    whiteBalanceValues = uiState.whiteBalanceValues,
+                    selectedWhiteBalanceIndex = uiState.selectedWhiteBalanceIndex,
+                    onWhiteBalanceChanged = { viewModel.updateWhiteBalance(it) },
+                    micDirection = uiState.micDirection,
+                    onMicDirectionChanged = { viewModel.setMicDirection(it) }
+                )
             }
         }
     }

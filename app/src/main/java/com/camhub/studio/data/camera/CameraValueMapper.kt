@@ -71,6 +71,25 @@ object CameraValueMapper {
     }
 
     /**
+     * Generate white balance (color temperature) steps in Kelvin.
+     */
+    fun generateWhiteBalanceSteps(): List<String> {
+        return listOf(
+            "Auto", "2800K", "3200K", "3500K", "4000K", "4500K",
+            "5000K", "5600K", "6000K", "6500K", "7000K", "7500K"
+        )
+    }
+
+    /**
+     * Parse white balance string like "5600K" to integer Kelvin value.
+     * Returns null for "Auto".
+     */
+    fun whiteBalanceToKelvin(wb: String): Int? {
+        if (wb == "Auto") return null
+        return wb.removeSuffix("K").toIntOrNull()
+    }
+
+    /**
      * Generate discrete zoom steps from [minZoom] to [maxZoom] in 0.5x increments.
      */
     fun generateZoomSteps(minZoom: Float, maxZoom: Float): List<String> {

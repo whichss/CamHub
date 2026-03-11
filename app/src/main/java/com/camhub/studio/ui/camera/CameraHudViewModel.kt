@@ -21,6 +21,8 @@ import com.camhub.studio.data.network.PeerConnectionManager
 import com.camhub.studio.data.network.StreamServer
 import com.camhub.studio.ui.camera.model.CameraUiState
 import com.camhub.studio.ui.camera.model.LensInfo
+import com.camhub.studio.ui.camera.model.MicDirection
+import com.camhub.studio.ui.camera.model.ToolMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -49,6 +51,7 @@ class CameraHudViewModel @Inject constructor(
             lens = LensInfo(),
             shutterValues = CameraValueMapper.generateShutterSpeeds(),
             selectedShutterIndex = 0,
+            whiteBalanceValues = CameraValueMapper.generateWhiteBalanceSteps(),
             audioLevels = listOf(0f, 0f),
             streamFps = streamingConfig.fps,
             streamMaxResolution = streamingConfig.maxResolution,
@@ -368,12 +371,41 @@ class CameraHudViewModel @Inject constructor(
         _uiState.update { it.copy(isPeakingEnabled = !it.isPeakingEnabled) }
     }
 
-    fun toggleExposurePanel() {
-        _uiState.update { it.copy(showExposurePanel = !it.showExposurePanel, showFocusPanel = false) }
+    fun toggleTool(mode: ToolMode) {
+        _uiState.update {
+            it.copy(activeToolMode = if (it.activeToolMode == mode) ToolMode.NONE else mode)
+        }
     }
 
-    fun toggleFocusPanel() {
-        _uiState.update { it.copy(showFocusPanel = !it.showFocusPanel, showExposurePanel = false) }
+    @ExperimentalCamera2Interop
+    fun resetAllToAuto() {
+        cameraController.resetAllToAuto()
+        _uiState.update {
+            it.copy(
+                selectedIsoIndex = 0,       // "Auto"
+                selectedShutterIndex = 0,   // "Auto"
+                selectedFocusIndex = 0,     // "AF"
+                selectedWhiteBalanceIndex = 0, // "Auto"
+                activeToolMode = ToolMode.NONE
+            )
+        }
+    }
+
+    @ExperimentalCamera2Interop
+    fun updateWhiteBalance(index: Int) {
+        _uiState.update { it.copy(selectedWhiteBalanceIndex = index) }
+        val wbStr = _uiState.value.whiteBalanceValues.getOrNull(index) ?: return
+        val kelvin = CameraValueMapper.whiteBalanceToKelvin(wbStr)
+        if (kelvin != null) {
+            cameraController.setWhiteBalance(kelvin)
+        } else {
+            cameraController.enableAutoWhiteBalance()
+        }
+    }
+
+    fun setMicDirection(direction: MicDirection) {
+        _uiState.update { it.copy(micDirection = direction, activeToolMode = ToolMode.NONE) }
+        // TODO: Apply mic direction via AudioCaptureService.setPreferredMicrophoneDirection()
     }
 
     fun setZoom(ratio: Float) {

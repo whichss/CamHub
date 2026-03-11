@@ -441,6 +441,43 @@ class CameraController @Inject constructor(
     }
 
     @androidx.camera.camera2.interop.ExperimentalCamera2Interop
+    fun setWhiteBalance(kelvin: Int) {
+        camera2Control?.let { ctrl ->
+            // Map kelvin to closest AWB preset
+            val awbMode = when {
+                kelvin <= 2800 -> CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT
+                kelvin <= 3500 -> CaptureRequest.CONTROL_AWB_MODE_WARM_FLUORESCENT
+                kelvin <= 4500 -> CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
+                kelvin <= 5500 -> CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT
+                kelvin <= 6500 -> CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT
+                kelvin <= 7000 -> CaptureRequest.CONTROL_AWB_MODE_TWILIGHT
+                else -> CaptureRequest.CONTROL_AWB_MODE_SHADE
+            }
+            val options = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+                .build()
+            ctrl.addCaptureRequestOptions(options)
+        }
+    }
+
+    @androidx.camera.camera2.interop.ExperimentalCamera2Interop
+    fun enableAutoWhiteBalance() {
+        camera2Control?.let { ctrl ->
+            val options = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                .build()
+            ctrl.addCaptureRequestOptions(options)
+        }
+    }
+
+    @androidx.camera.camera2.interop.ExperimentalCamera2Interop
+    fun resetAllToAuto() {
+        enableAutoExposure()
+        enableContinuousAf()
+        enableAutoWhiteBalance()
+    }
+
+    @androidx.camera.camera2.interop.ExperimentalCamera2Interop
     fun enableContinuousAf() {
         camera2Control?.let { ctrl ->
             val options = CaptureRequestOptions.Builder()

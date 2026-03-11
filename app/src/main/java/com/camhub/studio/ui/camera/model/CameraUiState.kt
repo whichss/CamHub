@@ -1,5 +1,13 @@
 package com.camhub.studio.ui.camera.model
 
+enum class ToolMode {
+    NONE, ZOOM, ISO, SHUTTER, FOCUS, WHITE_BALANCE, MIC
+}
+
+enum class MicDirection {
+    FRONT, BACK, EXTERNAL
+}
+
 data class CameraUiState(
     val nodeName: String = "",
     val isRecording: Boolean = false,
@@ -29,9 +37,11 @@ data class CameraUiState(
     val cameraError: String? = null,
     // Phase 6 additions
     val isFrontCamera: Boolean = false,
-    // Phase 7 additions
-    val showExposurePanel: Boolean = false,
-    val showFocusPanel: Boolean = false,
+    // Unified toolbar
+    val activeToolMode: ToolMode = ToolMode.NONE,
+    val micDirection: MicDirection = MicDirection.BACK,
+    val whiteBalanceValues: List<String> = emptyList(),
+    val selectedWhiteBalanceIndex: Int = 0,
     val zoomRatio: Float = 1f,
     val minZoomRatio: Float = 1f,
     val maxZoomRatio: Float = 1f,
