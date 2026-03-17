@@ -268,7 +268,7 @@ class DirectorRecorder @Inject constructor(
 
             drainJob = null
             releaseResources()
-            finalizeMediaStore()
+            finalizeMediaStore()  // safe even if FD already closed by releaseResources
             stopRequested = false
             Log.d(TAG, "Recording stopped: $path (total frames: $frameCount)")
         }
@@ -347,5 +347,13 @@ class DirectorRecorder @Inject constructor(
         inputSurface = null
         videoTrackIndex = -1
         muxerStarted = false
+
+        // Ensure ParcelFileDescriptor is closed even if finalizeMediaStore() hasn't been called yet
+        // (e.g., abnormal stop, crash recovery)
+        if (pendingFd != null) {
+            try { pendingFd?.close() } catch (_: Exception) {}
+            pendingFd = null
+            Log.w(TAG, "ParcelFileDescriptor closed in releaseResources (fallback)")
+        }
     }
 }

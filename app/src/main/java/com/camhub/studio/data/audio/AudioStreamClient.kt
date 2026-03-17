@@ -32,7 +32,7 @@ class AudioStreamClient @Inject constructor() {
         private const val SAMPLES_PER_CHUNK = SAMPLE_RATE * CHUNK_DURATION_MS / 1000  // 882
         private const val BYTES_PER_CHUNK = SAMPLES_PER_CHUNK * 2  // 1764
         private const val MAX_FRAME_SIZE = 64 * 1024  // 64KB max audio frame
-        private const val MAX_RECONNECT_ATTEMPTS = Int.MAX_VALUE
+        private const val MAX_RECONNECT_ATTEMPTS = 60
         private const val RECONNECT_BASE_DELAY_MS = 500L
         private const val RECONNECT_MAX_DELAY_MS = 10_000L
         private const val META_HEADER_SIZE = 2
@@ -354,7 +354,7 @@ class AudioStreamClient @Inject constructor() {
 }
 
 /**
- * Lock-free ring buffer for audio chunks.
+ * Synchronized ring buffer for audio chunks.
  * Each slot holds one chunk of [chunkSize] samples.
  */
 internal class AudioRingBuffer(
@@ -362,9 +362,9 @@ internal class AudioRingBuffer(
     private val chunkSize: Int
 ) {
     private val buffer = Array(capacity) { ShortArray(chunkSize) }
-    @Volatile private var writePos = 0
-    @Volatile private var readPos = 0
-    @Volatile private var count = 0
+    private var writePos = 0
+    private var readPos = 0
+    private var count = 0
     private var syncOffset = 0
 
     @Synchronized

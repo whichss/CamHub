@@ -27,7 +27,7 @@ class StreamServer @Inject constructor() {
     }
 
     private var lastFrameTimeMs: Long = 0
-    private val maxFps: Int = 30
+    var maxFps: Int = 30
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var serverSocket: ServerSocket? = null
@@ -350,7 +350,7 @@ class StreamServer @Inject constructor() {
         return nv12
     }
 
-    private val broadcastPool = Executors.newCachedThreadPool()
+    private val broadcastPool = Executors.newFixedThreadPool(4)
 
     private fun broadcastFrame(payload: ByteArray, isKeyFrame: Boolean = false) {
         val dataToSend = if (usingSrt) payload  // SRT handles encryption via passphrase

@@ -98,6 +98,7 @@ class AudioCaptureService @Inject constructor() {
      * Retry audio capture after RECORD_AUDIO permission is granted.
      * Safe to call multiple times — no-op if already capturing.
      */
+    @Synchronized
     fun ensureCapture() {
         if (audioRecord != null) return  // already capturing
         if (serverSocket == null) return  // server not started

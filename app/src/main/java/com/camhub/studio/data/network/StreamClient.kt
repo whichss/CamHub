@@ -32,7 +32,7 @@ class StreamClient @Inject constructor() {
     companion object {
         private const val TAG = "StreamClient"
         private const val MAX_FRAME_SIZE = 2 * 1024 * 1024 // 2MB max frame
-        private const val MAX_RECONNECT_ATTEMPTS = Int.MAX_VALUE // unlimited reconnect
+        private const val MAX_RECONNECT_ATTEMPTS = 60
         private const val RECONNECT_BASE_DELAY_MS = 500L
         private const val RECONNECT_MAX_DELAY_MS = 10_000L
         private const val FLAG_KEYFRAME = 0x01
@@ -145,13 +145,12 @@ class StreamClient @Inject constructor() {
 
     private suspend fun connectTcp(cameraName: String, ip: String, port: Int, sessionKey: ByteArray?) {
         val cipher = if (sessionKey != null) FrameCipher(sessionKey) else null
-        val socket = Socket(ip, port).apply {
-            soTimeout = 2_000
-            keepAlive = true
-            tcpNoDelay = true
-            receiveBufferSize = 64 * 1024
-        }
+        val socket = Socket(ip, port)
         try {
+            socket.soTimeout = 2_000
+            socket.keepAlive = true
+            socket.tcpNoDelay = true
+            socket.receiveBufferSize = 64 * 1024
             val input = DataInputStream(socket.getInputStream())
 
             Log.d(TAG, "TCP connected to stream $cameraName at $ip:$port")
@@ -323,7 +322,7 @@ class StreamClient @Inject constructor() {
 
         val bytes = bytesCounter.getAndSet(0)
         lastTime.set(now)
-        return ((bytes * 8) / elapsed).toInt() // kbps
+        return ((bytes * 8L) / elapsed).toInt() // kbps
     }
 
     fun getTotalBitrateKbps(): Int {

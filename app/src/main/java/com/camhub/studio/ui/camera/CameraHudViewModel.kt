@@ -449,6 +449,7 @@ class CameraHudViewModel @Inject constructor(
 
     fun updateStreamFps(fps: Int) {
         streamingConfig.fps = fps
+        streamServer.maxFps = fps
         _uiState.update { it.copy(streamFps = fps) }
     }
 
