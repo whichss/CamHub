@@ -27,17 +27,23 @@ class AudioStreamClient @Inject constructor() {
 
     companion object {
         private const val TAG = "AudioStreamClient"
-        private const val SAMPLE_RATE = 44100
+        private const val SAMPLE_RATE_PCM = 44100
+        private const val SAMPLE_RATE_OPUS = 48000
         private const val CHUNK_DURATION_MS = 20
-        private const val SAMPLES_PER_CHUNK = SAMPLE_RATE * CHUNK_DURATION_MS / 1000  // 882
-        private const val BYTES_PER_CHUNK = SAMPLES_PER_CHUNK * 2  // 1764
+        private const val SAMPLES_PER_CHUNK_PCM = SAMPLE_RATE_PCM * CHUNK_DURATION_MS / 1000  // 882
+        private const val SAMPLES_PER_CHUNK_OPUS = SAMPLE_RATE_OPUS * CHUNK_DURATION_MS / 1000  // 960
+        private const val BYTES_PER_CHUNK_PCM = SAMPLES_PER_CHUNK_PCM * 2  // 1764
         private const val MAX_FRAME_SIZE = 64 * 1024  // 64KB max audio frame
         private const val MAX_RECONNECT_ATTEMPTS = 60
         private const val RECONNECT_BASE_DELAY_MS = 500L
         private const val RECONNECT_MAX_DELAY_MS = 10_000L
-        private const val META_HEADER_SIZE = 2
-        // Ring buffer: 80ms capacity = 4 chunks (low-latency with jitter margin)
-        private const val RING_BUFFER_CHUNKS = 4
+        private const val META_HEADER_V1_SIZE = 2
+        private const val META_HEADER_V2_SIZE = 5
+        // Ring buffer: 40ms capacity = 2 chunks (minimal latency for LAN)
+        private const val RING_BUFFER_CHUNKS = 2
+
+        private const val CODEC_PCM: Byte = 0x00
+        private const val CODEC_OPUS: Byte = 0x01
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -48,6 +54,8 @@ class AudioStreamClient @Inject constructor() {
     private val channelAfvEnabled = ConcurrentHashMap<String, Boolean>()
     private val channelSyncOffsets = ConcurrentHashMap<String, Int>()
     private val streamJobs = ConcurrentHashMap<String, Job>()
+    private val channelDecoders = ConcurrentHashMap<String, OpusDecoder>()
+    private val channelSampleRates = ConcurrentHashMap<String, Int>()
 
     // PGM cameras for AFV logic
     private val pgmCameraNames = ConcurrentHashMap.newKeySet<String>()
@@ -66,19 +74,50 @@ class AudioStreamClient @Inject constructor() {
     // AudioTrack for playback
     private var audioTrack: AudioTrack? = null
     private var mixingJob: Job? = null
+    private var currentPlaybackRate: Int = SAMPLE_RATE_PCM
 
     private fun ensureMixingStarted() {
         if (mixingJob != null) return
         startMixing()
     }
 
+    /**
+     * Determine the playback sample rate based on connected channels.
+     * If any channel uses Opus (48 kHz), use 48 kHz for the AudioTrack;
+     * otherwise default to 44100 Hz.
+     */
+    private fun resolvePlaybackSampleRate(): Int {
+        return if (channelSampleRates.values.any { it == SAMPLE_RATE_OPUS }) {
+            SAMPLE_RATE_OPUS
+        } else {
+            SAMPLE_RATE_PCM
+        }
+    }
+
+    /**
+     * Restart the AudioTrack if the required sample rate has changed.
+     */
+    private fun ensureCorrectSampleRate() {
+        val needed = resolvePlaybackSampleRate()
+        if (needed != currentPlaybackRate && audioTrack != null) {
+            Log.d(TAG, "Sample rate changed ($currentPlaybackRate -> $needed), restarting AudioTrack")
+            stopMixing()
+            startMixing()
+        }
+    }
+
     private fun startMixing() {
+        val sampleRate = resolvePlaybackSampleRate()
+        currentPlaybackRate = sampleRate
+        val samplesPerChunk = sampleRate * CHUNK_DURATION_MS / 1000
+        val bytesPerChunk = samplesPerChunk * 2
+
         val minBuf = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE,
+            sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        val bufSize = maxOf(minBuf, BYTES_PER_CHUNK * 2)
+        val bufSize = maxOf(minBuf, bytesPerChunk * 2)
 
         try {
             audioTrack = AudioTrack.Builder()
@@ -91,7 +130,7 @@ class AudioStreamClient @Inject constructor() {
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE)
+                        .setSampleRate(sampleRate)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
@@ -100,21 +139,19 @@ class AudioStreamClient @Inject constructor() {
                 .build()
 
             audioTrack?.play()
-            Log.d(TAG, "AudioTrack started: sampleRate=$SAMPLE_RATE, bufSize=$bufSize")
+            Log.d(TAG, "AudioTrack started: sampleRate=$sampleRate, bufSize=$bufSize")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create AudioTrack", e)
             audioTrack = null
         }
 
         mixingJob = scope.launch {
-            val mixBuffer = FloatArray(SAMPLES_PER_CHUNK)
-            val outputBuffer = ShortArray(SAMPLES_PER_CHUNK)
-            val silenceBuffer = ShortArray(SAMPLES_PER_CHUNK) // pre-allocated silence
+            val mixBuffer = FloatArray(samplesPerChunk)
+            val outputBuffer = ShortArray(samplesPerChunk)
+            val silenceBuffer = ShortArray(samplesPerChunk) // pre-allocated silence
 
             while (isActive) {
                 // Pace mixing at chunk interval to stay in sync with audio arrival rate.
-                // Without pacing, the loop outruns network delivery → ring buffer starves
-                // → levels stay at zero and AudioTrack underruns.
                 delay(CHUNK_DURATION_MS.toLong())
 
                 // Clear mix buffer
@@ -135,13 +172,14 @@ class AudioStreamClient @Inject constructor() {
 
                     // Calculate channel RMS before mixing
                     var sumSquares = 0.0
-                    for (i in chunk.indices) {
+                    val mixLen = minOf(chunk.size, samplesPerChunk)
+                    for (i in 0 until mixLen) {
                         val sample = chunk[i].toFloat() / Short.MAX_VALUE
                         val gained = sample * gain
                         sumSquares += gained * gained
                         mixBuffer[i] += gained
                     }
-                    val rms = sqrt(sumSquares / chunk.size).toFloat()
+                    val rms = sqrt(sumSquares / mixLen).toFloat()
                     val normalizedLevel = rmsToNormalizedDb(rms)
                     currentChannelLevels[name] = normalizedLevel
                 }
@@ -196,9 +234,13 @@ class AudioStreamClient @Inject constructor() {
     ) {
         // Cancel existing stream for this camera
         streamJobs[cameraName]?.cancel()
-        channelBuffers[cameraName] = AudioRingBuffer(RING_BUFFER_CHUNKS, SAMPLES_PER_CHUNK)
+        // Default to PCM chunk size; will be updated once we know the codec
+        channelBuffers[cameraName] = AudioRingBuffer(RING_BUFFER_CHUNKS, SAMPLES_PER_CHUNK_OPUS)
         channelFaders.putIfAbsent(cameraName, 0.75f)
         channelAfvEnabled.putIfAbsent(cameraName, false)
+
+        // Release any previous decoder for this channel
+        channelDecoders.remove(cameraName)?.release()
 
         ensureMixingStarted()
 
@@ -246,10 +288,7 @@ class AudioStreamClient @Inject constructor() {
                             frameBytes
                         }
 
-                        // Parse: [version(1)][channels(1)][PCM data...]
-                        if (decrypted.size <= META_HEADER_SIZE) continue
-                        val pcmBytes = decrypted.copyOfRange(META_HEADER_SIZE, decrypted.size)
-                        val samples = bytesToShortArray(pcmBytes)
+                        val samples = parseAudioFrame(cameraName, decrypted) ?: continue
 
                         // Write to ring buffer (applying sync offset via buffer depth)
                         channelBuffers[cameraName]?.write(samples)
@@ -265,6 +304,66 @@ class AudioStreamClient @Inject constructor() {
             }
 
             Log.d(TAG, "Audio stream ended for $cameraName")
+        }
+    }
+
+    /**
+     * Parse a decrypted audio frame, handling both v1 and v2 headers.
+     *
+     * v1: [version=1][channels(1)][PCM data...]
+     * v2: [version=2][channels(1)][codec(1)][sample_rate_hi(1)][sample_rate_lo(1)][audio data...]
+     *
+     * @return decoded PCM samples, or null if the frame should be skipped
+     */
+    private fun parseAudioFrame(cameraName: String, decrypted: ByteArray): ShortArray? {
+        if (decrypted.size < META_HEADER_V1_SIZE) return null
+
+        val version = decrypted[0].toInt()
+
+        return when (version) {
+            1 -> {
+                // v1 protocol: raw PCM after 2-byte header
+                if (decrypted.size <= META_HEADER_V1_SIZE) return null
+                channelSampleRates[cameraName] = SAMPLE_RATE_PCM
+                val pcmBytes = decrypted.copyOfRange(META_HEADER_V1_SIZE, decrypted.size)
+                bytesToShortArray(pcmBytes)
+            }
+            2 -> {
+                // v2 protocol
+                if (decrypted.size < META_HEADER_V2_SIZE) return null
+                val codec = decrypted[2]
+                val sampleRate = ((decrypted[3].toInt() and 0xFF) shl 8 or
+                        (decrypted[4].toInt() and 0xFF)) * 100
+                channelSampleRates[cameraName] = sampleRate
+                val audioData = decrypted.copyOfRange(META_HEADER_V2_SIZE, decrypted.size)
+
+                when (codec) {
+                    CODEC_PCM -> {
+                        bytesToShortArray(audioData)
+                    }
+                    CODEC_OPUS -> {
+                        // Lazy-initialise decoder for this channel
+                        val decoder = channelDecoders.getOrPut(cameraName) {
+                            OpusDecoder().also { d ->
+                                if (!d.start()) {
+                                    Log.e(TAG, "Failed to start Opus decoder for $cameraName")
+                                }
+                            }
+                        }
+                        // Ensure AudioTrack matches 48 kHz when Opus is in use
+                        ensureCorrectSampleRate()
+                        decoder.decode(audioData)
+                    }
+                    else -> {
+                        Log.w(TAG, "Unknown codec: $codec")
+                        null
+                    }
+                }
+            }
+            else -> {
+                Log.w(TAG, "Unknown audio header version: $version")
+                null
+            }
         }
     }
 
@@ -313,6 +412,8 @@ class AudioStreamClient @Inject constructor() {
         channelFaders.remove(cameraName)
         channelAfvEnabled.remove(cameraName)
         channelSyncOffsets.remove(cameraName)
+        channelSampleRates.remove(cameraName)
+        channelDecoders.remove(cameraName)?.release()
 
         val current = _channelStates.value.toMutableMap()
         current.remove(cameraName)
@@ -331,6 +432,9 @@ class AudioStreamClient @Inject constructor() {
         channelFaders.clear()
         channelAfvEnabled.clear()
         channelSyncOffsets.clear()
+        channelSampleRates.clear()
+        channelDecoders.values.forEach { it.release() }
+        channelDecoders.clear()
         pgmCameraNames.clear()
         _channelStates.value = emptyMap()
         _masterLevel.value = 0f

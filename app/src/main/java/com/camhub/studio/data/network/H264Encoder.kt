@@ -127,11 +127,12 @@ class H264Encoder(
                     if (sps != null && pps != null) {
                         val spsBytes = ByteArray(sps.remaining()).also { sps.get(it) }
                         val ppsBytes = ByteArray(pps.remaining()).also { pps.get(it) }
-                        cachedSpsPps = spsBytes + ppsBytes
-                        Log.d(TAG, "SPS/PPS cached (async): ${cachedSpsPps!!.size} bytes")
+                        val spsPpsData = spsBytes + ppsBytes
+                        cachedSpsPps = spsPpsData
+                        Log.d(TAG, "SPS/PPS cached (async): ${spsPpsData.size} bytes")
 
                         val frame = EncodedFrame(
-                            data = cachedSpsPps!!,
+                            data = spsPpsData,
                             isKeyFrame = false,
                             isConfig = true,
                             presentationTimeUs = 0
@@ -246,11 +247,12 @@ class H264Encoder(
                     if (sps != null && pps != null) {
                         val spsBytes = ByteArray(sps.remaining()).also { sps.get(it) }
                         val ppsBytes = ByteArray(pps.remaining()).also { pps.get(it) }
-                        cachedSpsPps = spsBytes + ppsBytes
-                        Log.d(TAG, "SPS/PPS cached: ${cachedSpsPps!!.size} bytes")
+                        val spsPpsData = spsBytes + ppsBytes
+                        cachedSpsPps = spsPpsData
+                        Log.d(TAG, "SPS/PPS cached: ${spsPpsData.size} bytes")
                         frames.add(
                             EncodedFrame(
-                                data = cachedSpsPps!!,
+                                data = spsPpsData,
                                 isKeyFrame = false,
                                 isConfig = true,
                                 presentationTimeUs = 0

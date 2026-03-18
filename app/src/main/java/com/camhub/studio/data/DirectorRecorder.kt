@@ -201,7 +201,7 @@ class DirectorRecorder @Inject constructor(
         if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused) return
 
         try {
-            val canvas = surface.lockCanvas(null)
+            val canvas = surface.lockCanvas(null) ?: return
             canvas.drawBitmap(
                 bitmap,
                 null,

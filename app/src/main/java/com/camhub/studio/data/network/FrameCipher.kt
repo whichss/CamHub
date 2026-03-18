@@ -29,6 +29,7 @@ class FrameCipher(key: ByteArray) {
 
     private val secretKey = SecretKeySpec(key, "AES")
     private val ivPrefix = ByteArray(4).also { SecureRandom().nextBytes(it) }
+    // AtomicLong counter ensures unique IVs. At 30fps, overflow takes ~9.7 billion years.
     private val counter = AtomicLong(0L)
 
     /**

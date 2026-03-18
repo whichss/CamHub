@@ -26,15 +26,25 @@ class AudioCaptureService @Inject constructor() {
     companion object {
         private const val TAG = "AudioCaptureService"
         private const val SAMPLE_RATE = 44100
+        private const val OPUS_SAMPLE_RATE = 48000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val CHUNK_DURATION_MS = 20
         private const val SAMPLES_PER_CHUNK = SAMPLE_RATE * CHUNK_DURATION_MS / 1000  // 882
         private const val BYTES_PER_CHUNK = SAMPLES_PER_CHUNK * 2  // 1764 bytes (16-bit)
         private const val MAX_CLIENTS = 4
-        private const val META_HEADER_VERSION: Byte = 1
-        private const val META_HEADER_CHANNELS: Byte = 1
-        private const val META_HEADER_SIZE = 2
+
+        // v1 header: [version=1][channels=1]
+        private const val META_HEADER_V1_VERSION: Byte = 1
+        private const val META_HEADER_V1_CHANNELS: Byte = 1
+        private const val META_HEADER_V1_SIZE = 2
+
+        // v2 header: [version=2][channels=1][codec][sample_rate_hi][sample_rate_lo]
+        private const val META_HEADER_V2_VERSION: Byte = 2
+        private const val META_HEADER_V2_CHANNELS: Byte = 1
+        private const val META_HEADER_V2_SIZE = 5
+        private const val CODEC_PCM: Byte = 0x00
+        private const val CODEC_OPUS: Byte = 0x01
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -46,6 +56,9 @@ class AudioCaptureService @Inject constructor() {
 
     private var frameCipher: FrameCipher? = null
     private var pendingMicDirection: Int? = null
+
+    private var opusEncoder: OpusEncoder? = null
+    private var useOpus = false
 
     private val _audioLevels = MutableStateFlow<List<Float>>(listOf(0f, 0f))
     val audioLevels: StateFlow<List<Float>> = _audioLevels.asStateFlow()
@@ -130,14 +143,37 @@ class AudioCaptureService @Inject constructor() {
             return
         }
 
+        // Try to initialise Opus encoder; fall back to PCM if it fails
+        useOpus = false
+        if (OpusEncoder.isSupported()) {
+            val encoder = OpusEncoder()
+            if (encoder.start()) {
+                opusEncoder = encoder
+                useOpus = true
+                Log.d(TAG, "Opus encoding enabled")
+            } else {
+                Log.w(TAG, "Opus encoder failed to start, falling back to PCM")
+            }
+        } else {
+            Log.d(TAG, "Opus not supported on this API level, using PCM")
+        }
+
         // Apply pending mic direction if set
         applyMicDirection()
 
         audioRecord?.startRecording()
 
+        if (useOpus) {
+            startOpusCapture()
+        } else {
+            startPcmCapture()
+        }
+    }
+
+    private fun startPcmCapture() {
         captureJob = scope.launch {
             val buffer = ShortArray(SAMPLES_PER_CHUNK)
-            val metaHeader = byteArrayOf(META_HEADER_VERSION, META_HEADER_CHANNELS)
+            val metaHeader = byteArrayOf(META_HEADER_V1_VERSION, META_HEADER_V1_CHANNELS)
 
             while (isActive) {
                 val read = audioRecord?.read(buffer, 0, SAMPLES_PER_CHUNK) ?: break
@@ -154,6 +190,52 @@ class AudioCaptureService @Inject constructor() {
 
                 // Encrypt and broadcast
                 broadcastAudio(payload)
+            }
+        }
+    }
+
+    private fun startOpusCapture() {
+        captureJob = scope.launch {
+            val buffer = ShortArray(SAMPLES_PER_CHUNK)
+            // v2 header: [version=2][channels=1][codec=OPUS][sampleRate/100 as 2 bytes big-endian]
+            val sampleRateDiv100 = OPUS_SAMPLE_RATE / 100  // 480
+            val metaHeader = byteArrayOf(
+                META_HEADER_V2_VERSION,
+                META_HEADER_V2_CHANNELS,
+                CODEC_OPUS,
+                (sampleRateDiv100 shr 8).toByte(),
+                (sampleRateDiv100 and 0xFF).toByte()
+            )
+
+            // Accumulator for resampled samples to fill complete Opus frames
+            var resampledAccum = ShortArray(0)
+
+            while (isActive) {
+                val read = audioRecord?.read(buffer, 0, SAMPLES_PER_CHUNK) ?: break
+                if (read <= 0) continue
+
+                // Calculate RMS level from raw PCM
+                val rms = calculateRms(buffer, read)
+                val dbLevel = rmsToNormalizedDb(rms)
+                _audioLevels.value = listOf(dbLevel, dbLevel)
+
+                // Resample 44100 -> 48000
+                val resampled = OpusEncoder.resample44100to48000(buffer, read)
+
+                // Accumulate resampled samples
+                resampledAccum = resampledAccum + resampled
+
+                // Encode complete Opus frames (960 samples each)
+                while (resampledAccum.size >= OpusEncoder.FRAME_SIZE) {
+                    val frame = resampledAccum.copyOfRange(0, OpusEncoder.FRAME_SIZE)
+                    resampledAccum = resampledAccum.copyOfRange(OpusEncoder.FRAME_SIZE, resampledAccum.size)
+
+                    val encoded = opusEncoder?.encode(frame)
+                    if (encoded != null) {
+                        val payload = metaHeader + encoded
+                        broadcastAudio(payload)
+                    }
+                }
             }
         }
     }
@@ -244,6 +326,10 @@ class AudioCaptureService @Inject constructor() {
             audioRecord?.release()
         } catch (_: Exception) {}
         audioRecord = null
+
+        opusEncoder?.release()
+        opusEncoder = null
+        useOpus = false
 
         serverJob?.cancel()
         serverJob = null

@@ -44,6 +44,8 @@ object SrtTransport {
         // FILE mode = stream-oriented (no 1316-byte message size limit)
         // FILE mode disables TSBPD by design — reliable delivery without timestamp scheduling
         socket.setSockFlag(SockOpt.TRANSTYPE, Transtype.FILE)
+        socket.setSockFlag(SockOpt.SNDBUF, 64 * 1024)
+        socket.setSockFlag(SockOpt.RCVBUF, 64 * 1024)
         if (!passphrase.isNullOrEmpty()) {
             socket.setSockFlag(SockOpt.PBKEYLEN, 32)
             socket.setSockFlag(SockOpt.PASSPHRASE, passphrase)

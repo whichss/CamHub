@@ -479,9 +479,9 @@ class CameraHudViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        cleanupSurfacePipeline()
-        cameraController.unbindCamera()
-        deviceMonitor.stopMonitoring()
-        audioCaptureService.stop()
+        try { cleanupSurfacePipeline() } catch (_: Exception) {}
+        try { cameraController.unbindCamera() } catch (_: Exception) {}
+        try { deviceMonitor.stopMonitoring() } catch (_: Exception) {}
+        try { audioCaptureService.stop() } catch (_: Exception) {}
     }
 }

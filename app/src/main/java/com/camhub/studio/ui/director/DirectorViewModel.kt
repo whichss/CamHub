@@ -509,12 +509,13 @@ class DirectorViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        nsdManager.stopDiscovery()
-        deviceMonitor.stopMonitoring()
-        externalDisplayManager.stopListening()
-        externalDisplayManager.disableOutput()
+        transitionJob?.cancel()
+        try { nsdManager.stopDiscovery() } catch (_: Exception) {}
+        try { deviceMonitor.stopMonitoring() } catch (_: Exception) {}
+        try { externalDisplayManager.stopListening() } catch (_: Exception) {}
+        try { externalDisplayManager.disableOutput() } catch (_: Exception) {}
         if (recorder.recordingInfo.value.isRecording) {
-            recorder.stopRecording()
+            try { recorder.stopRecording() } catch (_: Exception) {}
         }
         connectedStreamNames.clear()
         connectedAudioNames.clear()

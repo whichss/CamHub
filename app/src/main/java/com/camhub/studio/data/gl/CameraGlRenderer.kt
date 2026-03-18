@@ -52,6 +52,9 @@ class CameraGlRenderer {
     private var uTexMatrixLoc = 0
 
     @Volatile
+    private var stopped = false
+
+    @Volatile
     private var rotationDegrees = 0
     private var renderWidth = 0
     private var renderHeight = 0
@@ -79,6 +82,7 @@ class CameraGlRenderer {
         bufH: Int = height,
         centerCrop: Boolean = false
     ) {
+        stopped = false
         val thread = HandlerThread("CameraGL").also { it.start() }
         glThread = thread
         val handler = Handler(thread.looper)
@@ -133,6 +137,7 @@ class CameraGlRenderer {
     }
 
     fun stop() {
+        stopped = true
         glHandler?.post { releaseInternal() }
         glThread?.quitSafely()
         glThread = null
@@ -144,6 +149,7 @@ class CameraGlRenderer {
     }
 
     private fun drawFrame() {
+        if (stopped) return
         val egl = eglHelper ?: return
         val st = surfaceTexture ?: return
         val vfSurface = viewfinderEglSurface ?: return

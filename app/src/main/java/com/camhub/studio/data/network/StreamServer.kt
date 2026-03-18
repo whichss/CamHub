@@ -352,6 +352,8 @@ class StreamServer @Inject constructor() {
 
     private val broadcastPool = Executors.newFixedThreadPool(4)
 
+    private val clientsToRemove = CopyOnWriteArrayList<ClientConnection>()
+
     private fun broadcastFrame(payload: ByteArray, isKeyFrame: Boolean = false) {
         val dataToSend = if (usingSrt) payload  // SRT handles encryption via passphrase
                          else frameCipher?.encrypt(payload) ?: payload
@@ -375,13 +377,21 @@ class StreamServer @Inject constructor() {
                         client.sendFrame(pending)
                     }
                 } catch (e: Exception) {
-                    clients.remove(client)
-                    try { client.close() } catch (_: Exception) {}
-                    Log.d(TAG, "Stream client disconnected")
+                    clientsToRemove.add(client)
                 } finally {
                     client.isSending = false
                 }
             }
+        }
+
+        // Clean up disconnected clients after iteration
+        if (clientsToRemove.isNotEmpty()) {
+            for (client in clientsToRemove) {
+                clients.remove(client)
+                try { client.close() } catch (_: Exception) {}
+                Log.d(TAG, "Stream client disconnected")
+            }
+            clientsToRemove.clear()
         }
     }
 
@@ -444,6 +454,7 @@ class StreamServer @Inject constructor() {
         encoderWidth = 0
         encoderHeight = 0
         nv12Buffer = null
+        broadcastPool.shutdownNow()
     }
 
     fun cleanup() {

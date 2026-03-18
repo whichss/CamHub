@@ -55,6 +55,7 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
     private var uTexMatrixLoc = 0
 
     private var pixelBuffer: ByteBuffer? = null
+    private var reusableBitmap: Bitmap? = null
 
     var surface: Surface? = null
         private set
@@ -187,8 +188,8 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-            // Create bitmap from pixels
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            // Reuse bitmap to avoid per-frame allocation + GC pressure
+            val bitmap = reusableBitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { reusableBitmap = it }
             bitmap.copyPixelsFromBuffer(pxBuf)
 
             onBitmapReady?.invoke(bitmap)
@@ -227,6 +228,8 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
         }
         eglHelper = null
         pixelBuffer = null
+        reusableBitmap?.recycle()
+        reusableBitmap = null
         onBitmapReady = null
         Log.d(TAG, "DecoderGlRenderer released")
     }
