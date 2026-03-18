@@ -106,12 +106,14 @@ class EglHelper {
             throw RuntimeException("eglInitialize failed")
         }
 
+        // Request ES 3.0 (0x40 = EGL_OPENGL_ES3_BIT_KHR) — needed for PBO async readback
+        // All devices with API 26+ support ES 3.0; GLES20 calls remain fully compatible
         val configAttribs = intArrayOf(
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RENDERABLE_TYPE, 0x40,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL14.EGL_NONE
         )
@@ -123,7 +125,7 @@ class EglHelper {
         eglConfig = configs[0] ?: throw RuntimeException("No suitable EGL config found")
 
         val contextAttribs = intArrayOf(
-            EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
             EGL14.EGL_NONE
         )
         eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)

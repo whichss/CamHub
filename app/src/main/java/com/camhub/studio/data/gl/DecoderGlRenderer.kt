@@ -5,6 +5,7 @@ import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -13,6 +14,14 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
+/**
+ * Renders H.264 decoder output (via SurfaceTexture) to an offscreen FBO
+ * and reads pixels back to a Bitmap using PBO double-buffering for async readback.
+ *
+ * PBO async readback eliminates the 20-50ms GPU→CPU stall of synchronous glReadPixels.
+ * Two PBOs ping-pong: while the GPU DMA-transfers the current frame into PBO_A,
+ * the CPU maps PBO_B (previous frame, already transferred) with zero wait.
+ */
 class DecoderGlRenderer(val width: Int, val height: Int) {
 
     companion object {
@@ -54,7 +63,12 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
     private var aTexCoordLoc = 0
     private var uTexMatrixLoc = 0
 
-    private var pixelBuffer: ByteBuffer? = null
+    // PBO double-buffering for async pixel readback
+    private val pbos = IntArray(2)
+    private var pboIndex = 0
+    private var pboInitialized = false
+    private val pixelByteSize get() = width * height * 4
+
     private var reusableBitmap: Bitmap? = null
 
     var surface: Surface? = null
@@ -113,9 +127,15 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
                 }
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-                // Allocate pixel read buffer
-                pixelBuffer = ByteBuffer.allocateDirect(width * height * 4)
-                    .order(ByteOrder.nativeOrder())
+                // Initialize two PBOs for async pixel readback (ping-pong)
+                GLES30.glGenBuffers(2, pbos, 0)
+                for (i in 0..1) {
+                    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[i])
+                    GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, pixelByteSize, null, GLES30.GL_STREAM_READ)
+                }
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+                pboIndex = 0
+                pboInitialized = false
 
                 // Create OES texture + SurfaceTexture for decoder output
                 oesTexId = EglHelper.createTexture()
@@ -128,7 +148,7 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
                     glHandler?.post { renderAndReadBitmap() }
                 }, handler)
 
-                Log.d(TAG, "DecoderGlRenderer started: ${width}x${height}")
+                Log.d(TAG, "DecoderGlRenderer started: ${width}x${height} (PBO async readback)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start DecoderGlRenderer", e)
                 releaseInternal()
@@ -147,7 +167,6 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
         val egl = eglHelper ?: return
         val st = surfaceTexture ?: return
         val pbuf = pbufferSurface ?: return
-        val pxBuf = pixelBuffer ?: return
 
         try {
             st.updateTexImage()
@@ -181,18 +200,35 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
             GLES20.glDisableVertexAttribArray(aTexCoordLoc)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
 
-            // Read pixels
-            pxBuf.clear()
-            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pxBuf)
-            pxBuf.rewind()
+            // --- PBO async readback (ping-pong) ---
+            // Step 1: Initiate async DMA read of current frame into PBO[pboIndex]
+            //         glReadPixels with a bound PBO returns IMMEDIATELY (no GPU stall)
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[pboIndex])
+            GLES30.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-            // Reuse bitmap to avoid per-frame allocation + GC pressure
-            val bitmap = reusableBitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { reusableBitmap = it }
-            bitmap.copyPixelsFromBuffer(pxBuf)
+            // Step 2: Map the OTHER PBO (previous frame, DMA already complete) → zero-wait read
+            if (pboInitialized) {
+                val readIndex = 1 - pboIndex
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[readIndex])
+                val mappedBuffer = GLES30.glMapBufferRange(
+                    GLES30.GL_PIXEL_PACK_BUFFER, 0, pixelByteSize, GLES30.GL_MAP_READ_BIT
+                )
+                if (mappedBuffer is ByteBuffer) {
+                    val bitmap = reusableBitmap
+                        ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { reusableBitmap = it }
+                    bitmap.copyPixelsFromBuffer(mappedBuffer)
+                    onBitmapReady?.invoke(bitmap)
+                }
+                GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+            }
 
-            onBitmapReady?.invoke(bitmap)
+            // Step 3: Swap PBO index for next frame
+            pboIndex = 1 - pboIndex
+            pboInitialized = true
         } catch (e: Exception) {
             Log.e(TAG, "renderAndReadBitmap error", e)
         }
@@ -211,6 +247,11 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
             GLES20.glDeleteRenderbuffers(1, intArrayOf(renderBuffer), 0)
             renderBuffer = 0
         }
+        if (pbos[0] != 0 || pbos[1] != 0) {
+            GLES30.glDeleteBuffers(2, pbos, 0)
+            pbos[0] = 0
+            pbos[1] = 0
+        }
         if (oesTexId != 0) {
             GLES20.glDeleteTextures(1, intArrayOf(oesTexId), 0)
             oesTexId = 0
@@ -227,7 +268,7 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
             egl.release()
         }
         eglHelper = null
-        pixelBuffer = null
+        pboInitialized = false
         reusableBitmap?.recycle()
         reusableBitmap = null
         onBitmapReady = null
