@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.DataInputStream
 import java.net.Socket
 import java.nio.ByteBuffer
+import com.camhub.studio.data.StreamingConfig
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -27,7 +28,9 @@ data class CameraStreamState(
 )
 
 @Singleton
-class StreamClient @Inject constructor() {
+class StreamClient @Inject constructor(
+    private val streamingConfig: StreamingConfig
+) {
 
     companion object {
         private const val TAG = "StreamClient"
@@ -262,7 +265,7 @@ class StreamClient @Inject constructor() {
                     waitMs += 5
                 }
                 val surface = glRenderer.surface
-                if (surface != null && decoder.configureSurface(width, height, configData, surface)) {
+                if (surface != null && decoder.configureSurface(width, height, configData, surface, streamingConfig.lowLatencyDecode)) {
                     glRenderer.onBitmapReady = { bitmap ->
                         val bitrateKbps = calculateBitrate(cameraName)
                         updateStream(cameraName, CameraStreamState(cameraName, bitmap, true, bitrateKbps, bitmap.width, bitmap.height))
@@ -280,7 +283,7 @@ class StreamClient @Inject constructor() {
 
             // Fallback to buffer mode
             if (!surfaceConfigured) {
-                if (decoder.configure(width, height, configData)) {
+                if (decoder.configure(width, height, configData, streamingConfig.lowLatencyDecode)) {
                     decoders[cameraName] = decoder
                     Log.d(TAG, "H.264 decoder configured (CPU buffer) for $cameraName: ${width}x${height}")
                 } else {

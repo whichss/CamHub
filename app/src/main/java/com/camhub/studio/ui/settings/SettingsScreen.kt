@@ -213,9 +213,11 @@ private fun ConnectionTabContent(
         fps = uiState.streamFps,
         maxResolution = uiState.streamMaxResolution,
         bitrateMbps = uiState.streamBitrateMbps,
+        isLowLatencyDecode = uiState.isLowLatencyDecode,
         onFpsChange = { viewModel.updateStreamFps(it) },
         onResolutionChange = { viewModel.updateStreamResolution(it) },
-        onBitrateChange = { viewModel.updateStreamBitrate(it) }
+        onBitrateChange = { viewModel.updateStreamBitrate(it) },
+        onToggleLowLatency = { viewModel.toggleLowLatencyDecode() }
     )
 }
 

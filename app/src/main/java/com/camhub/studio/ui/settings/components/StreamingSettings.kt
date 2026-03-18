@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -25,10 +27,12 @@ import com.camhub.studio.ui.theme.CyanAccent
 import com.camhub.studio.ui.theme.GlassBorder
 import com.camhub.studio.ui.theme.GlassSurface
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
+import com.camhub.studio.ui.theme.Primary
 import com.camhub.studio.ui.theme.SpaceGroteskFamily
 import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.TextMuted
 import com.camhub.studio.ui.theme.TextPrimary
+import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
 
 private val fpsOptions = listOf(24, 30, 60)
@@ -39,9 +43,11 @@ fun StreamingSettings(
     fps: Int,
     maxResolution: Int,
     bitrateMbps: Int,
+    isLowLatencyDecode: Boolean,
     onFpsChange: (Int) -> Unit,
     onResolutionChange: (Int) -> Unit,
     onBitrateChange: (Int) -> Unit,
+    onToggleLowLatency: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -77,6 +83,12 @@ fun StreamingSettings(
         StreamBitrateSlider(
             bitrateMbps = bitrateMbps,
             onBitrateChange = onBitrateChange
+        )
+
+        // Low-latency decode toggle
+        LowLatencyToggle(
+            isEnabled = isLowLatencyDecode,
+            onToggle = onToggleLowLatency
         )
     }
 }
@@ -187,5 +199,51 @@ private fun StreamBitrateSlider(
             Text(text = "1 Mbps", fontFamily = SpaceGroteskFamily, fontSize = 10.sp, color = TextMuted)
             Text(text = "10 Mbps", fontFamily = SpaceGroteskFamily, fontSize = 10.sp, color = TextMuted)
         }
+    }
+}
+
+@Composable
+private fun LowLatencyToggle(
+    isEnabled: Boolean,
+    onToggle: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(GlassSurface)
+            .border(width = 1.dp, color = GlassBorder, shape = shape)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                text = "Low-Latency Decode",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 14.sp,
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Reduce decoder buffering (requires reconnect)",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 11.sp,
+                color = TextTertiary
+            )
+        }
+        Switch(
+            checked = isEnabled,
+            onCheckedChange = { onToggle() },
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = TextPrimary,
+                checkedTrackColor = Primary,
+                uncheckedThumbColor = TextSecondary,
+                uncheckedTrackColor = SurfaceDark,
+                uncheckedBorderColor = GlassBorder
+            )
+        )
     }
 }

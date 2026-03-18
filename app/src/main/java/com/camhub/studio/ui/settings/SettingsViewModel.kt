@@ -190,6 +190,12 @@ class SettingsViewModel @Inject constructor(
         _uiState.update { it.copy(streamBitrateMbps = mbps) }
     }
 
+    fun toggleLowLatencyDecode() {
+        val newValue = !_uiState.value.isLowLatencyDecode
+        streamingConfig.lowLatencyDecode = newValue
+        _uiState.update { it.copy(isLowLatencyDecode = newValue) }
+    }
+
     fun toggleNavigationLock() {
         val newValue = !_uiState.value.isNavigationLocked
         _uiState.update { it.copy(isNavigationLocked = newValue) }
@@ -234,7 +240,8 @@ class SettingsViewModel @Inject constructor(
                 isNavigationLocked = navLock,
                 streamFps = streamingConfig.fps,
                 streamMaxResolution = streamingConfig.maxResolution,
-                streamBitrateMbps = streamingConfig.bitrateMbps
+                streamBitrateMbps = streamingConfig.bitrateMbps,
+                isLowLatencyDecode = streamingConfig.lowLatencyDecode
             )
         }
     }

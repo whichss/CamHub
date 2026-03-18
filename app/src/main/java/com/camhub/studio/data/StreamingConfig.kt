@@ -31,5 +31,11 @@ class StreamingConfig @Inject constructor(
             prefs.edit().putInt("stream_bitrate", value).apply()
         }
 
+    var lowLatencyDecode: Boolean = prefs.getBoolean("low_latency_decode", true)
+        set(value) {
+            field = value
+            prefs.edit().putBoolean("low_latency_decode", value).apply()
+        }
+
     val bitrateBytes: Int get() = bitrateMbps * 1_000_000
 }

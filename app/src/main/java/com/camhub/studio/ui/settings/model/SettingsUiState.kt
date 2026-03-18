@@ -35,6 +35,7 @@ data class SettingsUiState(
     val streamFps: Int = 30,
     val streamMaxResolution: Int = 1080,
     val streamBitrateMbps: Int = 4,
+    val isLowLatencyDecode: Boolean = true,
 
     // Bottom bar
     val droppedFrames: Int = 0

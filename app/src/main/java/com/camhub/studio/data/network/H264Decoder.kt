@@ -34,7 +34,7 @@ class H264Decoder {
     private var pixelBuffer: IntArray? = null
     private var yuvBuffer: ByteArray? = null
 
-    fun configure(width: Int, height: Int, spsPps: ByteArray): Boolean {
+    fun configure(width: Int, height: Int, spsPps: ByteArray, lowLatency: Boolean = true): Boolean {
         release()
         this.width = width
         this.height = height
@@ -57,8 +57,7 @@ class H264Decoder {
                     MediaFormat.KEY_COLOR_FORMAT,
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
                 )
-                // Low-latency hint
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if (lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
             }
@@ -83,7 +82,7 @@ class H264Decoder {
         }
     }
 
-    fun configureSurface(width: Int, height: Int, spsPps: ByteArray, surface: Surface): Boolean {
+    fun configureSurface(width: Int, height: Int, spsPps: ByteArray, surface: Surface, lowLatency: Boolean = true): Boolean {
         release()
         this.width = width
         this.height = height
@@ -101,8 +100,7 @@ class H264Decoder {
             val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
                 setByteBuffer("csd-0", sps)
                 setByteBuffer("csd-1", pps)
-                // Low-latency hint
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if (lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
             }
