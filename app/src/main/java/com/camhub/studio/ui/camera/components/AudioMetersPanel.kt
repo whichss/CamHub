@@ -56,7 +56,10 @@ private fun segmentColor(segmentIndex: Int): androidx.compose.ui.graphics.Color 
 fun AudioMetersPanel(
     levels: List<Float>,
     modifier: Modifier = Modifier,
-    compact: Boolean = false
+    compact: Boolean = false,
+    statusText: String = "Idle",
+    clientCount: Int = 0,
+    restartCount: Int = 0
 ) {
     val ch1Level = levels.getOrElse(0) { 0f }
     val ch2Level = levels.getOrElse(1) { 0f }
@@ -64,6 +67,12 @@ fun AudioMetersPanel(
     val ch2Db = levelToDb(ch2Level)
     val ch1Lit = dbToSegment(ch1Db)
     val ch2Lit = dbToSegment(ch2Db)
+    val statusColor = when (statusText) {
+        "Capturing" -> LedGreen
+        "Listening" -> LedYellow
+        "Restarting", "Permission Needed", "Error" -> LedRed
+        else -> TextSecondary
+    }
 
     if (compact) {
         // Landscape compact: thin bars, no labels
@@ -71,6 +80,13 @@ fun AudioMetersPanel(
             modifier = modifier.padding(horizontal = 2.dp),
             verticalArrangement = Arrangement.spacedBy(1.dp)
         ) {
+            Text(
+                text = "MIC $statusText",
+                color = statusColor,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
             MeterBar(litSegments = ch1Lit, barHeight = 4.dp)
             MeterBar(litSegments = ch2Lit, barHeight = 4.dp)
         }
@@ -82,6 +98,13 @@ fun AudioMetersPanel(
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
+            Text(
+                text = "MIC $statusText · C$clientCount · R$restartCount",
+                color = statusColor,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
             MeterRow(label = "L", litSegments = ch1Lit, barHeight = 6.dp)
             MeterRow(label = "R", litSegments = ch2Lit, barHeight = 6.dp)
         }

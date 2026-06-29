@@ -3,6 +3,7 @@ package com.camhub.studio.data.audio
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Build
 import android.util.Log
 import com.camhub.studio.data.network.FrameCipher
 import kotlinx.coroutines.*
@@ -19,7 +20,9 @@ import kotlin.math.sqrt
 
 data class AudioChannelState(
     val level: Float = 0f,
-    val isConnected: Boolean = false
+    val isConnected: Boolean = false,
+    val statusText: String = "Disconnected",
+    val lastPacketAgeMs: Long = 0L
 )
 
 @Singleton
@@ -27,20 +30,23 @@ class AudioStreamClient @Inject constructor() {
 
     companion object {
         private const val TAG = "AudioStreamClient"
-        private const val SAMPLE_RATE_PCM = 44100
+        private const val SAMPLE_RATE_PCM = 48000
         private const val SAMPLE_RATE_OPUS = 48000
         private const val CHUNK_DURATION_MS = 20
-        private const val SAMPLES_PER_CHUNK_PCM = SAMPLE_RATE_PCM * CHUNK_DURATION_MS / 1000  // 882
+        private const val SAMPLES_PER_CHUNK_PCM = SAMPLE_RATE_PCM * CHUNK_DURATION_MS / 1000  // 960
         private const val SAMPLES_PER_CHUNK_OPUS = SAMPLE_RATE_OPUS * CHUNK_DURATION_MS / 1000  // 960
-        private const val BYTES_PER_CHUNK_PCM = SAMPLES_PER_CHUNK_PCM * 2  // 1764
+        private const val BYTES_PER_CHUNK_PCM = SAMPLES_PER_CHUNK_PCM * 2  // 1920
         private const val MAX_FRAME_SIZE = 64 * 1024  // 64KB max audio frame
         private const val MAX_RECONNECT_ATTEMPTS = 60
         private const val RECONNECT_BASE_DELAY_MS = 500L
         private const val RECONNECT_MAX_DELAY_MS = 10_000L
+        private const val AUDIO_STALE_AFTER_MS = 1_500L
         private const val META_HEADER_V1_SIZE = 2
         private const val META_HEADER_V2_SIZE = 5
-        // Ring buffer: 40ms capacity = 2 chunks (minimal latency for LAN)
-        private const val RING_BUFFER_CHUNKS = 2
+        // Ring buffer: 60ms capacity = 3 chunks. This absorbs small Wi-Fi jitter while
+        // still overwriting stale chunks instead of growing latency without bound.
+        private const val RING_BUFFER_CHUNKS = 3
+        private const val MAX_CONSECUTIVE_ZERO_WRITES = 5
 
         private const val CODEC_PCM: Byte = 0x00
         private const val CODEC_OPUS: Byte = 0x01
@@ -56,6 +62,7 @@ class AudioStreamClient @Inject constructor() {
     private val streamJobs = ConcurrentHashMap<String, Job>()
     private val channelDecoders = ConcurrentHashMap<String, OpusDecoder>()
     private val channelSampleRates = ConcurrentHashMap<String, Int>()
+    private val channelLastPacketMs = ConcurrentHashMap<String, Long>()
 
     // PGM cameras for AFV logic
     private val pgmCameraNames = ConcurrentHashMap.newKeySet<String>()
@@ -75,6 +82,7 @@ class AudioStreamClient @Inject constructor() {
     private var audioTrack: AudioTrack? = null
     private var mixingJob: Job? = null
     private var currentPlaybackRate: Int = SAMPLE_RATE_PCM
+    private var consecutiveZeroWrites = 0
 
     private fun ensureMixingStarted() {
         if (mixingJob != null) return
@@ -112,48 +120,12 @@ class AudioStreamClient @Inject constructor() {
         val samplesPerChunk = sampleRate * CHUNK_DURATION_MS / 1000
         val bytesPerChunk = samplesPerChunk * 2
 
-        val minBuf = AudioTrack.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        val bufSize = maxOf(minBuf, bytesPerChunk * 2)
-
-        try {
-            audioTrack = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(bufSize)
-                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                .build()
-
-            audioTrack?.play()
-            Log.d(TAG, "AudioTrack started: sampleRate=$sampleRate, bufSize=$bufSize")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create AudioTrack", e)
-            audioTrack = null
-        }
+        audioTrack = createPlaybackTrack(sampleRate, bytesPerChunk)
 
         mixingJob = scope.launch {
             val mixBuffer = FloatArray(samplesPerChunk)
             val outputBuffer = ShortArray(samplesPerChunk)
-            val silenceBuffer = ShortArray(samplesPerChunk) // pre-allocated silence
-
             while (isActive) {
-                // Pace mixing at chunk interval to stay in sync with audio arrival rate.
-                delay(CHUNK_DURATION_MS.toLong())
-
                 // Clear mix buffer
                 mixBuffer.fill(0f)
 
@@ -186,13 +158,37 @@ class AudioStreamClient @Inject constructor() {
 
                 // Update channel states
                 val states = currentChannelLevels.map { (name, level) ->
-                    name to AudioChannelState(level = level, isConnected = true)
+                    val lastPacketAgeMs = System.currentTimeMillis() - (channelLastPacketMs[name] ?: 0L)
+                    name to AudioChannelState(
+                        level = level,
+                        isConnected = lastPacketAgeMs <= AUDIO_STALE_AFTER_MS,
+                        statusText = if (lastPacketAgeMs <= AUDIO_STALE_AFTER_MS) "Live" else "Stale",
+                        lastPacketAgeMs = lastPacketAgeMs.coerceAtLeast(0L)
+                    )
                 }.toMap()
                 // Merge with existing connected channels that had no data this frame
                 val merged = _channelStates.value.toMutableMap()
                 for ((name, _) in channelBuffers) {
                     if (name !in states) {
-                        merged[name] = AudioChannelState(level = 0f, isConnected = true)
+                        val lastPacketAt = channelLastPacketMs[name] ?: 0L
+                        val lastPacketAgeMs = if (lastPacketAt > 0L) {
+                            System.currentTimeMillis() - lastPacketAt
+                        } else {
+                            0L
+                        }
+                        val previous = merged[name]
+                        val status = when {
+                            previous?.statusText == "Reconnecting" -> "Reconnecting"
+                            lastPacketAt == 0L -> previous?.statusText ?: "Connecting"
+                            lastPacketAgeMs > AUDIO_STALE_AFTER_MS -> "Stale"
+                            else -> "Live"
+                        }
+                        merged[name] = AudioChannelState(
+                            level = 0f,
+                            isConnected = status == "Live",
+                            statusText = status,
+                            lastPacketAgeMs = lastPacketAgeMs.coerceAtLeast(0L)
+                        )
                     }
                 }
                 merged.putAll(states)
@@ -216,14 +212,112 @@ class AudioStreamClient @Inject constructor() {
                     val masterRms = sqrt(masterSumSquares / mixBuffer.size).toFloat()
                     _masterLevel.value = rmsToNormalizedDb(masterRms)
 
-                    // Write to AudioTrack
-                    audioTrack?.write(outputBuffer, 0, outputBuffer.size)
+                    // Non-blocking write keeps live monitoring from growing latency.
+                    // If the audio device dies or becomes invalid, rebuild it in-place.
+                    writeOutputBuffer(outputBuffer, sampleRate, bytesPerChunk)
                 } else {
-                    // Feed silence to AudioTrack to prevent underrun
-                    audioTrack?.write(silenceBuffer, 0, silenceBuffer.size)
+                    _masterLevel.value = 0f
                 }
+
+                // Pace mixing at chunk interval without pre-filling AudioTrack with silence.
+                delay(CHUNK_DURATION_MS.toLong())
             }
         }
+    }
+
+    private fun createPlaybackTrack(sampleRate: Int, bytesPerChunk: Int): AudioTrack? {
+        val minBuf = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        val bufSize = maxOf(minBuf, bytesPerChunk * 2)
+
+        return try {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufSize)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                .build()
+                .also {
+                    it.play()
+                    Log.d(TAG, "AudioTrack started: sampleRate=$sampleRate, bufSize=$bufSize")
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create AudioTrack", e)
+            null
+        }
+    }
+
+    private fun writeOutputBuffer(buffer: ShortArray, sampleRate: Int, bytesPerChunk: Int) {
+        val track = audioTrack ?: return
+        if (track.state != AudioTrack.STATE_INITIALIZED) {
+            Log.w(TAG, "AudioTrack is not initialized, rebuilding playback")
+            rebuildPlaybackTrack(sampleRate, bytesPerChunk)
+            return
+        }
+
+        if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+            try {
+                track.play()
+                Log.d(TAG, "AudioTrack playback resumed")
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioTrack play failed, rebuilding: ${e.message}")
+                rebuildPlaybackTrack(sampleRate, bytesPerChunk)
+                return
+            }
+        }
+
+        val written = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                track.write(buffer, 0, buffer.size, AudioTrack.WRITE_NON_BLOCKING)
+            } else {
+                track.write(buffer, 0, buffer.size)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioTrack write failed, rebuilding: ${e.message}")
+            rebuildPlaybackTrack(sampleRate, bytesPerChunk)
+            return
+        }
+
+        if (written < 0) {
+            Log.w(TAG, "AudioTrack write returned $written, rebuilding playback")
+            rebuildPlaybackTrack(sampleRate, bytesPerChunk)
+            return
+        }
+
+        if (written == 0) {
+            consecutiveZeroWrites++
+            if (consecutiveZeroWrites >= MAX_CONSECUTIVE_ZERO_WRITES) {
+                Log.w(TAG, "AudioTrack accepted no samples for $consecutiveZeroWrites chunks, rebuilding playback")
+                rebuildPlaybackTrack(sampleRate, bytesPerChunk)
+            }
+            return
+        }
+
+        consecutiveZeroWrites = 0
+    }
+
+    private fun rebuildPlaybackTrack(sampleRate: Int, bytesPerChunk: Int) {
+        consecutiveZeroWrites = 0
+        try {
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (_: Exception) {
+        }
+        audioTrack = createPlaybackTrack(sampleRate, bytesPerChunk)
     }
 
     fun connectToAudioStream(
@@ -233,18 +327,19 @@ class AudioStreamClient @Inject constructor() {
         sessionKey: ByteArray? = null
     ) {
         // Cancel existing stream for this camera
-        streamJobs[cameraName]?.cancel()
-        // Default to PCM chunk size; will be updated once we know the codec
+        streamJobs.remove(cameraName)?.cancel()
+        // Default to the largest supported 20 ms chunk size; sample rate is updated
+        // after the first frame header is parsed.
         channelBuffers[cameraName] = AudioRingBuffer(RING_BUFFER_CHUNKS, SAMPLES_PER_CHUNK_OPUS)
         channelFaders.putIfAbsent(cameraName, 0.75f)
         channelAfvEnabled.putIfAbsent(cameraName, false)
+        channelLastPacketMs.remove(cameraName)
+        updateChannelState(cameraName, AudioChannelState(statusText = "Connecting"))
 
         // Release any previous decoder for this channel
         channelDecoders.remove(cameraName)?.release()
 
-        ensureMixingStarted()
-
-        streamJobs[cameraName] = scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             val cipher = if (sessionKey != null) FrameCipher(sessionKey) else null
             var attempt = 0
 
@@ -258,6 +353,8 @@ class AudioStreamClient @Inject constructor() {
                         delay(backoff)
                     }
                     Log.d(TAG, "Connecting audio to $cameraName at $ip:$audioPort")
+                    resetAudioReceiveStateForReconnect(cameraName)
+                    updateChannelState(cameraName, AudioChannelState(statusText = "Connecting"))
 
                     socket = Socket(ip, audioPort).apply {
                         soTimeout = 15_000
@@ -289,6 +386,8 @@ class AudioStreamClient @Inject constructor() {
                         }
 
                         val samples = parseAudioFrame(cameraName, decrypted) ?: continue
+                        channelLastPacketMs[cameraName] = System.currentTimeMillis()
+                        ensureMixingStarted()
 
                         // Write to ring buffer (applying sync offset via buffer depth)
                         channelBuffers[cameraName]?.write(samples)
@@ -296,6 +395,7 @@ class AudioStreamClient @Inject constructor() {
                 } catch (e: Exception) {
                     if (isActive) {
                         Log.e(TAG, "Audio stream error for $cameraName: ${e.message}")
+                        updateChannelState(cameraName, AudioChannelState(statusText = "Reconnecting"))
                         attempt++
                     }
                 } finally {
@@ -303,8 +403,43 @@ class AudioStreamClient @Inject constructor() {
                 }
             }
 
-            Log.d(TAG, "Audio stream ended for $cameraName")
+            val currentJob = coroutineContext[Job]
+            if (streamJobs[cameraName] == currentJob) {
+                streamJobs.remove(cameraName)
+                releaseAudioReceiveState(cameraName)
+                Log.d(TAG, "Audio stream ended for $cameraName")
+                updateChannelState(cameraName, AudioChannelState(statusText = "Disconnected"))
+                if (channelBuffers.isEmpty()) {
+                    stopMixing()
+                }
+            } else {
+                Log.d(TAG, "Ignoring stale audio cleanup for $cameraName")
+            }
         }
+        streamJobs[cameraName] = job
+        job.start()
+    }
+
+    private fun resetAudioReceiveStateForReconnect(cameraName: String) {
+        val previousOffset = channelSyncOffsets[cameraName] ?: 0
+        val offsetChunks = previousOffset / CHUNK_DURATION_MS
+        channelBuffers[cameraName] = AudioRingBuffer(RING_BUFFER_CHUNKS, SAMPLES_PER_CHUNK_OPUS).also {
+            it.setSyncOffset(offsetChunks)
+        }
+        channelLastPacketMs.remove(cameraName)
+    }
+
+    private fun releaseAudioReceiveState(cameraName: String) {
+        channelBuffers.remove(cameraName)
+        channelSampleRates.remove(cameraName)
+        channelLastPacketMs.remove(cameraName)
+        channelDecoders.remove(cameraName)?.release()
+    }
+
+    private fun updateChannelState(cameraName: String, state: AudioChannelState) {
+        val current = _channelStates.value.toMutableMap()
+        current[cameraName] = state
+        _channelStates.value = current
     }
 
     /**
@@ -325,6 +460,7 @@ class AudioStreamClient @Inject constructor() {
                 // v1 protocol: raw PCM after 2-byte header
                 if (decrypted.size <= META_HEADER_V1_SIZE) return null
                 channelSampleRates[cameraName] = SAMPLE_RATE_PCM
+                ensureCorrectSampleRate()
                 val pcmBytes = decrypted.copyOfRange(META_HEADER_V1_SIZE, decrypted.size)
                 bytesToShortArray(pcmBytes)
             }
@@ -335,6 +471,7 @@ class AudioStreamClient @Inject constructor() {
                 val sampleRate = ((decrypted[3].toInt() and 0xFF) shl 8 or
                         (decrypted[4].toInt() and 0xFF)) * 100
                 channelSampleRates[cameraName] = sampleRate
+                ensureCorrectSampleRate()
                 val audioData = decrypted.copyOfRange(META_HEADER_V2_SIZE, decrypted.size)
 
                 when (codec) {
@@ -343,15 +480,7 @@ class AudioStreamClient @Inject constructor() {
                     }
                     CODEC_OPUS -> {
                         // Lazy-initialise decoder for this channel
-                        val decoder = channelDecoders.getOrPut(cameraName) {
-                            OpusDecoder().also { d ->
-                                if (!d.start()) {
-                                    Log.e(TAG, "Failed to start Opus decoder for $cameraName")
-                                }
-                            }
-                        }
-                        // Ensure AudioTrack matches 48 kHz when Opus is in use
-                        ensureCorrectSampleRate()
+                        val decoder = getOrCreateOpusDecoder(cameraName) ?: return null
                         decoder.decode(audioData)
                     }
                     else -> {
@@ -364,6 +493,19 @@ class AudioStreamClient @Inject constructor() {
                 Log.w(TAG, "Unknown audio header version: $version")
                 null
             }
+        }
+    }
+
+    private fun getOrCreateOpusDecoder(cameraName: String): OpusDecoder? {
+        channelDecoders[cameraName]?.let { return it }
+        val decoder = OpusDecoder()
+        return if (decoder.start()) {
+            channelDecoders[cameraName] = decoder
+            decoder
+        } else {
+            decoder.release()
+            Log.e(TAG, "Failed to start Opus decoder for $cameraName")
+            null
         }
     }
 
@@ -413,6 +555,7 @@ class AudioStreamClient @Inject constructor() {
         channelAfvEnabled.remove(cameraName)
         channelSyncOffsets.remove(cameraName)
         channelSampleRates.remove(cameraName)
+        channelLastPacketMs.remove(cameraName)
         channelDecoders.remove(cameraName)?.release()
 
         val current = _channelStates.value.toMutableMap()
@@ -433,6 +576,7 @@ class AudioStreamClient @Inject constructor() {
         channelAfvEnabled.clear()
         channelSyncOffsets.clear()
         channelSampleRates.clear()
+        channelLastPacketMs.clear()
         channelDecoders.values.forEach { it.release() }
         channelDecoders.clear()
         pgmCameraNames.clear()

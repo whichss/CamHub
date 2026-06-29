@@ -15,24 +15,36 @@ import java.io.DataOutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.log10
 import kotlin.math.sqrt
+
+data class AudioCaptureStatus(
+    val statusText: String = "Idle",
+    val clientCount: Int = 0,
+    val restartCount: Int = 0,
+    val lastError: String? = null
+)
 
 @Singleton
 class AudioCaptureService @Inject constructor() {
 
     companion object {
         private const val TAG = "AudioCaptureService"
-        private const val SAMPLE_RATE = 44100
+        private const val SAMPLE_RATE = 48000
         private const val OPUS_SAMPLE_RATE = 48000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val CHUNK_DURATION_MS = 20
-        private const val SAMPLES_PER_CHUNK = SAMPLE_RATE * CHUNK_DURATION_MS / 1000  // 882
-        private const val BYTES_PER_CHUNK = SAMPLES_PER_CHUNK * 2  // 1764 bytes (16-bit)
+        private const val SAMPLES_PER_CHUNK = SAMPLE_RATE * CHUNK_DURATION_MS / 1000  // 960
+        private const val BYTES_PER_CHUNK = SAMPLES_PER_CHUNK * 2  // 1920 bytes (16-bit)
         private const val MAX_CLIENTS = 4
+        private const val PREFER_OPUS = false
+        private const val MAX_CONSECUTIVE_READ_ERRORS = 3
+        private const val AUDIO_CAPTURE_RESTART_DELAY_MS = 1_000L
+        private const val AUDIO_RECORD_ERROR_DEAD_OBJECT = -6
 
         // v1 header: [version=1][channels=1]
         private const val META_HEADER_V1_VERSION: Byte = 1
@@ -53,20 +65,29 @@ class AudioCaptureService @Inject constructor() {
     private var captureJob: Job? = null
     private var audioRecord: AudioRecord? = null
     private val clients = CopyOnWriteArrayList<AudioClientConnection>()
+    private val sendExecutor = Executors.newFixedThreadPool(MAX_CLIENTS)
 
     private var frameCipher: FrameCipher? = null
     private var pendingMicDirection: Int? = null
 
     private var opusEncoder: OpusEncoder? = null
     private var useOpus = false
+    @Volatile
+    private var restartingCapture = false
 
     private val _audioLevels = MutableStateFlow<List<Float>>(listOf(0f, 0f))
     val audioLevels: StateFlow<List<Float>> = _audioLevels.asStateFlow()
 
+    private val _captureStatus = MutableStateFlow(AudioCaptureStatus())
+    val captureStatus: StateFlow<AudioCaptureStatus> = _captureStatus.asStateFlow()
+
     private class AudioClientConnection(
         val socket: Socket,
         val output: DataOutputStream
-    )
+    ) {
+        @Volatile
+        var isSending: Boolean = false
+    }
 
     fun setSessionKey(key: ByteArray) {
         frameCipher = FrameCipher(key)
@@ -77,6 +98,7 @@ class AudioCaptureService @Inject constructor() {
 
         serverSocket = ServerSocket(0)
         val port = serverSocket!!.localPort
+        updateCaptureStatus(statusText = "Listening", clientCount = 0, lastError = null)
 
         // Accept client connections
         serverJob = scope.launch {
@@ -91,8 +113,10 @@ class AudioCaptureService @Inject constructor() {
                     }
                     clientSocket.tcpNoDelay = true
                     clientSocket.keepAlive = true
+                    clientSocket.sendBufferSize = 16 * 1024
                     val output = DataOutputStream(clientSocket.getOutputStream())
                     clients.add(AudioClientConnection(clientSocket, output))
+                    updateCaptureStatus(clientCount = clients.size)
                     Log.d(TAG, "Audio client connected: ${clientSocket.inetAddress.hostAddress}")
                 } catch (e: Exception) {
                     if (isActive) Log.e(TAG, "Audio accept error", e)
@@ -113,26 +137,32 @@ class AudioCaptureService @Inject constructor() {
      */
     @Synchronized
     fun ensureCapture() {
-        if (audioRecord != null) return  // already capturing
         if (serverSocket == null) return  // server not started
-        Log.d(TAG, "Retrying audio capture after permission grant")
+
+        val recorder = audioRecord
+        val isRecording = recorder?.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        if (recorder != null && isRecording && captureJob?.isActive == true) {
+            return  // already capturing
+        }
+
+        Log.d(TAG, "Ensuring audio capture is active")
+        releaseCaptureResources(cancelJob = true)
         startCapture()
     }
 
+    @Synchronized
     private fun startCapture() {
+        if (serverSocket == null) return
+        if (captureJob?.isActive == true || audioRecord != null) return
+
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
         val bufferSize = maxOf(minBufSize, BYTES_PER_CHUNK * 2)
 
         try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                CHANNEL_CONFIG,
-                AUDIO_FORMAT,
-                bufferSize
-            )
+            audioRecord = createAudioRecord(bufferSize)
         } catch (e: SecurityException) {
             Log.e(TAG, "Microphone permission not granted", e)
+            updateCaptureStatus(statusText = "Permission Needed", lastError = "Microphone permission not granted")
             return
         }
 
@@ -140,12 +170,14 @@ class AudioCaptureService @Inject constructor() {
             Log.e(TAG, "AudioRecord failed to initialize")
             audioRecord?.release()
             audioRecord = null
+            updateCaptureStatus(statusText = "Error", lastError = "AudioRecord init failed")
             return
         }
 
-        // Try to initialise Opus encoder; fall back to PCM if it fails
+        // Prefer raw 48 kHz PCM for live monitoring until sender/receiver codec negotiation exists.
+        // It costs more bandwidth than Opus, but removes codec startup failures and codec delay.
         useOpus = false
-        if (OpusEncoder.isSupported()) {
+        if (PREFER_OPUS && OpusEncoder.isSupported()) {
             val encoder = OpusEncoder()
             if (encoder.start()) {
                 opusEncoder = encoder
@@ -155,13 +187,29 @@ class AudioCaptureService @Inject constructor() {
                 Log.w(TAG, "Opus encoder failed to start, falling back to PCM")
             }
         } else {
-            Log.d(TAG, "Opus not supported on this API level, using PCM")
+            Log.d(TAG, "Using PCM audio transport")
         }
 
         // Apply pending mic direction if set
         applyMicDirection()
 
-        audioRecord?.startRecording()
+        try {
+            audioRecord?.startRecording()
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioRecord failed to start recording", e)
+            releaseCaptureResources(cancelJob = false)
+            scheduleCaptureRestart("startRecording failed")
+            return
+        }
+
+        if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            Log.e(TAG, "AudioRecord did not enter RECORDSTATE_RECORDING")
+            releaseCaptureResources(cancelJob = false)
+            scheduleCaptureRestart("AudioRecord not recording")
+            return
+        }
+
+        updateCaptureStatus(statusText = "Capturing", lastError = null)
 
         if (useOpus) {
             startOpusCapture()
@@ -170,21 +218,66 @@ class AudioCaptureService @Inject constructor() {
         }
     }
 
+    private fun createAudioRecord(bufferSize: Int): AudioRecord {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val format = AudioFormat.Builder()
+                .setEncoding(AUDIO_FORMAT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(CHANNEL_CONFIG)
+                .build()
+            val builder = AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.MIC)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(bufferSize)
+            builder.build()
+        } else {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE,
+                CHANNEL_CONFIG,
+                AUDIO_FORMAT,
+                bufferSize
+            )
+        }
+    }
+
     private fun startPcmCapture() {
         captureJob = scope.launch {
             val buffer = ShortArray(SAMPLES_PER_CHUNK)
-            val metaHeader = byteArrayOf(META_HEADER_V1_VERSION, META_HEADER_V1_CHANNELS)
+            var consecutiveReadErrors = 0
+            val sampleRateDiv100 = SAMPLE_RATE / 100
+            val metaHeader = byteArrayOf(
+                META_HEADER_V2_VERSION,
+                META_HEADER_V2_CHANNELS,
+                CODEC_PCM,
+                (sampleRateDiv100 shr 8).toByte(),
+                (sampleRateDiv100 and 0xFF).toByte()
+            )
 
             while (isActive) {
-                val read = audioRecord?.read(buffer, 0, SAMPLES_PER_CHUNK) ?: break
-                if (read <= 0) continue
+                val read = try {
+                    audioRecord?.read(buffer, 0, SAMPLES_PER_CHUNK) ?: break
+                } catch (e: Exception) {
+                    Log.w(TAG, "PCM AudioRecord read threw, restarting capture: ${e.message}")
+                    scheduleCaptureRestart("PCM read exception")
+                    break
+                }
+
+                if (read <= 0) {
+                    if (read < 0) {
+                        consecutiveReadErrors++
+                        if (handleReadError("PCM", read, consecutiveReadErrors)) break
+                    }
+                    continue
+                }
+                consecutiveReadErrors = 0
 
                 // Calculate RMS level
                 val rms = calculateRms(buffer, read)
                 val dbLevel = rmsToNormalizedDb(rms)
                 _audioLevels.value = listOf(dbLevel, dbLevel)  // mono duplicated to L/R
 
-                // Convert to bytes: meta header + PCM
+                // Convert to bytes: v2 meta header + PCM
                 val pcmBytes = shortArrayToBytes(buffer, read)
                 val payload = metaHeader + pcmBytes
 
@@ -197,6 +290,7 @@ class AudioCaptureService @Inject constructor() {
     private fun startOpusCapture() {
         captureJob = scope.launch {
             val buffer = ShortArray(SAMPLES_PER_CHUNK)
+            var consecutiveReadErrors = 0
             // v2 header: [version=2][channels=1][codec=OPUS][sampleRate/100 as 2 bytes big-endian]
             val sampleRateDiv100 = OPUS_SAMPLE_RATE / 100  // 480
             val metaHeader = byteArrayOf(
@@ -211,16 +305,33 @@ class AudioCaptureService @Inject constructor() {
             var resampledAccum = ShortArray(0)
 
             while (isActive) {
-                val read = audioRecord?.read(buffer, 0, SAMPLES_PER_CHUNK) ?: break
-                if (read <= 0) continue
+                val read = try {
+                    audioRecord?.read(buffer, 0, SAMPLES_PER_CHUNK) ?: break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Opus AudioRecord read threw, restarting capture: ${e.message}")
+                    scheduleCaptureRestart("Opus read exception")
+                    break
+                }
+
+                if (read <= 0) {
+                    if (read < 0) {
+                        consecutiveReadErrors++
+                        if (handleReadError("Opus", read, consecutiveReadErrors)) break
+                    }
+                    continue
+                }
+                consecutiveReadErrors = 0
 
                 // Calculate RMS level from raw PCM
                 val rms = calculateRms(buffer, read)
                 val dbLevel = rmsToNormalizedDb(rms)
                 _audioLevels.value = listOf(dbLevel, dbLevel)
 
-                // Resample 44100 -> 48000
-                val resampled = OpusEncoder.resample44100to48000(buffer, read)
+                val resampled = if (SAMPLE_RATE == OPUS_SAMPLE_RATE) {
+                    buffer.copyOf(read)
+                } else {
+                    OpusEncoder.resample44100to48000(buffer, read)
+                }
 
                 // Accumulate resampled samples
                 resampledAccum = resampledAccum + resampled
@@ -238,6 +349,73 @@ class AudioCaptureService @Inject constructor() {
                 }
             }
         }
+    }
+
+    private suspend fun handleReadError(codec: String, read: Int, consecutiveErrors: Int): Boolean {
+        Log.w(TAG, "$codec AudioRecord read error=$read consecutive=$consecutiveErrors")
+        if (read == AUDIO_RECORD_ERROR_DEAD_OBJECT ||
+            consecutiveErrors >= MAX_CONSECUTIVE_READ_ERRORS ||
+            read == AudioRecord.ERROR_INVALID_OPERATION
+        ) {
+            scheduleCaptureRestart("$codec read error $read")
+            return true
+        }
+        delay(CHUNK_DURATION_MS.toLong())
+        return false
+    }
+
+    private fun scheduleCaptureRestart(reason: String) {
+        if (serverSocket == null || restartingCapture) return
+        restartingCapture = true
+        scope.launch {
+            Log.w(TAG, "Restarting audio capture: $reason")
+            updateCaptureStatus(
+                statusText = "Restarting",
+                restartCount = _captureStatus.value.restartCount + 1,
+                lastError = reason
+            )
+            releaseCaptureResources(cancelJob = true)
+            delay(AUDIO_CAPTURE_RESTART_DELAY_MS)
+            captureJob = null
+            restartingCapture = false
+            if (serverSocket != null) {
+                startCapture()
+            }
+        }
+    }
+
+    @Synchronized
+    private fun releaseCaptureResources(cancelJob: Boolean) {
+        if (cancelJob) {
+            captureJob?.cancel()
+            captureJob = null
+        }
+
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {
+        }
+        audioRecord = null
+
+        opusEncoder?.release()
+        opusEncoder = null
+        useOpus = false
+        _audioLevels.value = listOf(0f, 0f)
+    }
+
+    private fun updateCaptureStatus(
+        statusText: String = _captureStatus.value.statusText,
+        clientCount: Int = _captureStatus.value.clientCount,
+        restartCount: Int = _captureStatus.value.restartCount,
+        lastError: String? = _captureStatus.value.lastError
+    ) {
+        _captureStatus.value = AudioCaptureStatus(
+            statusText = statusText,
+            clientCount = clientCount,
+            restartCount = restartCount,
+            lastError = lastError
+        )
     }
 
     private fun calculateRms(samples: ShortArray, count: Int): Float {
@@ -276,22 +454,25 @@ class AudioCaptureService @Inject constructor() {
             payload
         }
 
-        val disconnected = mutableListOf<AudioClientConnection>()
-
         for (client in clients) {
-            try {
-                client.output.writeInt(encrypted.size)
-                client.output.write(encrypted)
-                client.output.flush()
-            } catch (e: Exception) {
-                disconnected.add(client)
+            if (client.isSending) {
+                continue
             }
-        }
-
-        for (client in disconnected) {
-            clients.remove(client)
-            try { client.socket.close() } catch (_: Exception) {}
-            Log.d(TAG, "Audio client disconnected")
+            client.isSending = true
+            sendExecutor.execute {
+                try {
+                    client.output.writeInt(encrypted.size)
+                    client.output.write(encrypted)
+                    client.output.flush()
+                } catch (e: Exception) {
+                    clients.remove(client)
+                    try { client.socket.close() } catch (_: Exception) {}
+                    updateCaptureStatus(clientCount = clients.size)
+                    Log.d(TAG, "Audio client disconnected")
+                } finally {
+                    client.isSending = false
+                }
+            }
         }
     }
 
@@ -318,18 +499,8 @@ class AudioCaptureService @Inject constructor() {
     }
 
     fun stop() {
-        captureJob?.cancel()
-        captureJob = null
-
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
-
-        opusEncoder?.release()
-        opusEncoder = null
-        useOpus = false
+        restartingCapture = false
+        releaseCaptureResources(cancelJob = true)
 
         serverJob?.cancel()
         serverJob = null
@@ -343,11 +514,12 @@ class AudioCaptureService @Inject constructor() {
         serverSocket = null
 
         frameCipher = null
-        _audioLevels.value = listOf(0f, 0f)
+        _captureStatus.value = AudioCaptureStatus()
     }
 
     fun cleanup() {
         stop()
+        sendExecutor.shutdownNow()
         scope.cancel()
     }
 }
