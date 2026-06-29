@@ -12,6 +12,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -84,6 +85,8 @@ private class PgmPresentation(
 ) : Presentation(context, display) {
 
     private var imageView: ImageView? = null
+    @Volatile private var latestBitmap: Bitmap? = null
+    private val framePostPending = AtomicBoolean(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,6 +99,21 @@ private class PgmPresentation(
     }
 
     fun updateFrame(bitmap: Bitmap) {
-        imageView?.post { imageView?.setImageBitmap(bitmap) }
+        latestBitmap = bitmap
+        val iv = imageView ?: return
+        if (framePostPending.compareAndSet(false, true)) {
+            iv.post { publishLatestFrame() }
+        }
+    }
+
+    private fun publishLatestFrame() {
+        val displayed = latestBitmap
+        imageView?.setImageBitmap(displayed)
+        framePostPending.set(false)
+
+        // If a newer frame arrived during this UI pass, schedule exactly one more pass.
+        if (latestBitmap !== displayed && framePostPending.compareAndSet(false, true)) {
+            imageView?.post { publishLatestFrame() }
+        }
     }
 }

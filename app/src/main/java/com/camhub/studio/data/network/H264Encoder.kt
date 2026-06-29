@@ -2,6 +2,7 @@ package com.camhub.studio.data.network
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
@@ -20,7 +21,7 @@ data class EncodedFrame(
 class H264Encoder(
     private val width: Int,
     private val height: Int,
-    private val bitrate: Int = 4_000_000,
+    private val bitrate: Int = 6_000_000,
     private val frameRate: Int = 30,
     private val iFrameInterval: Int = 1
 ) {
@@ -45,6 +46,7 @@ class H264Encoder(
     /** Async callback for surface mode — called on codec thread when output is available */
     var onEncodedFrame: ((EncodedFrame) -> Unit)? = null
 
+    @Suppress("DEPRECATION")
     fun start(): Boolean {
         return try {
             val format = createFormat(
@@ -174,17 +176,18 @@ class H264Encoder(
                 MediaFormat.KEY_BITRATE_MODE,
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
             )
-            setInteger(
-                MediaFormat.KEY_PROFILE,
-                MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
-            )
-            setInteger(
-                MediaFormat.KEY_LEVEL,
-                MediaCodecInfo.CodecProfileLevel.AVCLevel31
-            )
+            val profile = preferredAvcProfile()
+            setInteger(MediaFormat.KEY_PROFILE, profile)
+            setInteger(MediaFormat.KEY_LEVEL, preferredAvcLevel(profile))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 setInteger(MediaFormat.KEY_LATENCY, 1)
             }
+            // Helps late-joining viewers and packet-loss recovery by making sync frames
+            // self-contained on encoders that support this vendor/public key.
+            setInteger("prepend-sps-pps-to-idr-frames", 1)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 // Intra refresh: spread keyframe data across multiple frames
@@ -193,6 +196,38 @@ class H264Encoder(
                     setInteger("intra-refresh-period", frameRate / 2)
                 } catch (_: Exception) { /* not all encoders support this */ }
             }
+        }
+    }
+
+    private fun preferredAvcProfile(): Int {
+        return if (isAvcProfileSupported(MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)) {
+            MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+        } else {
+            MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+        }
+    }
+
+    private fun preferredAvcLevel(profile: Int): Int {
+        if (profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) {
+            return MediaCodecInfo.CodecProfileLevel.AVCLevel31
+        }
+        return if (frameRate > 30) {
+            MediaCodecInfo.CodecProfileLevel.AVCLevel42
+        } else {
+            MediaCodecInfo.CodecProfileLevel.AVCLevel4
+        }
+    }
+
+    private fun isAvcProfileSupported(profile: Int): Boolean {
+        return try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                .asSequence()
+                .filter { it.isEncoder }
+                .filter { info -> info.supportedTypes.any { it.equals(MIME_TYPE, ignoreCase = true) } }
+                .flatMap { it.getCapabilitiesForType(MIME_TYPE).profileLevels.asSequence() }
+                .any { it.profile == profile }
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -300,6 +335,22 @@ class H264Encoder(
             Log.d(TAG, "Keyframe requested")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to request keyframe: ${e.message}")
+        }
+    }
+
+    fun setBitrate(bitrate: Int): Boolean {
+        if (bitrate <= 0) return false
+        return try {
+            val params = Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate)
+            }
+            encoder?.setParameters(params)
+            Log.d(TAG, "Encoder bitrate updated: ${bitrate / 1000}kbps")
+            requestKeyFrame()
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update encoder bitrate: ${e.message}")
+            false
         }
     }
 

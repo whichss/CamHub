@@ -22,6 +22,11 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -60,6 +65,11 @@ class DirectorRecorder @Inject constructor(
 
     private var pauseStartTimeMs: Long = 0L
     private var currentOutputPath: String? = null
+    private val frameWriter: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "DirectorRecorderFrameWriter").apply { isDaemon = true }
+    }
+    private val frameWriteInFlight = AtomicBoolean(false)
+    private val droppedFrameCount = AtomicLong(0)
 
     private val _recordingInfo = MutableStateFlow(RecordingInfo())
     val recordingInfo: StateFlow<RecordingInfo> = _recordingInfo.asStateFlow()
@@ -109,6 +119,7 @@ class DirectorRecorder @Inject constructor(
             val displayPath = muxerResult.second
 
             frameCount = 0
+            droppedFrameCount.set(0)
             stopRequested = false
             currentOutputPath = displayPath
 
@@ -197,11 +208,40 @@ class DirectorRecorder @Inject constructor(
     }
 
     fun onFrame(bitmap: Bitmap) {
-        val surface = inputSurface ?: return
         if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused) return
+        if (!frameWriteInFlight.compareAndSet(false, true)) {
+            noteDroppedRecordFrame()
+            return
+        }
 
         try {
-            val canvas = surface.lockCanvas(null) ?: return
+            frameWriter.execute {
+                try {
+                    val surface = inputSurface ?: return@execute
+                    if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused || stopRequested) {
+                        return@execute
+                    }
+                    drawFrameToSurface(surface, bitmap)
+                } finally {
+                    frameWriteInFlight.set(false)
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            frameWriteInFlight.set(false)
+            Log.w(TAG, "Frame write rejected: ${e.message}")
+        }
+    }
+
+    private fun drawFrameToSurface(surface: Surface, bitmap: Bitmap) {
+        var posted = false
+        val canvas = try {
+            surface.lockCanvas(null)
+        } catch (e: Exception) {
+            Log.w(TAG, "Frame lock error: ${e.message}")
+            return
+        } ?: return
+
+        try {
             canvas.drawBitmap(
                 bitmap,
                 null,
@@ -209,12 +249,24 @@ class DirectorRecorder @Inject constructor(
                 null
             )
             surface.unlockCanvasAndPost(canvas)
+            posted = true
             frameCount++
             if (frameCount == 1) {
                 Log.d(TAG, "First frame written to encoder (bitmap ${bitmap.width}x${bitmap.height})")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Frame write error: ${e.message}")
+        } finally {
+            if (!posted) {
+                try { surface.unlockCanvasAndPost(canvas) } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun noteDroppedRecordFrame() {
+        val dropped = droppedFrameCount.incrementAndGet()
+        if (dropped % 30L == 0L) {
+            Log.d(TAG, "Dropped $dropped recording frames to keep live preview responsive")
         }
     }
 

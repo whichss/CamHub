@@ -15,6 +15,7 @@ class H264Decoder {
         private const val TAG = "H264Decoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val TIMEOUT_US = 0L
+        private const val MAX_DRAINED_OUTPUT_BUFFERS = 16
     }
 
     private var decoder: MediaCodec? = null
@@ -24,6 +25,8 @@ class H264Decoder {
     private var sliceHeight: Int = 0
     private var configured = false
     private var usingSurface = false
+    var lastDecodeFailed: Boolean = false
+        private set
 
     // Double-buffered bitmaps to avoid UI/decode thread contention
     private var bitmapA: Bitmap? = null
@@ -33,7 +36,10 @@ class H264Decoder {
     // Reusable buffers to avoid per-frame allocation
     private var pixelBuffer: IntArray? = null
     private var yuvBuffer: ByteArray? = null
+    private val surfaceOutputIndices = IntArray(MAX_DRAINED_OUTPUT_BUFFERS)
+    private val surfaceOutputHasData = BooleanArray(MAX_DRAINED_OUTPUT_BUFFERS)
 
+    @Suppress("DEPRECATION")
     fun configure(width: Int, height: Int, spsPps: ByteArray, lowLatency: Boolean = true): Boolean {
         release()
         this.width = width
@@ -127,6 +133,7 @@ class H264Decoder {
     fun decode(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean): Bitmap? {
         val dec = decoder ?: return null
         if (!configured) return null
+        lastDecodeFailed = false
 
         try {
             // Queue input
@@ -185,6 +192,7 @@ class H264Decoder {
 
             return resultBitmap
         } catch (e: Exception) {
+            lastDecodeFailed = true
             Log.e(TAG, "Decode error", e)
             return null
         }
@@ -193,11 +201,12 @@ class H264Decoder {
     fun decodeSurface(nalUnit: ByteArray, isKeyFrame: Boolean) =
         decodeSurface(nalUnit, 0, nalUnit.size, isKeyFrame)
 
-    fun decodeSurface(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean) {
-        val dec = decoder ?: return
-        if (!configured || !usingSurface) return
+    fun decodeSurface(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean): Boolean {
+        val dec = decoder ?: return false
+        if (!configured || !usingSurface) return false
+        lastDecodeFailed = false
 
-        try {
+        return try {
             // Queue input
             val inputIndex = dec.dequeueInputBuffer(TIMEOUT_US)
             if (inputIndex >= 0) {
@@ -211,8 +220,11 @@ class H264Decoder {
                 }
             }
 
-            // Drain output — render to Surface
+            // Drain output — render only the newest decoded frame to Surface.
+            // If the decoder briefly falls behind, rendering every old output buffer
+            // feeds stale frames into SurfaceTexture and grows viewer latency.
             val bufferInfo = MediaCodec.BufferInfo()
+            var outputCount = 0
             while (true) {
                 val outputIndex = dec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 when {
@@ -222,13 +234,49 @@ class H264Decoder {
                         Log.d(TAG, "Surface output format: ${newFormat.getInteger(MediaFormat.KEY_WIDTH)}x${newFormat.getInteger(MediaFormat.KEY_HEIGHT)}")
                     }
                     outputIndex >= 0 -> {
-                        // true = render to Surface
-                        dec.releaseOutputBuffer(outputIndex, true)
+                        if (outputCount < MAX_DRAINED_OUTPUT_BUFFERS) {
+                            surfaceOutputIndices[outputCount] = outputIndex
+                            surfaceOutputHasData[outputCount] = bufferInfo.size > 0
+                            outputCount++
+                        } else {
+                            // Very unusual burst: release immediately without rendering stale output.
+                            dec.releaseOutputBuffer(outputIndex, false)
+                        }
                     }
                 }
             }
+
+            var lastRenderableIndex = -1
+            for (i in outputCount - 1 downTo 0) {
+                if (surfaceOutputHasData[i]) {
+                    lastRenderableIndex = i
+                    break
+                }
+            }
+            for (i in 0 until outputCount) {
+                dec.releaseOutputBuffer(
+                    surfaceOutputIndices[i],
+                    surfaceOutputHasData[i] && i == lastRenderableIndex
+                )
+            }
+            true
         } catch (e: Exception) {
+            lastDecodeFailed = true
             Log.e(TAG, "decodeSurface error", e)
+            false
+        }
+    }
+
+    fun flushAfterError(): Boolean {
+        return try {
+            decoder?.flush()
+            lastDecodeFailed = false
+            Log.d(TAG, "Decoder flushed after decode error")
+            true
+        } catch (e: Exception) {
+            lastDecodeFailed = true
+            Log.w(TAG, "Failed to flush decoder after error: ${e.message}")
+            false
         }
     }
 
@@ -313,6 +361,7 @@ class H264Decoder {
     fun release() {
         configured = false
         usingSurface = false
+        lastDecodeFailed = false
         try { decoder?.stop() } catch (_: Exception) {}
         try { decoder?.release() } catch (_: Exception) {}
         decoder = null

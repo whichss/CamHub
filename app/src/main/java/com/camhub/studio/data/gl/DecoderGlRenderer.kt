@@ -13,6 +13,7 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Renders H.264 decoder output (via SurfaceTexture) to an offscreen FBO
@@ -26,6 +27,7 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
 
     companion object {
         private const val TAG = "DecoderGlRenderer"
+        private const val BITMAP_POOL_SIZE = 3
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f,
@@ -69,7 +71,10 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
     private var pboInitialized = false
     private val pixelByteSize get() = width * height * 4
 
-    private var reusableBitmap: Bitmap? = null
+    private val reusableBitmaps = arrayOfNulls<Bitmap>(BITMAP_POOL_SIZE)
+    private var reusableBitmapIndex = 0
+    private val renderQueued = AtomicBoolean(false)
+    private val renderAgain = AtomicBoolean(false)
 
     var surface: Surface? = null
         private set
@@ -145,7 +150,7 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
                 surface = Surface(st)
 
                 st.setOnFrameAvailableListener({ _ ->
-                    glHandler?.post { renderAndReadBitmap() }
+                    scheduleRender()
                 }, handler)
 
                 Log.d(TAG, "DecoderGlRenderer started: ${width}x${height} (PBO async readback)")
@@ -161,6 +166,31 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
         glThread?.quitSafely()
         glThread = null
         glHandler = null
+    }
+
+    private fun scheduleRender() {
+        val handler = glHandler ?: return
+        if (renderQueued.compareAndSet(false, true)) {
+            handler.post { processRenderRequest() }
+        } else {
+            // Coalesce bursts into one extra pass instead of queueing every old frame.
+            renderAgain.set(true)
+        }
+    }
+
+    private fun processRenderRequest() {
+        renderAgain.set(false)
+        renderAndReadBitmap()
+
+        if (renderAgain.getAndSet(false)) {
+            glHandler?.post { processRenderRequest() }
+        } else {
+            renderQueued.set(false)
+            // Close the tiny race where a frame arrived after the check but before queued=false.
+            if (renderAgain.getAndSet(false) && renderQueued.compareAndSet(false, true)) {
+                glHandler?.post { processRenderRequest() }
+            }
+        }
     }
 
     private fun renderAndReadBitmap() {
@@ -217,8 +247,7 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
                     GLES30.GL_PIXEL_PACK_BUFFER, 0, pixelByteSize, GLES30.GL_MAP_READ_BIT
                 )
                 if (mappedBuffer is ByteBuffer) {
-                    val bitmap = reusableBitmap
-                        ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { reusableBitmap = it }
+                    val bitmap = nextReusableBitmap()
                     bitmap.copyPixelsFromBuffer(mappedBuffer)
                     onBitmapReady?.invoke(bitmap)
                 }
@@ -269,9 +298,22 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
         }
         eglHelper = null
         pboInitialized = false
-        reusableBitmap?.recycle()
-        reusableBitmap = null
+        renderQueued.set(false)
+        renderAgain.set(false)
+        for (i in reusableBitmaps.indices) {
+            reusableBitmaps[i]?.recycle()
+            reusableBitmaps[i] = null
+        }
+        reusableBitmapIndex = 0
         onBitmapReady = null
         Log.d(TAG, "DecoderGlRenderer released")
+    }
+
+    private fun nextReusableBitmap(): Bitmap {
+        val index = reusableBitmapIndex
+        reusableBitmapIndex = (reusableBitmapIndex + 1) % BITMAP_POOL_SIZE
+        return reusableBitmaps[index]
+            ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                .also { reusableBitmaps[index] = it }
     }
 }

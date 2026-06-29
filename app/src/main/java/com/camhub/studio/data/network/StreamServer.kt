@@ -1,29 +1,44 @@
 package com.camhub.studio.data.network
 
+import android.content.Context
 import android.util.Log
 import androidx.camera.core.ImageProxy
+import com.camhub.studio.data.LowLatencyWifiLock
+import com.camhub.studio.data.StreamingConfig
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.thibaultbee.srtdroid.core.models.SrtSocket
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class StreamServer @Inject constructor() {
+class StreamServer @Inject constructor(
+    @ApplicationContext context: Context,
+    private val streamingConfig: StreamingConfig
+) {
 
     companion object {
         private const val TAG = "StreamServer"
         private const val MAX_CLIENTS = 4
         private const val META_HEADER_V2: Byte = 2
         private const val META_HEADER_V2_SIZE = 7
+        private const val META_HEADER_V3: Byte = 3
+        private const val META_HEADER_V3_SIZE = 15
         private const val FLAG_KEYFRAME: Byte = 0x01
         private const val FLAG_CODEC_CONFIG: Byte = 0x02
+        private const val MAX_BLOCKED_SEND_MS = 2_000L
     }
 
     private var lastFrameTimeMs: Long = 0
@@ -34,15 +49,23 @@ class StreamServer @Inject constructor() {
     private var srtServerSocket: SrtSocket? = null
     private var serverJob: Job? = null
     private val clients = CopyOnWriteArrayList<ClientConnection>()
+    private val _clientCount = MutableStateFlow(0)
+    val clientCount: StateFlow<Int> = _clientCount.asStateFlow()
 
     private var frameCipher: FrameCipher? = null
     private var srtPassphrase: String? = null
     private var usingSrt = false
+    private val wifiLock = LowLatencyWifiLock(context, "CamHubCameraStream")
 
     private var encoder: H264Encoder? = null
     private var useH264 = false
     private var encoderWidth = 0
     private var encoderHeight = 0
+    @Volatile private var latestSurfaceConfig: ByteArray? = null
+    @Volatile private var latestSurfaceConfigWidth = 0
+    @Volatile private var latestSurfaceConfigHeight = 0
+    @Volatile private var latestSurfaceConfigRotation = 0
+    var keyFrameRequester: (() -> Unit)? = null
 
     // --- Polymorphic client connection (SRT / TCP) ---
 
@@ -50,6 +73,7 @@ class StreamServer @Inject constructor() {
         abstract var needsConfig: Boolean
         @Volatile var isSending: Boolean = false
         @Volatile var pendingKeyframe: ByteArray? = null
+        @Volatile var sendStartedAtMs: Long = 0L
         abstract fun sendFrame(data: ByteArray)
         abstract fun close()
 
@@ -89,6 +113,8 @@ class StreamServer @Inject constructor() {
     }
 
     fun start(): Int {
+        wifiLock.acquire()
+        ensureBroadcastPool()
         if (SrtTransport.isAvailable()) {
             try {
                 return startSrt()
@@ -127,10 +153,14 @@ class StreamServer @Inject constructor() {
                     val output = DataOutputStream(clientSrtSocket.getOutputStream())
                     val client = ClientConnection.SrtConnection(clientSrtSocket, output, needsConfig = true)
                     clients.add(client)
+                    updateClientCount()
 
                     if (useH264) {
                         sendConfigToClient(client)
                         encoder?.requestKeyFrame()
+                    } else {
+                        sendLatestSurfaceConfigToClient(client)
+                        keyFrameRequester?.invoke()
                     }
 
                     Log.d(TAG, "SRT client connected: ${clientAddr?.hostString}")
@@ -164,10 +194,14 @@ class StreamServer @Inject constructor() {
                     val output = DataOutputStream(clientSocket.getOutputStream())
                     val client = ClientConnection.TcpConnection(clientSocket, output, needsConfig = true)
                     clients.add(client)
+                    updateClientCount()
 
                     if (useH264) {
                         sendConfigToClient(client)
                         encoder?.requestKeyFrame()
+                    } else {
+                        sendLatestSurfaceConfigToClient(client)
+                        keyFrameRequester?.invoke()
                     }
 
                     Log.d(TAG, "TCP client connected: ${clientSocket.inetAddress.hostAddress}")
@@ -214,7 +248,12 @@ class StreamServer @Inject constructor() {
             encoder = null
             useH264 = false
 
-            val newEncoder = H264Encoder(width, height, frameRate = maxFps)
+            val newEncoder = H264Encoder(
+                width = width,
+                height = height,
+                bitrate = streamingConfig.bitrateBytes,
+                frameRate = maxFps
+            )
             if (newEncoder.start()) {
                 encoder = newEncoder
                 useH264 = true
@@ -264,6 +303,31 @@ class StreamServer @Inject constructor() {
         }
     }
 
+    private fun sendLatestSurfaceConfigToClient(client: ClientConnection): Boolean {
+        val config = latestSurfaceConfig ?: return false
+        if (latestSurfaceConfigWidth <= 0 || latestSurfaceConfigHeight <= 0) return false
+
+        return try {
+            val payload = buildH264Payload(
+                config,
+                latestSurfaceConfigWidth,
+                latestSurfaceConfigHeight,
+                latestSurfaceConfigRotation,
+                false,
+                true
+            )
+            val dataToSend = if (usingSrt) payload
+                             else frameCipher?.encrypt(payload) ?: payload
+            client.sendFrame(dataToSend)
+            client.needsConfig = false
+            Log.d(TAG, "Sent cached surface SPS/PPS config to new client")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send cached surface config to client: ${e.message}")
+            false
+        }
+    }
+
     private fun sendConfigToNewClients(configData: ByteArray, width: Int, height: Int, rotation: Int) {
         val payload = buildH264Payload(configData, width, height, rotation, false, true)
         val dataToSend = if (usingSrt) payload
@@ -298,12 +362,13 @@ class StreamServer @Inject constructor() {
         if (isKeyFrame) flags = flags or FLAG_KEYFRAME.toInt()
         if (isConfig) flags = flags or FLAG_CODEC_CONFIG.toInt()
 
-        val header = ByteBuffer.allocate(META_HEADER_V2_SIZE)
-        header.put(META_HEADER_V2)
+        val header = ByteBuffer.allocate(META_HEADER_V3_SIZE)
+        header.put(META_HEADER_V3)
         header.putShort(width.toShort())
         header.putShort(height.toShort())
         header.put(rotationCode)
         header.put(flags.toByte())
+        header.putLong(System.currentTimeMillis())
         return header.array() + data
     }
 
@@ -350,16 +415,27 @@ class StreamServer @Inject constructor() {
         return nv12
     }
 
-    private val broadcastPool = Executors.newFixedThreadPool(4)
+    private var broadcastPool: ExecutorService = Executors.newFixedThreadPool(MAX_CLIENTS)
 
     private val clientsToRemove = CopyOnWriteArrayList<ClientConnection>()
+
+    private fun ensureBroadcastPool() {
+        if (broadcastPool.isShutdown || broadcastPool.isTerminated) {
+            broadcastPool = Executors.newFixedThreadPool(MAX_CLIENTS)
+        }
+    }
 
     private fun broadcastFrame(payload: ByteArray, isKeyFrame: Boolean = false) {
         val dataToSend = if (usingSrt) payload  // SRT handles encryption via passphrase
                          else frameCipher?.encrypt(payload) ?: payload
 
+        val now = System.currentTimeMillis()
         for (client in clients) {
             if (client.isSending) {
+                if (now - client.sendStartedAtMs > MAX_BLOCKED_SEND_MS) {
+                    clientsToRemove.add(client)
+                    continue
+                }
                 // Buffer keyframes so slow clients can resync (never drop keyframes)
                 if (isKeyFrame) {
                     client.pendingKeyframe = dataToSend
@@ -367,20 +443,29 @@ class StreamServer @Inject constructor() {
                 continue
             }
             client.isSending = true
-            broadcastPool.execute {
-                try {
-                    client.sendFrame(dataToSend)
-                    // After sending, flush any buffered keyframe for this client
-                    val pending = client.pendingKeyframe
-                    if (pending != null) {
-                        client.pendingKeyframe = null
-                        client.sendFrame(pending)
+            client.sendStartedAtMs = now
+            try {
+                ensureBroadcastPool()
+                broadcastPool.execute {
+                    try {
+                        client.sendFrame(dataToSend)
+                        // After sending, flush any buffered keyframe for this client
+                        val pending = client.pendingKeyframe
+                        if (pending != null) {
+                            client.pendingKeyframe = null
+                            client.sendFrame(pending)
+                        }
+                    } catch (e: Exception) {
+                        clientsToRemove.add(client)
+                    } finally {
+                        client.sendStartedAtMs = 0L
+                        client.isSending = false
                     }
-                } catch (e: Exception) {
-                    clientsToRemove.add(client)
-                } finally {
-                    client.isSending = false
                 }
+            } catch (e: RejectedExecutionException) {
+                client.sendStartedAtMs = 0L
+                client.isSending = false
+                clientsToRemove.add(client)
             }
         }
 
@@ -392,6 +477,7 @@ class StreamServer @Inject constructor() {
                 Log.d(TAG, "Stream client disconnected")
             }
             clientsToRemove.clear()
+            updateClientCount()
         }
     }
 
@@ -401,12 +487,23 @@ class StreamServer @Inject constructor() {
             try { client.close() } catch (_: Exception) {}
             Log.d(TAG, "Stream client disconnected")
         }
+        if (disconnected.isNotEmpty()) {
+            updateClientCount()
+        }
+    }
+
+    private fun updateClientCount() {
+        _clientCount.value = clients.size
     }
 
     fun broadcastEncodedFrame(frame: EncodedFrame, width: Int, height: Int, rotation: Int) {
-        if (clients.isEmpty()) return
-
         if (frame.isConfig) {
+            latestSurfaceConfig = frame.data
+            latestSurfaceConfigWidth = width
+            latestSurfaceConfigHeight = height
+            latestSurfaceConfigRotation = rotation
+            if (clients.isEmpty()) return
+
             // Always send config to ALL clients — dimensions may have changed after rotation
             val payload = buildH264Payload(frame.data, width, height, rotation, false, true)
             val dataToSend = if (usingSrt) payload
@@ -427,12 +524,18 @@ class StreamServer @Inject constructor() {
                 Log.d(TAG, "Surface encoder dimensions updated: ${width}x${height}")
             }
         } else {
+            if (clients.isEmpty()) return
+
             val payload = buildH264Payload(frame.data, width, height, rotation, frame.isKeyFrame, false)
             broadcastFrame(payload, frame.isKeyFrame)
         }
     }
 
     fun getEncoder(): H264Encoder? = encoder
+
+    fun updateBitrate(bitrate: Int): Boolean {
+        return encoder?.setBitrate(bitrate) ?: false
+    }
 
     fun stop() {
         serverJob?.cancel()
@@ -441,6 +544,7 @@ class StreamServer @Inject constructor() {
             try { it.close() } catch (_: Exception) {}
         }
         clients.clear()
+        updateClientCount()
         try { srtServerSocket?.close() } catch (_: Exception) {}
         srtServerSocket = null
         try { serverSocket?.close() } catch (_: Exception) {}
@@ -448,6 +552,12 @@ class StreamServer @Inject constructor() {
         usingSrt = false
         frameCipher = null
         srtPassphrase = null
+        keyFrameRequester = null
+        latestSurfaceConfig = null
+        latestSurfaceConfigWidth = 0
+        latestSurfaceConfigHeight = 0
+        latestSurfaceConfigRotation = 0
+        wifiLock.release()
         encoder?.release()
         encoder = null
         useH264 = false
