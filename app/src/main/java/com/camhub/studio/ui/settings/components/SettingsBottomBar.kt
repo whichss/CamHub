@@ -36,6 +36,7 @@ import com.camhub.studio.ui.theme.TextTertiary
 @Composable
 fun SettingsBottomBar(
     latencyMs: Int,
+    minStreamFps: Int,
     droppedFrames: Int,
     activeStreams: Int,
     modifier: Modifier = Modifier
@@ -55,6 +56,19 @@ fun SettingsBottomBar(
             valueColor = when {
                 latencyMs > 100 -> ElectricRed
                 latencyMs > 50 -> AmberYellow
+                else -> NeonGreen
+            }
+        )
+
+        BarDivider()
+
+        BottomBarItem(
+            label = "FPS",
+            value = if (minStreamFps > 0) "$minStreamFps" else "--",
+            valueColor = when {
+                minStreamFps == 0 -> TextSecondary
+                minStreamFps < 20 -> ElectricRed
+                minStreamFps < 27 -> AmberYellow
                 else -> NeonGreen
             }
         )

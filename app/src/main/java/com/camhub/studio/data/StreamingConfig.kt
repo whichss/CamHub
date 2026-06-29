@@ -25,7 +25,7 @@ class StreamingConfig @Inject constructor(
             prefs.edit().putInt("stream_max_resolution", value).apply()
         }
 
-    var bitrateMbps: Int = prefs.getInt("stream_bitrate", 4)
+    var bitrateMbps: Int = prefs.getInt("stream_bitrate", 6)
         set(value) {
             field = value
             prefs.edit().putInt("stream_bitrate", value).apply()
@@ -35,6 +35,12 @@ class StreamingConfig @Inject constructor(
         set(value) {
             field = value
             prefs.edit().putBoolean("low_latency_decode", value).apply()
+        }
+
+    var adaptiveBitrate: Boolean = prefs.getBoolean("adaptive_bitrate", false)
+        set(value) {
+            field = value
+            prefs.edit().putBoolean("adaptive_bitrate", value).apply()
         }
 
     val bitrateBytes: Int get() = bitrateMbps * 1_000_000

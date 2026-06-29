@@ -36,7 +36,7 @@ import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
 
 private val fpsOptions = listOf(24, 30, 60)
-private val resolutionOptions = listOf(720, 1080)
+private val resolutionOptions = listOf(720, 1080, 1440, 2160)
 
 @Composable
 fun StreamingSettings(
@@ -44,10 +44,13 @@ fun StreamingSettings(
     maxResolution: Int,
     bitrateMbps: Int,
     isLowLatencyDecode: Boolean,
+    isAdaptiveBitrate: Boolean,
+    adaptiveBitrateStatus: String,
     onFpsChange: (Int) -> Unit,
     onResolutionChange: (Int) -> Unit,
     onBitrateChange: (Int) -> Unit,
     onToggleLowLatency: () -> Unit,
+    onToggleAdaptiveBitrate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -89,6 +92,12 @@ fun StreamingSettings(
         LowLatencyToggle(
             isEnabled = isLowLatencyDecode,
             onToggle = onToggleLowLatency
+        )
+
+        AdaptiveBitrateToggle(
+            isEnabled = isAdaptiveBitrate,
+            status = adaptiveBitrateStatus,
+            onToggle = onToggleAdaptiveBitrate
         )
     }
 }
@@ -183,8 +192,8 @@ private fun StreamBitrateSlider(
         Slider(
             value = bitrateMbps.toFloat(),
             onValueChange = { onBitrateChange(it.toInt()) },
-            valueRange = 1f..10f,
-            steps = 8,
+            valueRange = 1f..20f,
+            steps = 18,
             modifier = Modifier.fillMaxWidth(),
             colors = SliderDefaults.colors(
                 thumbColor = CyanAccent,
@@ -197,7 +206,7 @@ private fun StreamBitrateSlider(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(text = "1 Mbps", fontFamily = SpaceGroteskFamily, fontSize = 10.sp, color = TextMuted)
-            Text(text = "10 Mbps", fontFamily = SpaceGroteskFamily, fontSize = 10.sp, color = TextMuted)
+            Text(text = "20 Mbps", fontFamily = SpaceGroteskFamily, fontSize = 10.sp, color = TextMuted)
         }
     }
 }
@@ -233,6 +242,62 @@ private fun LowLatencyToggle(
                 fontSize = 11.sp,
                 color = TextTertiary
             )
+        }
+        Switch(
+            checked = isEnabled,
+            onCheckedChange = { onToggle() },
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = TextPrimary,
+                checkedTrackColor = Primary,
+                uncheckedThumbColor = TextSecondary,
+                uncheckedTrackColor = SurfaceDark,
+                uncheckedBorderColor = GlassBorder
+            )
+        )
+    }
+}
+
+@Composable
+private fun AdaptiveBitrateToggle(
+    isEnabled: Boolean,
+    status: String,
+    onToggle: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(GlassSurface)
+            .border(width = 1.dp, color = GlassBorder, shape = shape)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Adaptive Bitrate",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 14.sp,
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Auto-lowers bitrate when latency or drops rise",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 11.sp,
+                color = TextTertiary
+            )
+            if (isEnabled) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = status,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontSize = 11.sp,
+                    color = CyanAccent
+                )
+            }
         }
         Switch(
             checked = isEnabled,

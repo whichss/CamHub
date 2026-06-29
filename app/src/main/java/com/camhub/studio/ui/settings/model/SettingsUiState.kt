@@ -9,6 +9,7 @@ data class SettingsUiState(
     val discoveredNodes: List<DiscoveredNode> = emptyList(),
     val activeStreams: Int = 0,
     val latencyMs: Int = 0,
+    val minStreamFps: Int = 0,
 
     // Recording tab
     val recordingStoragePath: String = "",
@@ -34,8 +35,10 @@ data class SettingsUiState(
     // Streaming quality
     val streamFps: Int = 30,
     val streamMaxResolution: Int = 1080,
-    val streamBitrateMbps: Int = 4,
+    val streamBitrateMbps: Int = 6,
     val isLowLatencyDecode: Boolean = true,
+    val isAdaptiveBitrate: Boolean = false,
+    val adaptiveBitrateStatus: String = "Off",
 
     // Bottom bar
     val droppedFrames: Int = 0

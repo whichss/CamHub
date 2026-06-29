@@ -20,7 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
@@ -111,6 +111,7 @@ fun SettingsScreen(
 
         SettingsBottomBar(
             latencyMs = uiState.latencyMs,
+            minStreamFps = uiState.minStreamFps,
             droppedFrames = uiState.droppedFrames,
             activeStreams = uiState.activeStreams
         )
@@ -130,7 +131,7 @@ private fun SettingsTopBar(
     ) {
         IconButton(onClick = onBack) {
             Icon(
-                imageVector = Icons.Default.ArrowBack,
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
                 tint = TextPrimary
             )
@@ -214,10 +215,13 @@ private fun ConnectionTabContent(
         maxResolution = uiState.streamMaxResolution,
         bitrateMbps = uiState.streamBitrateMbps,
         isLowLatencyDecode = uiState.isLowLatencyDecode,
+        isAdaptiveBitrate = uiState.isAdaptiveBitrate,
+        adaptiveBitrateStatus = uiState.adaptiveBitrateStatus,
         onFpsChange = { viewModel.updateStreamFps(it) },
         onResolutionChange = { viewModel.updateStreamResolution(it) },
         onBitrateChange = { viewModel.updateStreamBitrate(it) },
-        onToggleLowLatency = { viewModel.toggleLowLatencyDecode() }
+        onToggleLowLatency = { viewModel.toggleLowLatencyDecode() },
+        onToggleAdaptiveBitrate = { viewModel.toggleAdaptiveBitrate() }
     )
 }
 

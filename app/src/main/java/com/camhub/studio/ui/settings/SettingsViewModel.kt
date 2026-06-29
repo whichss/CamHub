@@ -13,6 +13,7 @@ import com.camhub.studio.data.DirectorRecorder
 import com.camhub.studio.data.ExternalDisplayManager
 import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.network.PeerConnectionManager
+import com.camhub.studio.data.network.CameraStreamState
 import com.camhub.studio.data.network.StreamClient
 import com.camhub.studio.ui.settings.model.DiscoveredNode
 import com.camhub.studio.ui.settings.model.DisplayResolution
@@ -31,7 +32,7 @@ import javax.inject.Inject
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
-    @ApplicationContext private val context: Context,
+    @param:ApplicationContext private val context: Context,
     private val connectionManager: PeerConnectionManager,
     private val streamClient: StreamClient,
     private val deviceMonitor: DeviceMonitor,
@@ -49,6 +50,13 @@ class SettingsViewModel @Inject constructor(
         )
     )
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
+
+    private var adaptiveBitrateCeilingMbps = streamingConfig.bitrateMbps
+    private var lastAdaptiveChangeMs = 0L
+    private var lastObservedDroppedFrames = 0
+    private var stableSinceMs = 0L
+    private var adaptiveBitrateStatusText =
+        if (streamingConfig.adaptiveBitrate) adaptiveMonitoringStatus() else "Off"
 
     init {
         loadSavedSettings()
@@ -95,6 +103,29 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             externalDisplayManager.isOutputEnabled.collect { enabled ->
                 _uiState.update { it.copy(isExternalDisplayEnabled = enabled) }
+            }
+        }
+
+        // Observe stream diagnostics for the bottom status bar.
+        viewModelScope.launch {
+            streamClient.streams.collect { streams ->
+                val liveStreams = streams.values.filter { it.isConnected }
+                val maxLatencyMs = liveStreams.maxOfOrNull { it.latencyMs } ?: 0
+                val droppedFrames = liveStreams.sumOf { it.droppedFrames }
+                    .coerceAtMost(Int.MAX_VALUE)
+                val minStreamFps = liveStreams
+                    .map { it.actualFps }
+                    .filter { it > 0 }
+                    .minOrNull() ?: 0
+                _uiState.update {
+                    it.copy(
+                        activeStreams = liveStreams.size,
+                        latencyMs = maxLatencyMs,
+                        minStreamFps = minStreamFps,
+                        droppedFrames = droppedFrames
+                    )
+                }
+                maybeAdaptBitrate(liveStreams, maxLatencyMs, droppedFrames, minStreamFps)
             }
         }
     }
@@ -176,24 +207,51 @@ class SettingsViewModel @Inject constructor(
 
     // Streaming quality
     fun updateStreamFps(fps: Int) {
-        streamingConfig.fps = fps
-        _uiState.update { it.copy(streamFps = fps) }
+        val clamped = fps.coerceIn(MIN_STREAM_FPS, MAX_STREAM_FPS)
+        streamingConfig.fps = clamped
+        connectionManager.sendCommandToAll("set_stream_fps", value = clamped.toFloat())
+        _uiState.update { it.copy(streamFps = clamped) }
     }
 
     fun updateStreamResolution(resolution: Int) {
-        streamingConfig.maxResolution = resolution
-        _uiState.update { it.copy(streamMaxResolution = resolution) }
+        val clamped = resolution.coerceIn(MIN_STREAM_RESOLUTION, MAX_STREAM_RESOLUTION)
+        streamingConfig.maxResolution = clamped
+        connectionManager.sendCommandToAll("set_stream_resolution", value = clamped.toFloat())
+        _uiState.update { it.copy(streamMaxResolution = clamped) }
     }
 
     fun updateStreamBitrate(mbps: Int) {
-        streamingConfig.bitrateMbps = mbps
-        _uiState.update { it.copy(streamBitrateMbps = mbps) }
+        adaptiveBitrateCeilingMbps = mbps.coerceIn(MIN_STREAM_BITRATE_MBPS, MAX_STREAM_BITRATE_MBPS)
+        applyStreamBitrate(adaptiveBitrateCeilingMbps)
+        if (_uiState.value.isAdaptiveBitrate) {
+            updateAdaptiveBitrateStatus("Ceiling set to ${adaptiveBitrateCeilingMbps} Mbps")
+        }
     }
 
     fun toggleLowLatencyDecode() {
         val newValue = !_uiState.value.isLowLatencyDecode
         streamingConfig.lowLatencyDecode = newValue
         _uiState.update { it.copy(isLowLatencyDecode = newValue) }
+    }
+
+    fun toggleAdaptiveBitrate() {
+        val newValue = !_uiState.value.isAdaptiveBitrate
+        streamingConfig.adaptiveBitrate = newValue
+        if (newValue) {
+            adaptiveBitrateCeilingMbps = _uiState.value.streamBitrateMbps
+                .coerceIn(MIN_STREAM_BITRATE_MBPS, MAX_STREAM_BITRATE_MBPS)
+            lastObservedDroppedFrames = _uiState.value.droppedFrames
+            stableSinceMs = 0L
+            lastAdaptiveChangeMs = 0L
+        }
+        val status = if (newValue) adaptiveMonitoringStatus() else "Off"
+        adaptiveBitrateStatusText = status
+        _uiState.update {
+            it.copy(
+                isAdaptiveBitrate = newValue,
+                adaptiveBitrateStatus = status
+            )
+        }
     }
 
     fun toggleNavigationLock() {
@@ -241,9 +299,149 @@ class SettingsViewModel @Inject constructor(
                 streamFps = streamingConfig.fps,
                 streamMaxResolution = streamingConfig.maxResolution,
                 streamBitrateMbps = streamingConfig.bitrateMbps,
-                isLowLatencyDecode = streamingConfig.lowLatencyDecode
+                isLowLatencyDecode = streamingConfig.lowLatencyDecode,
+                isAdaptiveBitrate = streamingConfig.adaptiveBitrate,
+                adaptiveBitrateStatus = adaptiveBitrateStatusText
             )
         }
+        adaptiveBitrateCeilingMbps = streamingConfig.bitrateMbps
+        adaptiveBitrateStatusText =
+            if (streamingConfig.adaptiveBitrate) adaptiveMonitoringStatus() else "Off"
+        updateAdaptiveBitrateStatus(adaptiveBitrateStatusText)
+    }
+
+    private fun maybeAdaptBitrate(
+        liveStreams: List<CameraStreamState>,
+        maxLatencyMs: Int,
+        droppedFrames: Int,
+        minStreamFps: Int
+    ) {
+        if (!_uiState.value.isAdaptiveBitrate) {
+            updateAdaptiveBitrateStatus("Off")
+            return
+        }
+
+        if (liveStreams.isEmpty()) {
+            stableSinceMs = 0L
+            lastObservedDroppedFrames = droppedFrames
+            updateAdaptiveBitrateStatus("Standby: no active stream")
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val droppedDelta = (droppedFrames - lastObservedDroppedFrames).coerceAtLeast(0)
+        lastObservedDroppedFrames = droppedFrames
+
+        if (now - lastAdaptiveChangeMs < ADAPTIVE_CHANGE_COOLDOWN_MS) return
+
+        val currentBitrate = _uiState.value.streamBitrateMbps
+        val targetFps = streamingConfig.fps.coerceAtLeast(1)
+        val fpsPressure = minStreamFps > 0 && minStreamFps < (targetFps * ADAPTIVE_FPS_DOWN_RATIO)
+        val severeCongestion = maxLatencyMs >= ADAPTIVE_SEVERE_LATENCY_DOWN_MS ||
+            droppedDelta >= ADAPTIVE_SEVERE_DROPS_DOWN_THRESHOLD
+        val congested = maxLatencyMs >= ADAPTIVE_LATENCY_DOWN_MS ||
+            droppedDelta >= ADAPTIVE_DROPS_DOWN_THRESHOLD ||
+            fpsPressure
+
+        if (congested) {
+            stableSinceMs = 0L
+            val reason = adaptiveCongestionReason(maxLatencyMs, droppedDelta, minStreamFps, targetFps)
+            if (currentBitrate > MIN_STREAM_BITRATE_MBPS) {
+                val stepDown = if (severeCongestion) 2 else 1
+                val nextBitrate = (currentBitrate - stepDown).coerceAtLeast(MIN_STREAM_BITRATE_MBPS)
+                applyStreamBitrate(nextBitrate)
+                updateAdaptiveBitrateStatus("Lowered to ${nextBitrate} Mbps: $reason")
+                lastAdaptiveChangeMs = now
+            } else {
+                updateAdaptiveBitrateStatus("At minimum 1 Mbps: $reason")
+            }
+            return
+        }
+
+        val fpsHealthy = minStreamFps == 0 || minStreamFps >= (targetFps * ADAPTIVE_FPS_UP_RATIO)
+        val healthy = maxLatencyMs in 1 until ADAPTIVE_LATENCY_UP_MS &&
+            droppedDelta == 0 &&
+            fpsHealthy
+        if (!healthy) {
+            stableSinceMs = 0L
+            updateAdaptiveBitrateStatus(
+                "Monitoring: ${maxLatencyMs}ms, ${fpsStatus(minStreamFps, targetFps)}, drops +$droppedDelta"
+            )
+            return
+        }
+
+        if (stableSinceMs == 0L) {
+            stableSinceMs = now
+            updateAdaptiveBitrateStatus("Stable at ${currentBitrate} Mbps")
+            return
+        }
+
+        if (now - stableSinceMs >= ADAPTIVE_STABLE_RECOVERY_MS &&
+            currentBitrate < adaptiveBitrateCeilingMbps
+        ) {
+            val nextBitrate = currentBitrate + 1
+            applyStreamBitrate(nextBitrate)
+            updateAdaptiveBitrateStatus("Recovered to ${nextBitrate} Mbps")
+            stableSinceMs = now
+            lastAdaptiveChangeMs = now
+        } else {
+            updateAdaptiveBitrateStatus("Stable at ${currentBitrate} Mbps")
+        }
+    }
+
+    private fun applyStreamBitrate(mbps: Int) {
+        val clamped = mbps.coerceIn(MIN_STREAM_BITRATE_MBPS, MAX_STREAM_BITRATE_MBPS)
+        streamingConfig.bitrateMbps = clamped
+        connectionManager.sendCommandToAll("set_stream_bitrate", value = clamped.toFloat())
+        _uiState.update { it.copy(streamBitrateMbps = clamped) }
+    }
+
+    private fun adaptiveMonitoringStatus(): String =
+        "Monitoring up to ${adaptiveBitrateCeilingMbps} Mbps"
+
+    private fun adaptiveCongestionReason(
+        maxLatencyMs: Int,
+        droppedDelta: Int,
+        minStreamFps: Int,
+        targetFps: Int
+    ): String =
+        when {
+            maxLatencyMs >= ADAPTIVE_LATENCY_DOWN_MS &&
+                droppedDelta >= ADAPTIVE_DROPS_DOWN_THRESHOLD ->
+                "${maxLatencyMs}ms latency, drops +$droppedDelta"
+            maxLatencyMs >= ADAPTIVE_LATENCY_DOWN_MS ->
+                "${maxLatencyMs}ms latency"
+            minStreamFps > 0 && minStreamFps < (targetFps * ADAPTIVE_FPS_DOWN_RATIO) ->
+                fpsStatus(minStreamFps, targetFps)
+            else ->
+                "drops +$droppedDelta"
+        }
+
+    private fun fpsStatus(minStreamFps: Int, targetFps: Int): String =
+        if (minStreamFps > 0) "${minStreamFps}/${targetFps}fps" else "--/${targetFps}fps"
+
+    private fun updateAdaptiveBitrateStatus(status: String) {
+        if (adaptiveBitrateStatusText == status) return
+        adaptiveBitrateStatusText = status
+        _uiState.update { it.copy(adaptiveBitrateStatus = status) }
+    }
+
+    companion object {
+        private const val MIN_STREAM_BITRATE_MBPS = 1
+        private const val MAX_STREAM_BITRATE_MBPS = 20
+        private const val MIN_STREAM_FPS = 1
+        private const val MAX_STREAM_FPS = 60
+        private const val MIN_STREAM_RESOLUTION = 360
+        private const val MAX_STREAM_RESOLUTION = 2160
+        private const val ADAPTIVE_LATENCY_DOWN_MS = 180
+        private const val ADAPTIVE_SEVERE_LATENCY_DOWN_MS = 320
+        private const val ADAPTIVE_LATENCY_UP_MS = 80
+        private const val ADAPTIVE_DROPS_DOWN_THRESHOLD = 5
+        private const val ADAPTIVE_SEVERE_DROPS_DOWN_THRESHOLD = 15
+        private const val ADAPTIVE_FPS_DOWN_RATIO = 0.65f
+        private const val ADAPTIVE_FPS_UP_RATIO = 0.85f
+        private const val ADAPTIVE_CHANGE_COOLDOWN_MS = 5_000L
+        private const val ADAPTIVE_STABLE_RECOVERY_MS = 15_000L
     }
 
 }
