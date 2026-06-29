@@ -26,6 +26,7 @@ import com.camhub.studio.ui.camera.model.ToolMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,7 +61,15 @@ class CameraHudViewModel @Inject constructor(
     )
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
-    @OptIn(ExperimentalCamera2Interop::class)
+    private fun streamStatusText(
+        isLive: Boolean = streamServer.getPort() > 0,
+        videoClientCount: Int = _uiState.value.videoClientCount,
+        label: String? = null
+    ): String {
+        val prefix = label ?: if (isLive) "LIVE" else "OFF"
+        return "$prefix ${streamingConfig.maxResolution}p${streamingConfig.fps} ${streamingConfig.bitrateMbps}M V$videoClientCount"
+    }
+
     private fun handleRemoteCommand(msg: HandshakeMessage) {
         viewModelScope.launch {
             when (msg.command) {
@@ -86,6 +95,18 @@ class CameraHudViewModel @Inject constructor(
                     if (cameraController.hardwareState.value.isRecording) {
                         cameraController.stopRecording()
                     }
+                }
+                "set_stream_bitrate" -> {
+                    val mbps = msg.value.toInt().coerceIn(1, 20)
+                    updateStreamBitrate(mbps)
+                }
+                "set_stream_fps" -> {
+                    val fps = msg.value.toInt().coerceIn(1, 60)
+                    updateStreamFps(fps)
+                }
+                "set_stream_resolution" -> {
+                    val resolution = msg.value.toInt().coerceIn(360, 2160)
+                    updateStreamResolution(resolution)
                 }
             }
             _uiState.update { it.copy(isRemoteOverride = true) }
@@ -141,6 +162,21 @@ class CameraHudViewModel @Inject constructor(
             } catch (_: Exception) {}
         }
 
+        // Video stream clients connected to this camera.
+        viewModelScope.launch {
+            streamServer.clientCount.collect { count ->
+                _uiState.update {
+                    it.copy(
+                        videoClientCount = count,
+                        bitrate = streamStatusText(
+                            isLive = streamServer.getPort() > 0,
+                            videoClientCount = count
+                        )
+                    )
+                }
+            }
+        }
+
         // Real-time device status (battery, wifi, storage)
         viewModelScope.launch {
             try {
@@ -151,7 +187,7 @@ class CameraHudViewModel @Inject constructor(
                             wifiStrength = device.wifiStrength,
                             storageUsedGb = device.storageUsedGb,
                             storageTotalGb = device.storageTotalGb,
-                            bitrate = "${streamServer.getPort().let { p -> if (p > 0) "LIVE" else "OFF" }}"
+                            bitrate = streamStatusText()
                         )
                     }
                 }
@@ -162,6 +198,19 @@ class CameraHudViewModel @Inject constructor(
         viewModelScope.launch {
             audioCaptureService.audioLevels.collect { levels ->
                 _uiState.update { it.copy(audioLevels = levels) }
+            }
+        }
+
+        // Audio capture health for on-camera troubleshooting
+        viewModelScope.launch {
+            audioCaptureService.captureStatus.collect { status ->
+                _uiState.update {
+                    it.copy(
+                        audioCaptureStatus = status.statusText,
+                        audioClientCount = status.clientCount,
+                        audioRestartCount = status.restartCount
+                    )
+                }
             }
         }
 
@@ -192,9 +241,18 @@ class CameraHudViewModel @Inject constructor(
     private var cameraGlRenderer: CameraGlRenderer? = null
     private var surfaceEncoder: H264Encoder? = null
     private var usingSurfaceMode = false
+    private var lastLifecycleOwner: LifecycleOwner? = null
+    private var lastViewfinderSurface: Surface? = null
+    private var lastSurfaceSize: Size? = null
+    private var lastIsDevicePortrait: Boolean = false
+    private var streamRestartJob: Job? = null
 
     @ExperimentalCamera2Interop
     fun onViewfinderSurfaceReady(lifecycleOwner: LifecycleOwner, viewfinderSurface: Surface, size: Size, isDevicePortrait: Boolean = false) {
+        lastLifecycleOwner = lifecycleOwner
+        lastViewfinderSurface = viewfinderSurface
+        lastSurfaceSize = size
+        lastIsDevicePortrait = isDevicePortrait
         try {
             val viewW = size.width
             val viewH = size.height
@@ -280,7 +338,17 @@ class CameraHudViewModel @Inject constructor(
 
             cameraGlRenderer = glRenderer
             surfaceEncoder = encoder
+            streamServer.keyFrameRequester = {
+                surfaceEncoder?.requestKeyFrame()
+            }
             usingSurfaceMode = true
+            _uiState.update {
+                it.copy(
+                    bitrate = streamStatusText(isLive = true),
+                    codec = "H.264",
+                    format = "${encW}x${encH}"
+                )
+            }
             Log.d(TAG, "Surface encoding pipeline started: ${encW}x${encH} (16:9)")
         } catch (e: Exception) {
             Log.e(TAG, "Surface pipeline setup failed", e)
@@ -299,6 +367,11 @@ class CameraHudViewModel @Inject constructor(
     }
 
     fun onViewfinderSurfaceDestroyed() {
+        streamRestartJob?.cancel()
+        streamRestartJob = null
+        lastLifecycleOwner = null
+        lastViewfinderSurface = null
+        lastSurfaceSize = null
         cameraController.unbindCamera()
         cleanupSurfacePipeline()
     }
@@ -308,6 +381,7 @@ class CameraHudViewModel @Inject constructor(
         cameraGlRenderer = null
         surfaceEncoder?.release()
         surfaceEncoder = null
+        streamServer.keyFrameRequester = null
         usingSurfaceMode = false
     }
 
@@ -320,8 +394,37 @@ class CameraHudViewModel @Inject constructor(
     }
 
     fun unbindCamera() {
+        streamRestartJob?.cancel()
+        streamRestartJob = null
+        lastLifecycleOwner = null
+        lastViewfinderSurface = null
+        lastSurfaceSize = null
         cleanupSurfacePipeline()
         cameraController.unbindCamera()
+    }
+
+    private fun scheduleSurfacePipelineRestart() {
+        if (!usingSurfaceMode) return
+        if (lastLifecycleOwner == null || lastViewfinderSurface == null || lastSurfaceSize == null) return
+        streamRestartJob?.cancel()
+        _uiState.update {
+            it.copy(bitrate = streamStatusText(label = "APPLYING"))
+        }
+        streamRestartJob = viewModelScope.launch {
+            delay(150)
+            restartSurfacePipelineIfActive()
+        }
+    }
+
+    private fun restartSurfacePipelineIfActive() {
+        if (!usingSurfaceMode) return
+        val lifecycleOwner = lastLifecycleOwner ?: return
+        val surface = lastViewfinderSurface ?: return
+        val size = lastSurfaceSize ?: return
+
+        Log.d(TAG, "Restarting surface pipeline for stream quality change")
+        cleanupSurfacePipeline()
+        onViewfinderSurfaceReady(lifecycleOwner, surface, size, lastIsDevicePortrait)
     }
 
     @ExperimentalCamera2Interop
@@ -450,17 +553,37 @@ class CameraHudViewModel @Inject constructor(
     fun updateStreamFps(fps: Int) {
         streamingConfig.fps = fps
         streamServer.maxFps = fps
-        _uiState.update { it.copy(streamFps = fps) }
+        _uiState.update {
+            it.copy(
+                streamFps = fps,
+                bitrate = streamStatusText()
+            )
+        }
+        scheduleSurfacePipelineRestart()
     }
 
     fun updateStreamResolution(resolution: Int) {
         streamingConfig.maxResolution = resolution
-        _uiState.update { it.copy(streamMaxResolution = resolution) }
+        _uiState.update {
+            it.copy(
+                streamMaxResolution = resolution,
+                bitrate = streamStatusText()
+            )
+        }
+        scheduleSurfacePipelineRestart()
     }
 
     fun updateStreamBitrate(mbps: Int) {
         streamingConfig.bitrateMbps = mbps
-        _uiState.update { it.copy(streamBitrateMbps = mbps) }
+        val bitrate = streamingConfig.bitrateBytes
+        surfaceEncoder?.setBitrate(bitrate)
+        streamServer.updateBitrate(bitrate)
+        _uiState.update {
+            it.copy(
+                streamBitrateMbps = mbps,
+                bitrate = streamStatusText()
+            )
+        }
     }
 
     fun togglePreviewAspect() {

@@ -28,6 +28,7 @@ fun CameraStatusBar(
     storageTotalGb: Float,
     modifier: Modifier = Modifier
 ) {
+    val isLive = bitrate.startsWith("LIVE")
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -47,7 +48,7 @@ fun CameraStatusBar(
             )
             Text(
                 text = bitrate,
-                color = if (bitrate == "LIVE") NeonGreen else TextSecondary,
+                color = if (isLive) NeonGreen else TextSecondary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
                 fontFamily = FontFamily.Monospace

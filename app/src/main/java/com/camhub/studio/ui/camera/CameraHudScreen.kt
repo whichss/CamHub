@@ -279,6 +279,9 @@ private fun PortraitLayout(
             ) {
                 AudioMetersPanel(
                     levels = uiState.audioLevels,
+                    statusText = uiState.audioCaptureStatus,
+                    clientCount = uiState.audioClientCount,
+                    restartCount = uiState.audioRestartCount,
                     modifier = Modifier.weight(1f)
                 )
                 CameraStatusBar(
@@ -508,7 +511,7 @@ private fun LandscapeLayout(
                 // LIVE/OFF
                 Text(
                     text = uiState.bitrate,
-                    color = if (uiState.bitrate == "LIVE") NeonGreen else TextTertiary,
+                    color = if (uiState.bitrate.startsWith("LIVE")) NeonGreen else TextTertiary,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
@@ -656,6 +659,9 @@ private fun LandscapeLayout(
             AudioMetersPanel(
                 levels = uiState.audioLevels,
                 compact = true,
+                statusText = uiState.audioCaptureStatus,
+                clientCount = uiState.audioClientCount,
+                restartCount = uiState.audioRestartCount,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 10.dp, bottom = 12.dp)
@@ -1068,7 +1074,7 @@ private fun StreamingSettingsPanel(
     modifier: Modifier = Modifier
 ) {
     val fpsOptions = listOf(24, 30, 60)
-    val resOptions = listOf(720, 1080)
+    val resOptions = listOf(720, 1080, 1440, 2160)
 
     Column(
         modifier = modifier
@@ -1168,7 +1174,7 @@ private fun StreamingSettingsPanel(
         ) {
             Text(text = "BITRATE", color = TextTertiary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(2, 4, 6, 8).forEach { opt ->
+                listOf(4, 6, 8, 12, 16, 20).forEach { opt ->
                     val selected = opt == bitrateMbps
                     Box(
                         modifier = Modifier

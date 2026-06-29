@@ -1,6 +1,7 @@
 package com.camhub.studio.ui.director
 
 import android.graphics.Bitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -23,6 +24,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.IdentityHashMap
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +53,7 @@ class DirectorViewModel @Inject constructor(
 
     private var lastPgmBitmap: Bitmap? = null
     private var transitionJob: Job? = null
+    private val imageBitmapCache = IdentityHashMap<Bitmap, ImageBitmap>()
 
     init {
         deviceMonitor.startMonitoring()
@@ -87,16 +90,22 @@ class DirectorViewModel @Inject constructor(
                         val stream = streams[cam.name]
                         if (stream != null) {
                             cam.copy(
-                                previewBitmap = stream.bitmap?.asImageBitmap() ?: cam.previewBitmap,
+                                previewBitmap = stream.bitmap?.asCachedImageBitmap() ?: cam.previewBitmap,
                                 frameWidth = if (stream.frameWidth > 0) stream.frameWidth else cam.frameWidth,
                                 frameHeight = if (stream.frameHeight > 0) stream.frameHeight else cam.frameHeight,
-                                bitrateKbps = stream.bitrateKbps
+                                bitrateKbps = stream.bitrateKbps,
+                                latencyMs = stream.latencyMs,
+                                droppedFrames = stream.droppedFrames,
+                                fps = if (stream.actualFps > 0) stream.actualFps else cam.fps
                             )
                         } else {
                             cam
                         }
                     }
-                    state.copy(cameras = updatedCameras)
+                    val liveLatencyMs = updatedCameras
+                        .filter { it.status != ConnectionStatus.OFFLINE && it.latencyMs > 0 }
+                        .maxOfOrNull { it.latencyMs } ?: 0
+                    state.copy(cameras = updatedCameras, latencyMs = liveLatencyMs)
                 }
 
                 // Track PGM bitmap for recording + external display
@@ -182,6 +191,30 @@ class DirectorViewModel @Inject constructor(
         viewModelScope.launch {
             audioStreamClient.masterLevel.collect { level ->
                 _uiState.update { it.copy(audioMasterLevel = level) }
+            }
+        }
+
+        // Per-camera audio diagnostics for quick troubleshooting on camera cards
+        viewModelScope.launch {
+            audioStreamClient.channelStates.collect { channelStates ->
+                _uiState.update { state ->
+                    state.copy(
+                        cameras = state.cameras.map { cam ->
+                            val audio = channelStates[cam.name]
+                            if (audio != null) {
+                                cam.copy(
+                                    audioLevel = audio.level,
+                                    audioStatus = audio.statusText
+                                )
+                            } else {
+                                cam.copy(
+                                    audioLevel = 0f,
+                                    audioStatus = if (cam.status == ConnectionStatus.LIVE) "No Audio" else "Disconnected"
+                                )
+                            }
+                        }
+                    )
+                }
             }
         }
 
@@ -521,5 +554,17 @@ class DirectorViewModel @Inject constructor(
         connectedAudioNames.clear()
         streamClient.disconnectAll()
         audioStreamClient.disconnectAll()
+        imageBitmapCache.clear()
+    }
+
+    private fun Bitmap.asCachedImageBitmap(): ImageBitmap {
+        if (imageBitmapCache.size > MAX_IMAGE_BITMAP_CACHE_SIZE) {
+            imageBitmapCache.clear()
+        }
+        return imageBitmapCache[this] ?: asImageBitmap().also { imageBitmapCache[this] = it }
+    }
+
+    companion object {
+        private const val MAX_IMAGE_BITMAP_CACHE_SIZE = 64
     }
 }

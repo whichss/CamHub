@@ -64,6 +64,48 @@ private fun statusDotColor(status: ConnectionStatus): Color {
     }
 }
 
+private fun audioStatusColor(status: String, level: Float): Color {
+    return when (status) {
+        "Live" -> if (level > 0.01f) NeonGreen else TextTertiary
+        "Connecting", "Reconnecting" -> AmberYellow
+        "Stale" -> ElectricRed
+        else -> TextMuted
+    }
+}
+
+private fun audioStatusLabel(status: String): String {
+    return when (status) {
+        "Live" -> "A:LIVE"
+        "Connecting" -> "A:CONN"
+        "Reconnecting" -> "A:RECON"
+        "Stale" -> "A:STALE"
+        "No Audio" -> "A:NO"
+        else -> "A:OFF"
+    }
+}
+
+private fun streamQualityColor(camera: CameraNode): Color {
+    return when {
+        camera.latencyMs >= 180 -> ElectricRed
+        camera.droppedFrames >= 30 -> ElectricRed
+        camera.latencyMs >= 90 -> AmberYellow
+        camera.droppedFrames > 0 -> AmberYellow
+        camera.latencyMs > 0 -> NeonGreen
+        else -> ElectricRed
+    }
+}
+
+private fun streamQualityLabel(camera: CameraNode): String {
+    val resolution = when {
+        camera.frameHeight > 0 -> "${camera.frameHeight}p"
+        camera.frameWidth > 0 -> "${camera.frameWidth}w"
+        else -> "--"
+    }
+    val latency = if (camera.latencyMs > 0) "${camera.latencyMs}ms" else "--ms"
+    val drops = if (camera.droppedFrames > 0) " · D${camera.droppedFrames}" else ""
+    return "$resolution · ${camera.fps}fps · $latency$drops"
+}
+
 /**
  * A single camera card showing preview, status, tally, and metadata.
  */
@@ -113,6 +155,24 @@ private fun CameraCard(
                         fontFamily = JetBrainsMonoFamily,
                         letterSpacing = 1.sp
                     )
+                }
+
+                if (camera.status != ConnectionStatus.OFFLINE) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(4.dp)
+                            .background(BackgroundDarker.copy(alpha = 0.72f), RoundedCornerShape(3.dp))
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = streamQualityLabel(camera),
+                            color = streamQualityColor(camera),
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = JetBrainsMonoFamily
+                        )
+                    }
                 }
 
                 // PGM/PVW tally label overlay
@@ -165,6 +225,16 @@ private fun CameraCard(
                     maxLines = 1,
                     modifier = Modifier.weight(1f)
                 )
+
+                Text(
+                    text = audioStatusLabel(camera.audioStatus),
+                    color = audioStatusColor(camera.audioStatus, camera.audioLevel),
+                    fontSize = 8.sp,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.width(4.dp))
 
                 // Bitrate / FPS info
                 Text(

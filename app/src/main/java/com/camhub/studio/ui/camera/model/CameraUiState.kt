@@ -24,6 +24,9 @@ data class CameraUiState(
     val selectedFocusIndex: Int = 0,
     val isPeakingEnabled: Boolean = false,
     val audioLevels: List<Float> = emptyList(),
+    val audioCaptureStatus: String = "Idle",
+    val audioClientCount: Int = 0,
+    val audioRestartCount: Int = 0,
     val storageUsedGb: Float = 0f,
     val storageTotalGb: Float = 0f,
     val isPgm: Boolean = false,
@@ -56,7 +59,8 @@ data class CameraUiState(
     val showSettingsPanel: Boolean = false,
     val streamFps: Int = 30,
     val streamMaxResolution: Int = 1080,
-    val streamBitrateMbps: Int = 4
+    val streamBitrateMbps: Int = 4,
+    val videoClientCount: Int = 0
 )
 
 data class LensInfo(

@@ -45,6 +45,10 @@ data class CameraNode(
     val frameWidth: Int = 0,
     val frameHeight: Int = 0,
     val bitrateKbps: Int = 0,
+    val latencyMs: Int = 0,
+    val droppedFrames: Int = 0,
+    val audioLevel: Float = 0f,
+    val audioStatus: String = "Disconnected",
     val isRecording: Boolean = false
 )
 
