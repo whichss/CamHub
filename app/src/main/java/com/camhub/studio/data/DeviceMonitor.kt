@@ -5,7 +5,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
+import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.os.StatFs
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
@@ -19,8 +21,11 @@ data class DeviceStatus(
     val batteryPercent: Int = 100,
     val wifiStrength: Int = 0,
     val storageUsedGb: Float = 0f,
-    val storageTotalGb: Float = 0f
+    val storageTotalGb: Float = 0f,
+    val thermalStatus: Int = THERMAL_STATUS_UNKNOWN
 )
+
+private const val THERMAL_STATUS_UNKNOWN = -1
 
 @Singleton
 class DeviceMonitor @Inject constructor(
@@ -41,7 +46,8 @@ class DeviceMonitor @Inject constructor(
                     batteryPercent = getBatteryPercent(),
                     wifiStrength = getWifiStrength(),
                     storageUsedGb = getStorageUsedGb(),
-                    storageTotalGb = getStorageTotalGb()
+                    storageTotalGb = getStorageTotalGb(),
+                    thermalStatus = getThermalStatus()
                 )
                 delay(3000)
             }
@@ -84,5 +90,15 @@ class DeviceMonitor @Inject constructor(
             val stat = StatFs(Environment.getDataDirectory().path)
             (stat.totalBytes - stat.availableBytes) / (1024f * 1024f * 1024f)
         } catch (_: Exception) { 0f }
+    }
+
+    private fun getThermalStatus(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return THERMAL_STATUS_UNKNOWN
+        return try {
+            val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerManager.currentThermalStatus
+        } catch (_: Exception) {
+            THERMAL_STATUS_UNKNOWN
+        }
     }
 }

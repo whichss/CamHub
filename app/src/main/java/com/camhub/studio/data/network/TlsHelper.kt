@@ -3,6 +3,9 @@ package com.camhub.studio.data.network
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.math.BigInteger
+import java.net.InetSocketAddress
+import java.net.Socket
+import android.net.Network
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -26,6 +29,8 @@ import javax.net.ssl.X509TrustManager
 class TlsHelper @Inject constructor() {
     companion object {
         private const val KEY_ALIAS = "camhub"
+        private const val CONNECT_TIMEOUT_MS = 3_000
+        private const val TLS_HANDSHAKE_TIMEOUT_MS = 5_000
         // Dynamic password generated per app session — keystore is in-memory only
         private val KS_PASSWORD: CharArray = ByteArray(16).also {
             SecureRandom().nextBytes(it)
@@ -33,6 +38,11 @@ class TlsHelper @Inject constructor() {
     }
 
     private val serverSslContext: SSLContext by lazy { buildServerContext() }
+    private val clientSslContext: SSLContext by lazy {
+        SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(trustAllManager), SecureRandom())
+        }
+    }
 
     private fun buildServerContext(): SSLContext {
         val ks = KeyStore.getInstance("PKCS12")
@@ -61,11 +71,20 @@ class TlsHelper @Inject constructor() {
     }
 
     /** Director side: create TLS client socket (trust-all; PIN handles auth) */
-    fun createClientSocket(ip: String, port: Int): SSLSocket {
-        val ctx = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(trustAllManager), SecureRandom())
+    fun createClientSocket(ip: String, port: Int, network: Network? = null): SSLSocket {
+        val transport = (network?.socketFactory?.createSocket() ?: Socket()).apply {
+            tcpNoDelay = true
+            connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
         }
-        return ctx.socketFactory.createSocket(ip, port) as SSLSocket
+        return try {
+            (clientSslContext.socketFactory.createSocket(transport, ip, port, true) as SSLSocket).apply {
+                soTimeout = TLS_HANDSHAKE_TIMEOUT_MS
+                startHandshake()
+            }
+        } catch (error: Exception) {
+            runCatching { transport.close() }
+            throw error
+        }
     }
 
     private val trustAllManager = object : X509TrustManager {

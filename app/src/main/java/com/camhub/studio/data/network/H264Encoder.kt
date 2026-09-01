@@ -10,12 +10,14 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import java.util.concurrent.ConcurrentHashMap
 
 data class EncodedFrame(
     val data: ByteArray,
     val isKeyFrame: Boolean,
     val isConfig: Boolean,
-    val presentationTimeUs: Long
+    val presentationTimeUs: Long,
+    val captureAtWallMs: Long? = null
 )
 
 class H264Encoder(
@@ -36,6 +38,7 @@ class H264Encoder(
     private var surfaceMode = false
     private var asyncMode = false
     private var callbackThread: HandlerThread? = null
+    private val captureWallByPresentationUs = ConcurrentHashMap<Long, Long>()
 
     var cachedSpsPps: ByteArray? = null
         private set
@@ -112,7 +115,10 @@ class H264Encoder(
                                     data = data,
                                     isKeyFrame = isKeyFrame,
                                     isConfig = isConfig,
-                                    presentationTimeUs = info.presentationTimeUs
+                                    presentationTimeUs = info.presentationTimeUs,
+                                    captureAtWallMs = if (isConfig) null else {
+                                        captureWallByPresentationUs.remove(info.presentationTimeUs)
+                                    }
                                 )
                                 onEncodedFrame?.invoke(frame)
                             }
@@ -231,7 +237,17 @@ class H264Encoder(
         }
     }
 
-    fun encode(nv12: ByteArray, presentationTimeUs: Long): List<EncodedFrame> {
+    fun registerInputTiming(presentationTimeUs: Long, captureAtWallMs: Long) {
+        if (presentationTimeUs > 0L && captureAtWallMs > 0L) {
+            captureWallByPresentationUs[presentationTimeUs] = captureAtWallMs
+        }
+    }
+
+    fun encode(
+        nv12: ByteArray,
+        presentationTimeUs: Long,
+        captureAtWallMs: Long = System.currentTimeMillis()
+    ): List<EncodedFrame> {
         val enc = encoder ?: return emptyList()
         val frames = mutableListOf<EncodedFrame>()
 
@@ -244,6 +260,7 @@ class H264Encoder(
                     inputBuffer.clear()
                     val size = minOf(nv12.size, inputBuffer.capacity())
                     inputBuffer.put(nv12, 0, size)
+                    registerInputTiming(presentationTimeUs, captureAtWallMs)
                     enc.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, 0)
                 }
             }
@@ -316,7 +333,10 @@ class H264Encoder(
                                 data = data,
                                 isKeyFrame = isKeyFrame,
                                 isConfig = isConfig,
-                                presentationTimeUs = bufferInfo.presentationTimeUs
+                                presentationTimeUs = bufferInfo.presentationTimeUs,
+                                captureAtWallMs = if (isConfig) null else {
+                                    captureWallByPresentationUs.remove(bufferInfo.presentationTimeUs)
+                                }
                             )
                         )
                     }
@@ -356,6 +376,7 @@ class H264Encoder(
 
     fun release() {
         onEncodedFrame = null
+        captureWallByPresentationUs.clear()
         try {
             inputSurface?.release()
         } catch (_: Exception) {}

@@ -2,12 +2,15 @@ package com.camhub.studio.ui.theme
 
 import android.app.Activity
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 
 private val CamHubDarkColorScheme = darkColorScheme(
@@ -42,6 +45,14 @@ private val CamHubDarkColorScheme = darkColorScheme(
     scrim = BackgroundDarker
 )
 
+private val CamHubShapes = Shapes(
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(24.dp)
+)
+
 @Composable
 fun CamHubTheme(content: @Composable () -> Unit) {
     val view = LocalView.current
@@ -59,6 +70,7 @@ fun CamHubTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = CamHubDarkColorScheme,
         typography = CamHubTypography,
+        shapes = CamHubShapes,
         content = content
     )
 }

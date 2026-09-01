@@ -1,6 +1,7 @@
 package com.camhub.studio.ui.connection
 
 import android.os.Build
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +9,8 @@ import com.camhub.studio.data.audio.AudioCaptureService
 import com.camhub.studio.data.network.DiscoveredPeer
 import com.camhub.studio.data.network.HotspotManager
 import com.camhub.studio.data.network.NsdDiscoveryManager
+import com.camhub.studio.data.network.NetworkTransport
+import com.camhub.studio.data.network.NetworkTransportManager
 import com.camhub.studio.data.network.PeerConnectionManager
 import com.camhub.studio.data.network.PeerConnectionState
 import com.camhub.studio.data.network.StreamServer
@@ -31,8 +34,13 @@ class ConnectionViewModel @Inject constructor(
     private val connectionManager: PeerConnectionManager,
     private val streamServer: StreamServer,
     private val audioCaptureService: AudioCaptureService,
-    private val hotspotManager: HotspotManager
+    private val hotspotManager: HotspotManager,
+    private val networkTransportManager: NetworkTransportManager
 ) : ViewModel() {
+
+    companion object {
+        private const val TAG = "ConnectionViewModel"
+    }
 
     private val roleArg: String = savedStateHandle["role"] ?: "camera"
     private val role = if (roleArg == "director") AppRole.DIRECTOR else AppRole.CAMERA
@@ -41,7 +49,10 @@ class ConnectionViewModel @Inject constructor(
         ConnectionUiState(
             role = role,
             deviceName = "${Build.MODEL}-${(1000..9999).random()}",
-            localIp = nsdManager.getLocalIpAddress()
+            localIp = nsdManager.getLocalIpAddress(),
+            // The hub owns camera discovery and connection management, so it
+            // must remain usable even before the first camera is connected.
+            isReadyToProceed = role == AppRole.DIRECTOR
         )
     )
     val uiState: StateFlow<ConnectionUiState> = _uiState.asStateFlow()
@@ -50,6 +61,20 @@ class ConnectionViewModel @Inject constructor(
         when (role) {
             AppRole.CAMERA -> startCameraMode()
             AppRole.DIRECTOR -> startDirectorMode()
+        }
+
+        viewModelScope.launch {
+            networkTransportManager.state.collect { networkState ->
+                _uiState.update {
+                    it.copy(
+                        localIp = networkState.localIpAddress,
+                        networkSelectionMode = networkState.selectionMode,
+                        networkTransportLabel = networkState.displayLabel,
+                        hasEthernet = NetworkTransport.ETHERNET in networkState.availableTransports,
+                        hasWifi = NetworkTransport.WIFI in networkState.availableTransports
+                    )
+                }
+            }
         }
 
         viewModelScope.launch {
@@ -73,7 +98,7 @@ class ConnectionViewModel @Inject constructor(
                     it.copy(
                         connectedPeerCount = peers.size,
                         connectedPeerNames = peers.map { p -> p.name },
-                        isReadyToProceed = peers.isNotEmpty()
+                        isReadyToProceed = role == AppRole.DIRECTOR || peers.isNotEmpty()
                     )
                 }
             }
@@ -106,12 +131,18 @@ class ConnectionViewModel @Inject constructor(
                 audioCaptureService.setSessionKey(sessionKey)
 
                 val videoPort = streamServer.start()
-                val audioPort = audioCaptureService.start()
+                val audioPort = try {
+                    audioCaptureService.start()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Audio server unavailable; starting camera in video-only mode", e)
+                    0
+                }
                 connectionManager.startServer(
                     port = 0,
                     deviceName = _uiState.value.deviceName,
                     streamPort = videoPort,
-                    audioStreamPort = audioPort
+                    audioStreamPort = audioPort,
+                    udpStreamPort = streamServer.getUdpPort()
                 )
             }
 

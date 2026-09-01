@@ -14,6 +14,9 @@ val BackgroundDarker = Color(0xFF0A1118)
 // Surfaces
 val SurfaceDark = Color(0xFF1A2736)
 val SurfaceLight = Color(0xFF243447)
+val SurfaceRaised = Color(0xFF1D2C3C)
+val SurfaceElevated = Color(0xFF26384B)
+val DividerColor = Color.White.copy(alpha = 0.08f)
 
 // Accent Colors
 val NeonGreen = Color(0xFF39FF14)
@@ -22,8 +25,9 @@ val AmberYellow = Color(0xFFFFCC00)
 val CyanAccent = Color(0xFF00D4FF)
 
 // Glassmorphism
-val GlassSurface = Color.White.copy(alpha = 0.03f)
+val GlassSurface = Color(0xFF172433).copy(alpha = 0.88f)
 val GlassBorder = Color.White.copy(alpha = 0.1f)
+val GlassHighlight = Color.White.copy(alpha = 0.16f)
 
 // Tally Indicators
 val TallyRed = Color(0xFFFF3B30)

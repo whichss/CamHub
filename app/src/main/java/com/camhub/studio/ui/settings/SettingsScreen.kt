@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -45,6 +46,7 @@ import com.camhub.studio.ui.settings.components.SettingsSidebar
 import com.camhub.studio.ui.settings.components.SettingsTabBar
 import com.camhub.studio.ui.settings.components.StreamingSettings
 import com.camhub.studio.ui.settings.components.SystemSettings
+import com.camhub.studio.data.network.NetworkSelectionMode
 import com.camhub.studio.ui.theme.BackgroundDark
 import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.GlassBorder
@@ -55,6 +57,9 @@ import com.camhub.studio.ui.theme.SurfaceDark
 import com.camhub.studio.ui.theme.TextPrimary
 import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
+import com.camhub.studio.ui.components.CamHubScreenBackground
+import com.camhub.studio.ui.components.CamHubTopBar
+import com.camhub.studio.ui.components.StatusChip
 
 @Composable
 fun SettingsScreen(
@@ -66,11 +71,20 @@ fun SettingsScreen(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val activity = LocalContext.current as? Activity
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BackgroundDark)
-    ) {
+    CamHubScreenBackground {
+    Column(modifier = Modifier.fillMaxSize()) {
+        CamHubTopBar(
+            title = "Settings",
+            subtitle = "CAMHUB SYSTEM & PRODUCTION PREFERENCES",
+            onBack = onNavigateBack,
+            trailing = {
+                StatusChip(
+                    label = listOf("NETWORK", "RECORD", "DISPLAY", "SYSTEM")
+                        .getOrElse(uiState.selectedSettingsTab) { "SETTINGS" },
+                    color = Primary
+                )
+            }
+        )
         if (isLandscape) {
             // Landscape: sidebar + content, bottom bar at very bottom
             Row(
@@ -93,8 +107,6 @@ fun SettingsScreen(
             }
         } else {
             // Portrait: top bar, horizontal tabs, content, bottom bar
-            SettingsTopBar(onBack = onNavigateBack)
-
             SettingsTabBar(
                 selectedTab = uiState.selectedSettingsTab,
                 onSelectTab = { viewModel.selectTab(it) }
@@ -116,34 +128,6 @@ fun SettingsScreen(
             activeStreams = uiState.activeStreams
         )
     }
-}
-
-@Composable
-private fun SettingsTopBar(
-    onBack: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(BackgroundDarker)
-            .padding(horizontal = 8.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
-                tint = TextPrimary
-            )
-        }
-        Text(
-            text = "SETTINGS",
-            fontFamily = SpaceGroteskFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = 16.sp,
-            color = TextPrimary,
-            letterSpacing = 1.sp
-        )
     }
 }
 
@@ -196,6 +180,16 @@ private fun ConnectionTabContent(
 
     Spacer(modifier = Modifier.height(8.dp))
 
+    NetworkRouteCard(
+        selectedMode = uiState.networkSelectionMode,
+        activeLabel = uiState.activeNetworkLabel,
+        hasEthernet = uiState.hasEthernet,
+        hasWifi = uiState.hasWifi,
+        onSelect = viewModel::selectNetworkMode
+    )
+
+    Spacer(modifier = Modifier.height(8.dp))
+
     // mDNS toggle
     MdnsToggleCard(
         isEnabled = uiState.isMdnsEnabled,
@@ -217,12 +211,104 @@ private fun ConnectionTabContent(
         isLowLatencyDecode = uiState.isLowLatencyDecode,
         isAdaptiveBitrate = uiState.isAdaptiveBitrate,
         adaptiveBitrateStatus = uiState.adaptiveBitrateStatus,
+        isAutomaticHubProfile = uiState.isAutomaticHubProfile,
         onFpsChange = { viewModel.updateStreamFps(it) },
         onResolutionChange = { viewModel.updateStreamResolution(it) },
         onBitrateChange = { viewModel.updateStreamBitrate(it) },
         onToggleLowLatency = { viewModel.toggleLowLatencyDecode() },
-        onToggleAdaptiveBitrate = { viewModel.toggleAdaptiveBitrate() }
+        onToggleAdaptiveBitrate = { viewModel.toggleAdaptiveBitrate() },
+        onToggleAutomaticHubProfile = { viewModel.toggleAutomaticHubProfile() }
     )
+}
+
+@Composable
+private fun NetworkRouteCard(
+    selectedMode: NetworkSelectionMode,
+    activeLabel: String,
+    hasEthernet: Boolean,
+    hasWifi: Boolean,
+    onSelect: (NetworkSelectionMode) -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(GlassSurface, shape)
+            .border(1.dp, GlassBorder, shape)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = "Network Route",
+                    fontFamily = SpaceGroteskFamily,
+                    fontSize = 14.sp,
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "AUTO prefers a reachable Ethernet route, then Wi-Fi",
+                    fontFamily = SpaceGroteskFamily,
+                    fontSize = 11.sp,
+                    color = TextTertiary
+                )
+            }
+            Text(
+                text = activeLabel,
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 10.sp,
+                color = Primary,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            NetworkSelectionMode.entries.forEach { mode ->
+                val available = when (mode) {
+                    NetworkSelectionMode.AUTO -> hasEthernet || hasWifi
+                    NetworkSelectionMode.WIFI -> hasWifi
+                    NetworkSelectionMode.ETHERNET -> hasEthernet
+                }
+                val selected = mode == selectedMode
+                Text(
+                    text = when (mode) {
+                        NetworkSelectionMode.AUTO -> "AUTO"
+                        NetworkSelectionMode.WIFI -> "WI-FI"
+                        NetworkSelectionMode.ETHERNET -> "ETHERNET"
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(
+                            color = if (selected) Primary.copy(alpha = 0.18f) else SurfaceDark,
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (selected) Primary else GlassBorder,
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .clickable(enabled = available || selected) { onSelect(mode) }
+                        .padding(vertical = 10.dp),
+                    color = when {
+                        selected -> Primary
+                        available -> TextSecondary
+                        else -> TextTertiary.copy(alpha = 0.45f)
+                    },
+                    fontFamily = SpaceGroteskFamily,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
 }
 
 @Composable

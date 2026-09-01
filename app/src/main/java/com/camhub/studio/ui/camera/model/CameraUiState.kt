@@ -34,6 +34,7 @@ data class CameraUiState(
     val isRemoteOverride: Boolean = false,
     val batteryPercent: Int = 0,
     val wifiStrength: Int = 0,
+    val networkTransportLabel: String = "AUTO · OFFLINE",
     // Phase 2 additions
     val isCameraBound: Boolean = false,
     val isManualExposureSupported: Boolean = false,

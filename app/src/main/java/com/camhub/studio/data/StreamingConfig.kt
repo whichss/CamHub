@@ -37,10 +37,18 @@ class StreamingConfig @Inject constructor(
             prefs.edit().putBoolean("low_latency_decode", value).apply()
         }
 
-    var adaptiveBitrate: Boolean = prefs.getBoolean("adaptive_bitrate", false)
+    // Safe default for new installs. A user's explicit off choice remains persisted.
+    var adaptiveBitrate: Boolean = prefs.getBoolean("adaptive_bitrate", true)
         set(value) {
             field = value
             prefs.edit().putBoolean("adaptive_bitrate", value).apply()
+        }
+
+    // Select limits from measured device capability/runtime pressure, not a phone model.
+    var automaticHubProfile: Boolean = prefs.getBoolean("automatic_hub_profile", true)
+        set(value) {
+            field = value
+            prefs.edit().putBoolean("automatic_hub_profile", value).apply()
         }
 
     val bitrateBytes: Int get() = bitrateMbps * 1_000_000

@@ -1,10 +1,16 @@
 package com.camhub.studio.ui.settings.model
 
+import com.camhub.studio.data.network.NetworkSelectionMode
+
 data class SettingsUiState(
     val selectedSettingsTab: Int = 0,
 
     // Connection tab
     val selectedProtocol: Protocol = Protocol.WEBRTC,
+    val networkSelectionMode: NetworkSelectionMode = NetworkSelectionMode.AUTO,
+    val activeNetworkLabel: String = "AUTO · OFFLINE",
+    val hasEthernet: Boolean = false,
+    val hasWifi: Boolean = false,
     val isMdnsEnabled: Boolean = true,
     val discoveredNodes: List<DiscoveredNode> = emptyList(),
     val activeStreams: Int = 0,
@@ -39,6 +45,7 @@ data class SettingsUiState(
     val isLowLatencyDecode: Boolean = true,
     val isAdaptiveBitrate: Boolean = false,
     val adaptiveBitrateStatus: String = "Off",
+    val isAutomaticHubProfile: Boolean = false,
 
     // Bottom bar
     val droppedFrames: Int = 0

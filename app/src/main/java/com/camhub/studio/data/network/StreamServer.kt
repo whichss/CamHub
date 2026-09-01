@@ -1,6 +1,7 @@
 package com.camhub.studio.data.network
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.camera.core.ImageProxy
 import com.camhub.studio.data.LowLatencyWifiLock
@@ -20,6 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -32,16 +34,15 @@ class StreamServer @Inject constructor(
     companion object {
         private const val TAG = "StreamServer"
         private const val MAX_CLIENTS = 4
-        private const val META_HEADER_V2: Byte = 2
-        private const val META_HEADER_V2_SIZE = 7
-        private const val META_HEADER_V3: Byte = 3
-        private const val META_HEADER_V3_SIZE = 15
+        private const val META_HEADER_V4: Byte = 4
+        private const val META_HEADER_V4_SIZE = 31
         private const val FLAG_KEYFRAME: Byte = 0x01
         private const val FLAG_CODEC_CONFIG: Byte = 0x02
-        private const val MAX_BLOCKED_SEND_MS = 2_000L
+        private const val MAX_BLOCKED_SEND_MS = 750L
     }
 
     private var lastFrameTimeMs: Long = 0
+    private val videoFrameSequence = AtomicLong(0)
     var maxFps: Int = 30
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -56,6 +57,7 @@ class StreamServer @Inject constructor(
     private var srtPassphrase: String? = null
     private var usingSrt = false
     private val wifiLock = LowLatencyWifiLock(context, "CamHubCameraStream")
+    private val udpSender = UdpVideoSender()
 
     private var encoder: H264Encoder? = null
     private var useH264 = false
@@ -74,7 +76,18 @@ class StreamServer @Inject constructor(
         @Volatile var isSending: Boolean = false
         @Volatile var pendingKeyframe: ByteArray? = null
         @Volatile var sendStartedAtMs: Long = 0L
-        abstract fun sendFrame(data: ByteArray)
+        private val writeLock = Any()
+
+        /**
+         * Codec config and video frames can originate on different threads.
+         * Serialize each socket writer so length prefixes and payloads can never
+         * interleave and corrupt the receiver's frame boundary.
+         */
+        fun sendFrame(data: ByteArray) = synchronized(writeLock) {
+            writeFrame(data)
+        }
+
+        protected abstract fun writeFrame(data: ByteArray)
         abstract fun close()
 
         class TcpConnection(
@@ -85,7 +98,7 @@ class StreamServer @Inject constructor(
             init {
                 socket.sendBufferSize = 64 * 1024
             }
-            override fun sendFrame(data: ByteArray) {
+            override fun writeFrame(data: ByteArray) {
                 output.writeInt(data.size)
                 output.write(data)
                 output.flush()
@@ -98,7 +111,7 @@ class StreamServer @Inject constructor(
             val output: DataOutputStream,
             override var needsConfig: Boolean = true
         ) : ClientConnection() {
-            override fun sendFrame(data: ByteArray) {
+            override fun writeFrame(data: ByteArray) {
                 output.writeInt(data.size)
                 output.write(data)
                 output.flush()
@@ -110,11 +123,22 @@ class StreamServer @Inject constructor(
     fun setSessionKey(key: ByteArray) {
         srtPassphrase = SrtTransport.sessionKeyToPassphrase(key)
         frameCipher = FrameCipher(key)
+        udpSender.setSessionKey(key)
     }
 
     fun start(): Int {
         wifiLock.acquire()
         ensureBroadcastPool()
+        try {
+            val port = udpSender.start()
+            udpSender.keyFrameRequester = {
+                encoder?.requestKeyFrame() ?: keyFrameRequester?.invoke()
+            }
+            Log.d(TAG, "UDP/RTP sender ready on port $port")
+        } catch (e: Exception) {
+            // UDP is an optional low-latency path. Keep the proven fallback alive.
+            Log.w(TAG, "UDP/RTP sender unavailable; continuing with SRT/TCP", e)
+        }
         if (SrtTransport.isAvailable()) {
             try {
                 return startSrt()
@@ -216,7 +240,7 @@ class StreamServer @Inject constructor(
     }
 
     fun onFrame(imageProxy: ImageProxy) {
-        if (clients.isEmpty()) {
+        if (!hasVideoClients()) {
             imageProxy.close()
             return
         }
@@ -233,7 +257,8 @@ class StreamServer @Inject constructor(
             val rotation = imageProxy.imageInfo.rotationDegrees
             val width = imageProxy.width
             val height = imageProxy.height
-            tryH264Frame(imageProxy, width, height, rotation)
+            val captureAtWallMs = cameraTimestampToWallMs(imageProxy.imageInfo.timestamp)
+            tryH264Frame(imageProxy, width, height, rotation, captureAtWallMs)
         } catch (e: Exception) {
             Log.e(TAG, "Frame processing error", e)
         } finally {
@@ -241,7 +266,13 @@ class StreamServer @Inject constructor(
         }
     }
 
-    private fun tryH264Frame(imageProxy: ImageProxy, width: Int, height: Int, rotation: Int): Boolean {
+    private fun tryH264Frame(
+        imageProxy: ImageProxy,
+        width: Int,
+        height: Int,
+        rotation: Int,
+        captureAtWallMs: Long
+    ): Boolean {
         // Initialize encoder if needed
         if (encoder == null || encoderWidth != width || encoderHeight != height) {
             encoder?.release()
@@ -270,8 +301,10 @@ class StreamServer @Inject constructor(
 
         // Convert and encode
         val nv12 = imageProxyToNv12(imageProxy) ?: return false
-        val pts = System.nanoTime() / 1000
-        val frames = enc.encode(nv12, pts)
+        val pts = imageProxy.imageInfo.timestamp.takeIf { it > 0L }
+            ?.div(1_000L)
+            ?: SystemClock.elapsedRealtimeNanos() / 1_000L
+        val frames = enc.encode(nv12, pts, captureAtWallMs)
 
         if (frames.isEmpty()) return false
 
@@ -281,7 +314,15 @@ class StreamServer @Inject constructor(
             if (frame.isConfig) {
                 sendConfigToNewClients(frame.data, width, height, rotation)
             } else {
-                val payload = buildH264Payload(frame.data, width, height, rotation, frame.isKeyFrame, false)
+                val payload = buildH264Payload(
+                    frame.data,
+                    width,
+                    height,
+                    rotation,
+                    frame.isKeyFrame,
+                    false,
+                    frame.captureAtWallMs
+                )
                 broadcastFrame(payload, frame.isKeyFrame)
                 sentData = true
             }
@@ -330,6 +371,14 @@ class StreamServer @Inject constructor(
 
     private fun sendConfigToNewClients(configData: ByteArray, width: Int, height: Int, rotation: Int) {
         val payload = buildH264Payload(configData, width, height, rotation, false, true)
+        udpSender.enqueueFrame(payload, isCodecConfig = true)
+        if (clients.isEmpty()) {
+            if (width != encoderWidth || height != encoderHeight) {
+                encoderWidth = width
+                encoderHeight = height
+            }
+            return
+        }
         val dataToSend = if (usingSrt) payload
                          else frameCipher?.encrypt(payload) ?: payload
 
@@ -354,7 +403,15 @@ class StreamServer @Inject constructor(
         removeDisconnected(disconnected)
     }
 
-    private fun buildH264Payload(data: ByteArray, width: Int, height: Int, rotationDegrees: Int, isKeyFrame: Boolean, isConfig: Boolean): ByteArray {
+    private fun buildH264Payload(
+        data: ByteArray,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        isKeyFrame: Boolean,
+        isConfig: Boolean,
+        captureAtWallMs: Long? = null
+    ): ByteArray {
         val rotationCode: Byte = when (rotationDegrees) {
             90 -> 1; 180 -> 2; 270 -> 3; else -> 0
         }
@@ -362,14 +419,30 @@ class StreamServer @Inject constructor(
         if (isKeyFrame) flags = flags or FLAG_KEYFRAME.toInt()
         if (isConfig) flags = flags or FLAG_CODEC_CONFIG.toInt()
 
-        val header = ByteBuffer.allocate(META_HEADER_V3_SIZE)
-        header.put(META_HEADER_V3)
+        val payloadReadyAtWallMs = System.currentTimeMillis()
+        val sequence = if (isConfig) 0L else videoFrameSequence.incrementAndGet()
+        val captureWallMs = captureAtWallMs ?: payloadReadyAtWallMs
+
+        val header = ByteBuffer.allocate(META_HEADER_V4_SIZE)
+        header.put(META_HEADER_V4)
         header.putShort(width.toShort())
         header.putShort(height.toShort())
         header.put(rotationCode)
         header.put(flags.toByte())
-        header.putLong(System.currentTimeMillis())
+        header.putLong(sequence)
+        header.putLong(captureWallMs)
+        header.putLong(payloadReadyAtWallMs)
         return header.array() + data
+    }
+
+    private fun cameraTimestampToWallMs(timestampNs: Long): Long {
+        if (timestampNs <= 0L) return System.currentTimeMillis()
+        val ageNs = SystemClock.elapsedRealtimeNanos() - timestampNs
+        return if (ageNs in 0L..10_000_000_000L) {
+            System.currentTimeMillis() - ageNs / 1_000_000L
+        } else {
+            System.currentTimeMillis()
+        }
     }
 
     // Reusable NV12 buffer to avoid per-frame allocation
@@ -415,17 +488,28 @@ class StreamServer @Inject constructor(
         return nv12
     }
 
-    private var broadcastPool: ExecutorService = Executors.newFixedThreadPool(MAX_CLIENTS)
+    private val senderThreadSequence = AtomicLong(0)
+    private var broadcastPool: ExecutorService = newBroadcastPool()
 
     private val clientsToRemove = CopyOnWriteArrayList<ClientConnection>()
 
     private fun ensureBroadcastPool() {
         if (broadcastPool.isShutdown || broadcastPool.isTerminated) {
-            broadcastPool = Executors.newFixedThreadPool(MAX_CLIENTS)
+            broadcastPool = newBroadcastPool()
         }
     }
 
+    private fun newBroadcastPool(): ExecutorService =
+        Executors.newFixedThreadPool(MAX_CLIENTS) { runnable ->
+            Thread(
+                runnable,
+                "CameraStreamSend-${senderThreadSequence.incrementAndGet()}"
+            ).apply { isDaemon = true }
+        }
+
     private fun broadcastFrame(payload: ByteArray, isKeyFrame: Boolean = false) {
+        udpSender.enqueueFrame(payload, isKeyFrame = isKeyFrame)
+        if (clients.isEmpty()) return
         val dataToSend = if (usingSrt) payload  // SRT handles encryption via passphrase
                          else frameCipher?.encrypt(payload) ?: payload
 
@@ -493,8 +577,57 @@ class StreamServer @Inject constructor(
     }
 
     private fun updateClientCount() {
-        _clientCount.value = clients.size
+        _clientCount.value = clients.size + udpSender.clientCount
     }
+
+    private fun hasVideoClients(): Boolean = clients.isNotEmpty() || udpSender.clientCount > 0
+
+    fun registerUdpClient(clientId: String, ip: String, port: Int): Boolean {
+        val registered = udpSender.registerClient(clientId, ip, port)
+        if (registered) {
+            val surfaceConfig = latestSurfaceConfig
+            if (
+                surfaceConfig != null &&
+                latestSurfaceConfigWidth > 0 &&
+                latestSurfaceConfigHeight > 0
+            ) {
+                udpSender.enqueueFrame(
+                    buildH264Payload(
+                        surfaceConfig,
+                        latestSurfaceConfigWidth,
+                        latestSurfaceConfigHeight,
+                        latestSurfaceConfigRotation,
+                        isKeyFrame = false,
+                        isConfig = true
+                    ),
+                    isCodecConfig = true
+                )
+            } else {
+                encoder?.cachedSpsPps?.let { config ->
+                    udpSender.enqueueFrame(
+                        buildH264Payload(
+                            config,
+                            encoderWidth,
+                            encoderHeight,
+                            rotationDegrees = 0,
+                            isKeyFrame = false,
+                            isConfig = true
+                        ),
+                        isCodecConfig = true
+                    )
+                }
+            }
+        }
+        updateClientCount()
+        return registered
+    }
+
+    fun unregisterUdpClient(clientId: String) {
+        udpSender.unregisterClient(clientId)
+        updateClientCount()
+    }
+
+    fun getUdpPort(): Int = udpSender.localPort
 
     fun broadcastEncodedFrame(frame: EncodedFrame, width: Int, height: Int, rotation: Int) {
         if (frame.isConfig) {
@@ -502,31 +635,42 @@ class StreamServer @Inject constructor(
             latestSurfaceConfigWidth = width
             latestSurfaceConfigHeight = height
             latestSurfaceConfigRotation = rotation
-            if (clients.isEmpty()) return
+            if (!hasVideoClients()) return
 
             // Always send config to ALL clients — dimensions may have changed after rotation
             val payload = buildH264Payload(frame.data, width, height, rotation, false, true)
-            val dataToSend = if (usingSrt) payload
-                             else frameCipher?.encrypt(payload) ?: payload
-            val disconnected = mutableListOf<ClientConnection>()
-            for (client in clients) {
-                try {
-                    client.sendFrame(dataToSend)
-                    client.needsConfig = false
-                } catch (e: Exception) {
-                    disconnected.add(client)
+            udpSender.enqueueFrame(payload, isCodecConfig = true)
+            if (clients.isNotEmpty()) {
+                val dataToSend = if (usingSrt) payload
+                                 else frameCipher?.encrypt(payload) ?: payload
+                val disconnected = mutableListOf<ClientConnection>()
+                for (client in clients) {
+                    try {
+                        client.sendFrame(dataToSend)
+                        client.needsConfig = false
+                    } catch (e: Exception) {
+                        disconnected.add(client)
+                    }
                 }
+                removeDisconnected(disconnected)
             }
-            removeDisconnected(disconnected)
             if (width != encoderWidth || height != encoderHeight) {
                 encoderWidth = width
                 encoderHeight = height
                 Log.d(TAG, "Surface encoder dimensions updated: ${width}x${height}")
             }
         } else {
-            if (clients.isEmpty()) return
+            if (!hasVideoClients()) return
 
-            val payload = buildH264Payload(frame.data, width, height, rotation, frame.isKeyFrame, false)
+            val payload = buildH264Payload(
+                frame.data,
+                width,
+                height,
+                rotation,
+                frame.isKeyFrame,
+                false,
+                frame.captureAtWallMs
+            )
             broadcastFrame(payload, frame.isKeyFrame)
         }
     }
@@ -544,6 +688,7 @@ class StreamServer @Inject constructor(
             try { it.close() } catch (_: Exception) {}
         }
         clients.clear()
+        udpSender.stop()
         updateClientCount()
         try { srtServerSocket?.close() } catch (_: Exception) {}
         srtServerSocket = null

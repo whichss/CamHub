@@ -7,6 +7,7 @@ import android.opengl.GLES20
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -17,6 +18,7 @@ class CameraGlRenderer {
 
     companion object {
         private const val TAG = "CameraGlRenderer"
+        private const val MAX_TRUSTED_CAPTURE_AGE_NS = 10_000_000_000L
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f,
@@ -69,7 +71,8 @@ class CameraGlRenderer {
 
     val currentRotation: Int get() = rotationDegrees
 
-    var onFrameEncoded: (() -> Unit)? = null
+    /** Called before the camera frame is submitted to MediaCodec's input surface. */
+    var onFrameSubmitted: ((presentationTimeUs: Long, captureAtWallMs: Long) -> Unit)? = null
 
     fun start(
         width: Int,
@@ -192,11 +195,26 @@ class CameraGlRenderer {
                 GLES20.glViewport(encVp[0], encVp[1], encVp[2], encVp[3])
             }
             drawQuad()
+            val captureTimestampNs = st.timestamp.takeIf { it > 0L }
+                ?: SystemClock.elapsedRealtimeNanos()
+            val captureAtWallMs = monotonicTimestampToWallMs(captureTimestampNs)
+            egl.setPresentationTime(encSurface, captureTimestampNs)
+            onFrameSubmitted?.invoke(captureTimestampNs / 1_000L, captureAtWallMs)
             egl.swapBuffers(encSurface)
-
-            onFrameEncoded?.invoke()
         } catch (e: Exception) {
             Log.e(TAG, "drawFrame error", e)
+        }
+    }
+
+    private fun monotonicTimestampToWallMs(timestampNs: Long): Long {
+        val elapsedNowNs = SystemClock.elapsedRealtimeNanos()
+        val ageNs = elapsedNowNs - timestampNs
+        // Camera timestamp sources are vendor dependent. Use the sensor timestamp only
+        // when it is clearly on Android's elapsed-realtime time base.
+        return if (ageNs in 0L..MAX_TRUSTED_CAPTURE_AGE_NS) {
+            System.currentTimeMillis() - ageNs / 1_000_000L
+        } else {
+            System.currentTimeMillis()
         }
     }
 
@@ -318,7 +336,7 @@ class CameraGlRenderer {
             egl.release()
         }
         eglHelper = null
-        onFrameEncoded = null
+        onFrameSubmitted = null
         Log.d(TAG, "CameraGlRenderer released")
     }
 }

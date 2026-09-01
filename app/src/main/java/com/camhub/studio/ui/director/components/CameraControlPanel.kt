@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,7 +49,7 @@ import com.camhub.studio.ui.theme.TextTertiary
 
 private val isoValues = listOf("100", "200", "400", "800", "1600", "3200", "6400")
 private val shutterValues = listOf("1/30", "1/48", "1/50", "1/60", "1/100", "1/125", "1/250", "1/500", "1/1000")
-private val zoomValues = listOf("1.0x", "1.5x", "2.0x", "2.5x", "3.0x", "3.5x", "4.0x", "5.0x", "6.0x", "8.0x", "10.0x")
+private val allZoomValues = listOf("1.0x", "1.5x", "2.0x", "2.5x", "3.0x", "3.5x", "4.0x", "5.0x", "6.0x", "8.0x", "10.0x")
 
 /**
  * Dialog overlay for remote camera control using DrumDial selectors
@@ -57,13 +59,28 @@ private val zoomValues = listOf("1.0x", "1.5x", "2.0x", "2.5x", "3.0x", "3.5x", 
 fun CameraControlPanel(
     cameraName: String,
     isRecording: Boolean = false,
+    currentZoomRatio: Float = 1f,
+    maxZoomRatio: Float = 10f,
+    isPtzEnabled: Boolean = true,
     onDismiss: () -> Unit,
     onSendCommand: (command: String, value: Float, stringValue: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedIsoIndex by remember { mutableIntStateOf(2) } // default 400
     var selectedShutterIndex by remember { mutableIntStateOf(2) } // default 1/50
-    var selectedZoomIndex by remember { mutableIntStateOf(0) } // default 1.0x
+    val zoomValues = remember(maxZoomRatio) {
+        allZoomValues.filter {
+            (it.removeSuffix("x").toFloatOrNull() ?: 1f) <= maxZoomRatio + 0.01f
+        }.ifEmpty { listOf("1.0x") }
+    }
+    val initialZoomIndex = zoomValues.indices.minByOrNull { index ->
+        kotlin.math.abs(
+            (zoomValues[index].removeSuffix("x").toFloatOrNull() ?: 1f) - currentZoomRatio
+        )
+    } ?: 0
+    var selectedZoomIndex by remember(cameraName, currentZoomRatio, maxZoomRatio) {
+        mutableIntStateOf(initialZoomIndex)
+    }
 
     // Dim background overlay
     Box(
@@ -81,8 +98,10 @@ fun CameraControlPanel(
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.92f)
-                .clip(RoundedCornerShape(12.dp))
+                .widthIn(max = 720.dp)
+                .clip(RoundedCornerShape(18.dp))
                 .background(SurfaceDark)
+                .navigationBarsPadding()
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() },
@@ -130,6 +149,37 @@ fun CameraControlPanel(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(BackgroundDarker.copy(alpha = 0.6f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "PTZ  ${"%.1f".format(java.util.Locale.US, currentZoomRatio)}x",
+                    color = if (isPtzEnabled) Primary else TextTertiary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = JetBrainsMonoFamily
+                )
+                Text(
+                    text = if (isPtzEnabled) {
+                        "READY · MAX ${"%.1f".format(java.util.Locale.US, maxZoomRatio)}x"
+                    } else {
+                        "PGM PTZ LOCKED"
+                    },
+                    color = if (isPtzEnabled) TextSecondary else ElectricRed,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = JetBrainsMonoFamily
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             // Three DrumDials in a Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -166,6 +216,7 @@ fun CameraControlPanel(
                     title = "ZOOM",
                     values = zoomValues,
                     selectedIndex = selectedZoomIndex,
+                    enabled = isPtzEnabled,
                     onIndexChanged = { index ->
                         selectedZoomIndex = index
                         val zoomStr = zoomValues[index]
@@ -206,7 +257,7 @@ fun CameraControlPanel(
                         )
                     }
                     Text(
-                        text = if (isRecording) "STOP REC" else "REC",
+                        text = if (isRecording) "ISO STOP" else "ISO REC",
                         color = TextPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
@@ -224,6 +275,7 @@ private fun DrumDialColumn(
     title: String,
     values: List<String>,
     selectedIndex: Int,
+    enabled: Boolean = true,
     onIndexChanged: (Int) -> Unit
 ) {
     Column(
@@ -241,6 +293,7 @@ private fun DrumDialColumn(
         DrumDial(
             values = values,
             selectedIndex = selectedIndex,
+            enabled = enabled,
             onIndexChanged = onIndexChanged,
             visibleItems = 5,
             modifier = Modifier
@@ -251,7 +304,7 @@ private fun DrumDialColumn(
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = values[selectedIndex],
-            color = Primary,
+            color = if (enabled) Primary else TextTertiary,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             fontFamily = JetBrainsMonoFamily

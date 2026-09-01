@@ -1,11 +1,15 @@
 package com.camhub.studio.data.audio
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MicrophoneDirection
 import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.camhub.studio.data.network.FrameCipher
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,8 +20,10 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlin.math.log10
 import kotlin.math.sqrt
 
@@ -29,7 +35,9 @@ data class AudioCaptureStatus(
 )
 
 @Singleton
-class AudioCaptureService @Inject constructor() {
+class AudioCaptureService @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
 
     companion object {
         private const val TAG = "AudioCaptureService"
@@ -65,7 +73,12 @@ class AudioCaptureService @Inject constructor() {
     private var captureJob: Job? = null
     private var audioRecord: AudioRecord? = null
     private val clients = CopyOnWriteArrayList<AudioClientConnection>()
-    private val sendExecutor = Executors.newFixedThreadPool(MAX_CLIENTS)
+    private val audioSenderId = AtomicInteger(0)
+    private val sendExecutor = Executors.newFixedThreadPool(MAX_CLIENTS) { runnable ->
+        Thread(runnable, "AudioStreamSend-${audioSenderId.incrementAndGet()}").apply {
+            isDaemon = true
+        }
+    }
 
     private var frameCipher: FrameCipher? = null
     private var pendingMicDirection: Int? = null
@@ -155,14 +168,37 @@ class AudioCaptureService @Inject constructor() {
         if (serverSocket == null) return
         if (captureJob?.isActive == true || audioRecord != null) return
 
+        if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.d(TAG, "Microphone permission not granted yet; continuing in video-only mode")
+            updateCaptureStatus(
+                statusText = "Permission Needed",
+                lastError = "Microphone permission not granted"
+            )
+            return
+        }
+
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        val bufferSize = maxOf(minBufSize, BYTES_PER_CHUNK * 2)
+        val bufferSize = maxOf(
+            minBufSize.takeIf { it > 0 } ?: 0,
+            BYTES_PER_CHUNK * 2
+        )
 
         try {
             audioRecord = createAudioRecord(bufferSize)
         } catch (e: SecurityException) {
             Log.e(TAG, "Microphone permission not granted", e)
             updateCaptureStatus(statusText = "Permission Needed", lastError = "Microphone permission not granted")
+            return
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioRecord is unavailable; continuing in video-only mode", e)
+            audioRecord = null
+            updateCaptureStatus(
+                statusText = "Video Only",
+                lastError = e.message ?: "Microphone unavailable"
+            )
             return
         }
 
@@ -219,19 +255,8 @@ class AudioCaptureService @Inject constructor() {
     }
 
     private fun createAudioRecord(bufferSize: Int): AudioRecord {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val format = AudioFormat.Builder()
-                .setEncoding(AUDIO_FORMAT)
-                .setSampleRate(SAMPLE_RATE)
-                .setChannelMask(CHANNEL_CONFIG)
-                .build()
-            val builder = AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.MIC)
-                .setAudioFormat(format)
-                .setBufferSizeInBytes(bufferSize)
-            builder.build()
-        } else {
-            AudioRecord(
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return AudioRecord(
                 MediaRecorder.AudioSource.MIC,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
@@ -239,6 +264,44 @@ class AudioCaptureService @Inject constructor() {
                 bufferSize
             )
         }
+
+        val format = AudioFormat.Builder()
+            .setEncoding(AUDIO_FORMAT)
+            .setSampleRate(SAMPLE_RATE)
+            .setChannelMask(CHANNEL_CONFIG)
+            .build()
+        val audioSources = intArrayOf(
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.CAMCORDER,
+            MediaRecorder.AudioSource.DEFAULT
+        )
+        var lastFailure: Exception? = null
+
+        for (audioSource in audioSources) {
+            val recorder = try {
+                AudioRecord.Builder()
+                    .setAudioSource(audioSource)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(bufferSize)
+                    .build()
+            } catch (e: Exception) {
+                lastFailure = e
+                Log.w(TAG, "Audio source $audioSource unavailable: ${e.message}")
+                null
+            }
+            if (recorder != null) {
+                if (recorder.state == AudioRecord.STATE_INITIALIZED) {
+                    Log.d(TAG, "AudioRecord initialized with source=$audioSource")
+                    return recorder
+                }
+                try { recorder.release() } catch (_: Exception) {}
+            }
+        }
+
+        throw UnsupportedOperationException(
+            "No compatible microphone input is available",
+            lastFailure
+        )
     }
 
     private fun startPcmCapture() {

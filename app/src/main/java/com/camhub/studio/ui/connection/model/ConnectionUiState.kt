@@ -1,6 +1,7 @@
 package com.camhub.studio.ui.connection.model
 
 import com.camhub.studio.data.network.DiscoveredPeer
+import com.camhub.studio.data.network.NetworkSelectionMode
 
 data class ConnectionUiState(
     val role: AppRole = AppRole.CAMERA,
@@ -12,6 +13,10 @@ data class ConnectionUiState(
     val connectedPeerCount: Int = 0,
     val connectedPeerNames: List<String> = emptyList(),
     val errorMessage: String? = null,
+    val networkSelectionMode: NetworkSelectionMode = NetworkSelectionMode.AUTO,
+    val networkTransportLabel: String = "AUTO · OFFLINE",
+    val hasEthernet: Boolean = false,
+    val hasWifi: Boolean = false,
     // Hotspot
     val hotspotActive: Boolean = false,
     val hotspotSsid: String = "",

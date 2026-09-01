@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -47,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +67,7 @@ import com.camhub.studio.ui.camera.components.CameraStatusBar
 import com.camhub.studio.ui.camera.components.UnifiedToolbar
 import com.camhub.studio.ui.camera.components.ViewfinderOverlay
 import com.camhub.studio.ui.components.StatusChip
+import com.camhub.studio.ui.components.ZoomVelocityControl
 import com.camhub.studio.ui.theme.AmberYellow
 import com.camhub.studio.ui.theme.BackgroundDark
 import com.camhub.studio.ui.theme.BackgroundDarker
@@ -77,6 +80,7 @@ import com.camhub.studio.ui.theme.TextMuted
 import com.camhub.studio.ui.theme.TextPrimary
 import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
+import com.camhub.studio.ui.theme.GlassBorder
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -117,20 +121,25 @@ fun CameraHudScreen(
             // Retry audio capture now that RECORD_AUDIO is granted
             viewModel.ensureAudioCapture()
 
-            if (isLandscape) {
-                LandscapeLayout(
-                    uiState = uiState,
-                    viewModel = viewModel,
-                    lifecycleOwner = lifecycleOwner,
-                    scaleGestureDetector = scaleGestureDetector
-                )
-            } else {
-                PortraitLayout(
-                    uiState = uiState,
-                    viewModel = viewModel,
-                    lifecycleOwner = lifecycleOwner,
-                    scaleGestureDetector = scaleGestureDetector
-                )
+            // TextureView's listener captures the selected output orientation.
+            // Recreate it when the device rotates so landscape never reuses a
+            // portrait encoder pipeline (and vice versa).
+            key(isLandscape) {
+                if (isLandscape) {
+                    LandscapeLayout(
+                        uiState = uiState,
+                        viewModel = viewModel,
+                        lifecycleOwner = lifecycleOwner,
+                        scaleGestureDetector = scaleGestureDetector
+                    )
+                } else {
+                    PortraitLayout(
+                        uiState = uiState,
+                        viewModel = viewModel,
+                        lifecycleOwner = lifecycleOwner,
+                        scaleGestureDetector = scaleGestureDetector
+                    )
+                }
             }
         },
         onPermissionsDenied = {
@@ -171,32 +180,16 @@ private fun PortraitLayout(
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     scaleGestureDetector: android.view.ScaleGestureDetector
 ) {
-    val safeInsets = WindowInsets.statusBars.union(WindowInsets.displayCutout)
+    val safeInsets = WindowInsets.statusBars
+        .union(WindowInsets.navigationBars)
+        .union(WindowInsets.displayCutout)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDarker)
     ) {
-        // Full-screen camera preview (behind everything)
-        CameraPreview(
-            viewModel = viewModel,
-            lifecycleOwner = lifecycleOwner,
-            scaleGestureDetector = scaleGestureDetector,
-            onTapToFocus = { x, y, w, h ->
-                viewModel.tapToFocus(x, y, w, h)
-            },
-            isDevicePortrait = true,
-            modifier = Modifier.fillMaxSize()
-        )
-        ViewfinderOverlay(
-            isPgm = uiState.isPgm,
-            focusPointX = uiState.focusPointX,
-            focusPointY = uiState.focusPointY,
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // HUD overlay on top of preview
+        // Portrait controls live above/below the image so the framing remains visible.
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -206,8 +199,9 @@ private fun PortraitLayout(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(BackgroundDark.copy(alpha = 0.6f))
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .background(BackgroundDarker.copy(alpha = 0.82f))
+                    .border(1.dp, GlassBorder, RoundedCornerShape(0.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -265,15 +259,62 @@ private fun PortraitLayout(
             // ── Camera params bar ──
             CameraParamsBar(uiState = uiState)
 
-            // ── Preview space (fills remaining) ──
-            Spacer(modifier = Modifier.weight(1f))
+            // ── Preview: 9:16 fills the available vertical area; 16:9 stays a strip ──
+            Box(
+                modifier = if (uiState.isPortraitFullPreview) {
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .background(androidx.compose.ui.graphics.Color.Black)
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .background(androidx.compose.ui.graphics.Color.Black)
+                },
+                contentAlignment = Alignment.Center
+            ) {
+                // Recreate TextureView when output geometry changes so CameraX, GL,
+                // and MediaCodec all switch dimensions as one pipeline.
+                key(uiState.isPortraitFullPreview) {
+                    CameraPreview(
+                        viewModel = viewModel,
+                        lifecycleOwner = lifecycleOwner,
+                        scaleGestureDetector = scaleGestureDetector,
+                        onTapToFocus = { x, y, w, h ->
+                            viewModel.tapToFocus(x, y, w, h)
+                        },
+                        isDevicePortrait = true,
+                        isPortraitOutput = uiState.isPortraitFullPreview,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                ViewfinderOverlay(
+                    isPgm = uiState.isPgm,
+                    focusPointX = uiState.focusPointX,
+                    focusPointY = uiState.focusPointY,
+                    modifier = Modifier.fillMaxSize()
+                )
+                Text(
+                    text = if (uiState.isPortraitFullPreview) "VERTICAL  9:16" else "LANDSCAPE  16:9",
+                    color = TextSecondary,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .background(BackgroundDarker.copy(alpha = 0.72f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                )
+            }
 
             // ── BOTTOM: Audio meters + Record ──
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(BackgroundDark.copy(alpha = 0.5f))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .background(BackgroundDarker.copy(alpha = 0.78f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -287,6 +328,7 @@ private fun PortraitLayout(
                 CameraStatusBar(
                     bitrate = uiState.bitrate,
                     wifiStrength = uiState.wifiStrength,
+                    networkTransportLabel = uiState.networkTransportLabel,
                     storageUsedGb = uiState.storageUsedGb,
                     storageTotalGb = uiState.storageTotalGb
                 )
@@ -296,8 +338,8 @@ private fun PortraitLayout(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(BackgroundDark.copy(alpha = 0.7f))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                    .background(BackgroundDarker.copy(alpha = 0.88f))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -354,17 +396,13 @@ private fun PortraitLayout(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(
-                                if (!uiState.isPortraitFullPreview) Primary.copy(alpha = 0.15f)
-                                else BackgroundDark.copy(alpha = 0.5f),
-                                RoundedCornerShape(4.dp)
-                            )
+                            .background(Primary.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
                             .clickable { viewModel.togglePreviewAspect() }
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
                             text = if (uiState.isPortraitFullPreview) "9:16" else "16:9",
-                            color = if (!uiState.isPortraitFullPreview) Primary else TextSecondary,
+                            color = Primary,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
@@ -379,11 +417,7 @@ private fun PortraitLayout(
                 onToggleTool = { viewModel.toggleTool(it) },
                 onResetAuto = { viewModel.resetAllToAuto() },
                 zoomRatio = uiState.zoomRatio,
-                minZoomRatio = uiState.minZoomRatio,
-                maxZoomRatio = uiState.maxZoomRatio,
-                zoomSteps = uiState.zoomSteps,
-                selectedZoomIndex = uiState.selectedZoomIndex,
-                onZoomChanged = { viewModel.setZoom(it) },
+                onZoomVelocityChanged = { viewModel.setZoomVelocity(it) },
                 isoValues = uiState.isoValues,
                 selectedIsoIndex = uiState.selectedIsoIndex,
                 onIsoChanged = { viewModel.updateIso(it) },
@@ -458,7 +492,9 @@ private fun LandscapeLayout(
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     scaleGestureDetector: android.view.ScaleGestureDetector
 ) {
-    val safeInsets = WindowInsets.statusBars.union(WindowInsets.displayCutout)
+    val safeInsets = WindowInsets.statusBars
+        .union(WindowInsets.navigationBars)
+        .union(WindowInsets.displayCutout)
 
     Box(
         modifier = Modifier
@@ -609,6 +645,62 @@ private fun LandscapeLayout(
                 )
             }
 
+            // Zoom is a compact right-side rocker in landscape. Keeping it away
+            // from the bottom preserves the viewfinder and record controls.
+            AnimatedVisibility(
+                visible = uiState.activeToolMode == com.camhub.studio.ui.camera.model.ToolMode.ZOOM,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 68.dp)
+                    .width(260.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .background(BackgroundDarker.copy(alpha = 0.94f), RoundedCornerShape(10.dp))
+                        .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "ZOOM SPEED",
+                            color = CyanAccent,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = "닫기",
+                            color = TextSecondary,
+                            fontSize = 9.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable {
+                                    viewModel.toggleTool(
+                                        com.camhub.studio.ui.camera.model.ToolMode.ZOOM
+                                    )
+                                }
+                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
+                    }
+                    ZoomVelocityControl(
+                        zoomRatio = uiState.zoomRatio,
+                        onVelocityChanged = viewModel::setZoomVelocity
+                    )
+                    Text(
+                        text = "왼쪽 축소  ·  중앙 정지  ·  오른쪽 확대",
+                        color = TextTertiary,
+                        fontSize = 8.sp,
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
+                }
+            }
+
             // 5. Bottom center: Record button + timecode
             Column(
                 modifier = Modifier
@@ -685,7 +777,9 @@ private fun LandscapeLayout(
             }
 
             // 8. Unified toolbar overlay (bottom)
-            val showLandscapeSlider = uiState.activeToolMode != com.camhub.studio.ui.camera.model.ToolMode.NONE
+            val showLandscapeSlider = uiState.activeToolMode !=
+                com.camhub.studio.ui.camera.model.ToolMode.NONE &&
+                uiState.activeToolMode != com.camhub.studio.ui.camera.model.ToolMode.ZOOM
             AnimatedVisibility(
                 visible = showLandscapeSlider,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -700,11 +794,7 @@ private fun LandscapeLayout(
                     onToggleTool = { viewModel.toggleTool(it) },
                     onResetAuto = { viewModel.resetAllToAuto() },
                     zoomRatio = uiState.zoomRatio,
-                    minZoomRatio = uiState.minZoomRatio,
-                    maxZoomRatio = uiState.maxZoomRatio,
-                    zoomSteps = uiState.zoomSteps,
-                    selectedZoomIndex = uiState.selectedZoomIndex,
-                    onZoomChanged = { viewModel.setZoom(it) },
+                    onZoomVelocityChanged = { viewModel.setZoomVelocity(it) },
                     isoValues = uiState.isoValues,
                     selectedIsoIndex = uiState.selectedIsoIndex,
                     onIsoChanged = { viewModel.updateIso(it) },
@@ -736,6 +826,7 @@ private fun InfoPill(
     Row(
         modifier = Modifier
             .background(BackgroundDark.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+            .border(1.dp, GlassBorder, RoundedCornerShape(6.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -774,16 +865,16 @@ private fun HudCircleButton(
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .size(44.dp)
                 .clip(CircleShape)
                 .background(
                     if (isActive) activeColor.copy(alpha = 0.2f)
-                    else BackgroundDark.copy(alpha = 0.7f),
+                    else BackgroundDarker.copy(alpha = 0.82f),
                     CircleShape
                 )
                 .then(
                     if (isActive) Modifier.border(1.5.dp, activeColor, CircleShape)
-                    else Modifier
+                    else Modifier.border(1.dp, GlassBorder, CircleShape)
                 )
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center
@@ -829,6 +920,7 @@ private fun CameraPreview(
     scaleGestureDetector: android.view.ScaleGestureDetector,
     onTapToFocus: (Float, Float, Float, Float) -> Unit,
     isDevicePortrait: Boolean = false,
+    isPortraitOutput: Boolean = isDevicePortrait,
     modifier: Modifier = Modifier
 ) {
     AndroidView(
@@ -842,10 +934,12 @@ private fun CameraPreview(
                     ) {
                         val surface = Surface(surfaceTexture)
                         viewModel.onViewfinderSurfaceReady(
-                            lifecycleOwner,
-                            surface,
-                            Size(width, height),
-                            isDevicePortrait
+                            lifecycleOwner = lifecycleOwner,
+                            viewfinderSurface = surface,
+                            size = Size(width, height),
+                            isDevicePortrait = isDevicePortrait,
+                            isPortraitOutput = isPortraitOutput,
+                            targetRotation = display?.rotation ?: Surface.ROTATION_0
                         )
                     }
 
@@ -857,10 +951,12 @@ private fun CameraPreview(
                         viewModel.onViewfinderSurfaceDestroyed()
                         val surface = Surface(surfaceTexture)
                         viewModel.onViewfinderSurfaceReady(
-                            lifecycleOwner,
-                            surface,
-                            Size(width, height),
-                            isDevicePortrait
+                            lifecycleOwner = lifecycleOwner,
+                            viewfinderSurface = surface,
+                            size = Size(width, height),
+                            isDevicePortrait = isDevicePortrait,
+                            isPortraitOutput = isPortraitOutput,
+                            targetRotation = display?.rotation ?: Surface.ROTATION_0
                         )
                     }
 

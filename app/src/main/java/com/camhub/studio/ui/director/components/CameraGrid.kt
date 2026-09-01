@@ -3,6 +3,7 @@ package com.camhub.studio.ui.director.components
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -39,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.camhub.studio.ui.director.model.CameraNode
 import com.camhub.studio.ui.director.model.ConnectionStatus
+import com.camhub.studio.data.network.VideoTransport
 import com.camhub.studio.ui.theme.AmberYellow
 import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.ElectricRed
@@ -85,25 +88,50 @@ private fun audioStatusLabel(status: String): String {
 }
 
 private fun streamQualityColor(camera: CameraNode): Color {
+    val healthLatencyMs = if (camera.latencySampleCount > 0) {
+        camera.latencyP95Ms
+    } else {
+        camera.latencyMs
+    }
     return when {
-        camera.latencyMs >= 180 -> ElectricRed
+        camera.videoTransport == VideoTransport.UDP_RTP && camera.udpPacketLossPercent >= 5f -> ElectricRed
+        healthLatencyMs >= 180 -> ElectricRed
         camera.droppedFrames >= 30 -> ElectricRed
-        camera.latencyMs >= 90 -> AmberYellow
+        camera.videoTransport == VideoTransport.UDP_RTP && camera.udpPacketLossPercent >= 1f -> AmberYellow
+        healthLatencyMs >= 90 -> AmberYellow
         camera.droppedFrames > 0 -> AmberYellow
-        camera.latencyMs > 0 -> NeonGreen
+        healthLatencyMs > 0 -> NeonGreen
         else -> ElectricRed
     }
 }
 
 private fun streamQualityLabel(camera: CameraNode): String {
     val resolution = when {
-        camera.frameHeight > 0 -> "${camera.frameHeight}p"
+        camera.frameWidth > 0 && camera.frameHeight > 0 ->
+            "${camera.frameWidth}×${camera.frameHeight}"
         camera.frameWidth > 0 -> "${camera.frameWidth}w"
         else -> "--"
     }
-    val latency = if (camera.latencyMs > 0) "${camera.latencyMs}ms" else "--ms"
+    val latency = if (!camera.isClockSynchronized || camera.latencySampleCount <= 0) {
+        "SYNC"
+    } else {
+        "P95 ${camera.latencyP95Ms}ms"
+    }
     val drops = if (camera.droppedFrames > 0) " · D${camera.droppedFrames}" else ""
-    return "$resolution · ${camera.fps}fps · $latency$drops"
+    val loss = if (
+        camera.videoTransport == VideoTransport.UDP_RTP &&
+        camera.udpPacketsReceived > 0
+    ) {
+        val lossTenths = (camera.udpPacketLossPercent * 10f).toInt().coerceAtLeast(0)
+        " · LOSS ${lossTenths / 10}.${lossTenths % 10}%"
+    } else ""
+    val fallback = if (camera.transportFallbackReason.isNotBlank()) " FALLBACK" else ""
+    val fps = if (camera.ingressFps > 0 && camera.ingressFps != camera.fps) {
+        "${camera.fps}/${camera.ingressFps}fps"
+    } else {
+        "${camera.fps}fps"
+    }
+    return "${camera.videoTransport.displayLabel}$fallback · $resolution · $fps · $latency$drops$loss"
 }
 
 /**
@@ -117,6 +145,7 @@ private fun CameraCard(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onDisconnect: () -> Unit,
+    onFrameDrawn: (String, Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
     TallyBorder(
@@ -126,7 +155,7 @@ private fun CameraCard(
     ) {
         Column(
             modifier = Modifier
-                .background(SurfaceDark, RoundedCornerShape(6.dp))
+                .background(SurfaceDark, RoundedCornerShape(8.dp))
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = onLongClick
@@ -137,12 +166,20 @@ private fun CameraCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
-                    .background(BackgroundDarker),
+                    .background(BackgroundDarker)
+                    .drawWithContent {
+                        drawContent()
+                        val sequence = camera.frameSequence
+                        if (sequence > 0L) {
+                            onFrameDrawn(camera.name, sequence)
+                        }
+                    },
                 contentAlignment = Alignment.Center
             ) {
-                if (camera.previewBitmap != null) {
+                val previewBitmap = camera.previewBitmap
+                if (previewBitmap != null) {
                     Image(
-                        bitmap = camera.previewBitmap,
+                        bitmap = previewBitmap,
                         contentDescription = "${camera.name} preview",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Fit
@@ -157,12 +194,40 @@ private fun CameraCard(
                     )
                 }
 
+                if (camera.status != ConnectionStatus.LIVE) {
+                    val recoveryLabel = when (camera.status) {
+                        ConnectionStatus.STANDBY -> "RECONNECTING · LAST FRAME"
+                        ConnectionStatus.OFFLINE -> "OFFLINE · LAST FRAME"
+                        ConnectionStatus.LIVE -> ""
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(BackgroundDarker.copy(alpha = 0.52f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = recoveryLabel,
+                            color = if (camera.status == ConnectionStatus.STANDBY) {
+                                AmberYellow
+                            } else {
+                                ElectricRed
+                            },
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = JetBrainsMonoFamily,
+                            letterSpacing = 0.8.sp
+                        )
+                    }
+                }
+
                 if (camera.status != ConnectionStatus.OFFLINE) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .padding(4.dp)
-                            .background(BackgroundDarker.copy(alpha = 0.72f), RoundedCornerShape(3.dp))
+                            .background(BackgroundDarker.copy(alpha = 0.86f), RoundedCornerShape(4.dp))
+                            .border(1.dp, streamQualityColor(camera).copy(alpha = 0.28f), RoundedCornerShape(4.dp))
                             .padding(horizontal = 5.dp, vertical = 2.dp)
                     ) {
                         Text(
@@ -183,7 +248,7 @@ private fun CameraCard(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(4.dp)
-                            .background(tallyColor.copy(alpha = 0.85f), RoundedCornerShape(3.dp))
+                            .background(tallyColor.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
                             .padding(horizontal = 5.dp, vertical = 2.dp)
                     ) {
                         Text(
@@ -202,7 +267,7 @@ private fun CameraCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(SurfaceDark)
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                    .padding(horizontal = 7.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Status dot
@@ -238,7 +303,11 @@ private fun CameraCard(
 
                 // Bitrate / FPS info
                 Text(
-                    text = "${camera.bitrateKbps}k",
+                    text = if (camera.adaptiveBitrateTargetMbps > 0) {
+                        "${camera.bitrateKbps}k→${camera.adaptiveBitrateTargetMbps}M"
+                    } else {
+                        "${camera.bitrateKbps}k"
+                    },
                     color = TextTertiary,
                     fontSize = 8.sp,
                     fontFamily = JetBrainsMonoFamily
@@ -287,6 +356,7 @@ fun CameraGrid(
     onSelectPvw: (Int) -> Unit,
     onOpenCameraControl: (Int) -> Unit,
     onDisconnect: (Int) -> Unit,
+    onFrameDrawn: (String, Long) -> Unit,
     gridState: LazyGridState = rememberLazyGridState(),
     modifier: Modifier = Modifier
 ) {
@@ -306,7 +376,8 @@ fun CameraGrid(
                 index = index,
                 onClick = { onSelectPvw(index) },
                 onLongClick = { onOpenCameraControl(index) },
-                onDisconnect = { onDisconnect(index) }
+                onDisconnect = { onDisconnect(index) },
+                onFrameDrawn = onFrameDrawn
             )
         }
     }

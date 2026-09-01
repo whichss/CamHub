@@ -46,11 +46,13 @@ fun StreamingSettings(
     isLowLatencyDecode: Boolean,
     isAdaptiveBitrate: Boolean,
     adaptiveBitrateStatus: String,
+    isAutomaticHubProfile: Boolean,
     onFpsChange: (Int) -> Unit,
     onResolutionChange: (Int) -> Unit,
     onBitrateChange: (Int) -> Unit,
     onToggleLowLatency: () -> Unit,
     onToggleAdaptiveBitrate: () -> Unit,
+    onToggleAutomaticHubProfile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -98,6 +100,57 @@ fun StreamingSettings(
             isEnabled = isAdaptiveBitrate,
             status = adaptiveBitrateStatus,
             onToggle = onToggleAdaptiveBitrate
+        )
+
+        AutomaticHubProfileToggle(
+            isEnabled = isAutomaticHubProfile,
+            onToggle = onToggleAutomaticHubProfile
+        )
+    }
+}
+
+@Composable
+private fun AutomaticHubProfileToggle(
+    isEnabled: Boolean,
+    onToggle: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(GlassSurface)
+            .border(width = 1.dp, color = GlassBorder, shape = shape)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Automatic Hub Profile",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 14.sp,
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Apply measured FPS and resolution limits; off keeps recommendations only",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 11.sp,
+                color = TextTertiary
+            )
+        }
+        Switch(
+            checked = isEnabled,
+            onCheckedChange = { onToggle() },
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = TextPrimary,
+                checkedTrackColor = Primary,
+                uncheckedThumbColor = TextSecondary,
+                uncheckedTrackColor = SurfaceDark,
+                uncheckedBorderColor = GlassBorder
+            )
         )
     }
 }

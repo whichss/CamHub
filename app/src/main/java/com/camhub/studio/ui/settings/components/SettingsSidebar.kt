@@ -59,7 +59,7 @@ fun SettingsSidebar(
 ) {
     Column(
         modifier = modifier
-            .width(220.dp)
+            .width(204.dp)
             .fillMaxHeight()
             .background(BackgroundDarker)
             .border(width = 1.dp, color = GlassBorder, shape = RoundedCornerShape(0.dp))
@@ -67,11 +67,11 @@ fun SettingsSidebar(
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Text(
-            text = "SETTINGS",
+            text = "CATEGORIES",
             fontFamily = SpaceGroteskFamily,
             fontWeight = FontWeight.Bold,
             fontSize = 14.sp,
-            color = TextPrimary,
+            color = TextTertiary,
             letterSpacing = 1.sp,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
         )
@@ -128,6 +128,11 @@ private fun SidebarTabItem(
             .fillMaxWidth()
             .clip(shape)
             .background(bgColor)
+            .border(
+                1.dp,
+                if (isSelected) CyanAccent.copy(alpha = 0.28f) else androidx.compose.ui.graphics.Color.Transparent,
+                shape
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -164,6 +169,11 @@ private fun HorizontalTabItem(
         modifier = modifier
             .clip(shape)
             .background(bgColor)
+            .border(
+                1.dp,
+                if (isSelected) CyanAccent.copy(alpha = 0.25f) else androidx.compose.ui.graphics.Color.Transparent,
+                shape
+            )
             .clickable(onClick = onClick)
             .padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally

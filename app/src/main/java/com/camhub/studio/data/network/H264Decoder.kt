@@ -5,9 +5,16 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
+
+data class DecodedVideoFrame(
+    val bitmap: Bitmap,
+    val presentationTimeUs: Long,
+    val decodedAtElapsedMs: Long
+)
 
 class H264Decoder {
 
@@ -127,10 +134,20 @@ class H264Decoder {
         }
     }
 
-    fun decode(nalUnit: ByteArray, isKeyFrame: Boolean): Bitmap? =
-        decode(nalUnit, 0, nalUnit.size, isKeyFrame)
+    fun decode(
+        nalUnit: ByteArray,
+        isKeyFrame: Boolean,
+        presentationTimeUs: Long = 0L
+    ): DecodedVideoFrame? =
+        decode(nalUnit, 0, nalUnit.size, isKeyFrame, presentationTimeUs)
 
-    fun decode(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean): Bitmap? {
+    fun decode(
+        nalUnit: ByteArray,
+        offset: Int,
+        length: Int,
+        isKeyFrame: Boolean,
+        presentationTimeUs: Long = 0L
+    ): DecodedVideoFrame? {
         val dec = decoder ?: return null
         if (!configured) return null
         lastDecodeFailed = false
@@ -145,13 +162,13 @@ class H264Decoder {
                     val size = minOf(length, inputBuffer.capacity())
                     inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                    dec.queueInputBuffer(inputIndex, 0, size, 0, flags)
+                    dec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, flags)
                 }
             }
 
             // Drain output
             val bufferInfo = MediaCodec.BufferInfo()
-            var resultBitmap: Bitmap? = null
+            var resultFrame: DecodedVideoFrame? = null
 
             while (true) {
                 val outputIndex = dec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
@@ -180,7 +197,11 @@ class H264Decoder {
                                 val targetBitmap = if (useA) bitmapA else bitmapB
                                 if (targetBitmap != null) {
                                     nv12ToBitmap(outputBuffer, bufferInfo.offset, targetBitmap)
-                                    resultBitmap = targetBitmap
+                                    resultFrame = DecodedVideoFrame(
+                                        bitmap = targetBitmap,
+                                        presentationTimeUs = bufferInfo.presentationTimeUs,
+                                        decodedAtElapsedMs = SystemClock.elapsedRealtime()
+                                    )
                                     useA = !useA
                                 }
                             }
@@ -190,7 +211,7 @@ class H264Decoder {
                 }
             }
 
-            return resultBitmap
+            return resultFrame
         } catch (e: Exception) {
             lastDecodeFailed = true
             Log.e(TAG, "Decode error", e)
@@ -198,10 +219,19 @@ class H264Decoder {
         }
     }
 
-    fun decodeSurface(nalUnit: ByteArray, isKeyFrame: Boolean) =
-        decodeSurface(nalUnit, 0, nalUnit.size, isKeyFrame)
+    fun decodeSurface(
+        nalUnit: ByteArray,
+        isKeyFrame: Boolean,
+        presentationTimeUs: Long = 0L
+    ) = decodeSurface(nalUnit, 0, nalUnit.size, isKeyFrame, presentationTimeUs)
 
-    fun decodeSurface(nalUnit: ByteArray, offset: Int, length: Int, isKeyFrame: Boolean): Boolean {
+    fun decodeSurface(
+        nalUnit: ByteArray,
+        offset: Int,
+        length: Int,
+        isKeyFrame: Boolean,
+        presentationTimeUs: Long = 0L
+    ): Boolean {
         val dec = decoder ?: return false
         if (!configured || !usingSurface) return false
         lastDecodeFailed = false
@@ -216,7 +246,7 @@ class H264Decoder {
                     val size = minOf(length, inputBuffer.capacity())
                     inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                    dec.queueInputBuffer(inputIndex, 0, size, 0, flags)
+                    dec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, flags)
                 }
             }
 

@@ -8,12 +8,20 @@ import android.opengl.GLES20
 import android.opengl.GLES30
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+
+data class RenderedVideoFrame(
+    val bitmap: Bitmap,
+    val presentationTimeUs: Long,
+    val decodedAtElapsedMs: Long,
+    val readyAtElapsedMs: Long
+)
 
 /**
  * Renders H.264 decoder output (via SurfaceTexture) to an offscreen FBO
@@ -23,7 +31,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Two PBOs ping-pong: while the GPU DMA-transfers the current frame into PBO_A,
  * the CPU maps PBO_B (previous frame, already transferred) with zero wait.
  */
-class DecoderGlRenderer(val width: Int, val height: Int) {
+class DecoderGlRenderer(
+    val width: Int,
+    val height: Int,
+    private val threadName: String = "DecoderGL"
+) {
 
     companion object {
         private const val TAG = "DecoderGlRenderer"
@@ -69,20 +81,29 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
     private val pbos = IntArray(2)
     private var pboIndex = 0
     private var pboInitialized = false
+    private val pboPresentationTimeUs = LongArray(2)
+    private val pboDecodedAtElapsedMs = LongArray(2)
     private val pixelByteSize get() = width * height * 4
 
     private val reusableBitmaps = arrayOfNulls<Bitmap>(BITMAP_POOL_SIZE)
     private var reusableBitmapIndex = 0
     private val renderQueued = AtomicBoolean(false)
     private val renderAgain = AtomicBoolean(false)
+    @Volatile private var outputFpsLimit = 30
+    private var lastReadbackAtElapsedMs = 0L
 
     var surface: Surface? = null
         private set
 
-    var onBitmapReady: ((Bitmap) -> Unit)? = null
+    var onBitmapReady: ((RenderedVideoFrame) -> Unit)? = null
+
+    /** Limits costly GPU-to-CPU Bitmap readback without slowing MediaCodec decode. */
+    fun setOutputFpsLimit(fps: Int) {
+        outputFpsLimit = fps.coerceIn(1, 60)
+    }
 
     fun start() {
-        val thread = HandlerThread("DecoderGL").also { it.start() }
+        val thread = HandlerThread(threadName).also { it.start() }
         glThread = thread
         val handler = Handler(thread.looper)
         glHandler = handler
@@ -201,6 +222,13 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
         try {
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
+            val presentationTimeUs = st.timestamp / 1_000L
+            val decodedAtElapsedMs = SystemClock.elapsedRealtime()
+            val minimumIntervalMs = 1_000L / outputFpsLimit.coerceAtLeast(1)
+            if (decodedAtElapsedMs - lastReadbackAtElapsedMs < minimumIntervalMs) {
+                return
+            }
+            lastReadbackAtElapsedMs = decodedAtElapsedMs
 
             egl.makeCurrent(pbuf)
 
@@ -236,6 +264,8 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[pboIndex])
             GLES30.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+            pboPresentationTimeUs[pboIndex] = presentationTimeUs
+            pboDecodedAtElapsedMs[pboIndex] = decodedAtElapsedMs
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
@@ -249,7 +279,14 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
                 if (mappedBuffer is ByteBuffer) {
                     val bitmap = nextReusableBitmap()
                     bitmap.copyPixelsFromBuffer(mappedBuffer)
-                    onBitmapReady?.invoke(bitmap)
+                    onBitmapReady?.invoke(
+                        RenderedVideoFrame(
+                            bitmap = bitmap,
+                            presentationTimeUs = pboPresentationTimeUs[readIndex],
+                            decodedAtElapsedMs = pboDecodedAtElapsedMs[readIndex],
+                            readyAtElapsedMs = SystemClock.elapsedRealtime()
+                        )
+                    )
                 }
                 GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
@@ -298,8 +335,11 @@ class DecoderGlRenderer(val width: Int, val height: Int) {
         }
         eglHelper = null
         pboInitialized = false
+        pboPresentationTimeUs.fill(0L)
+        pboDecodedAtElapsedMs.fill(0L)
         renderQueued.set(false)
         renderAgain.set(false)
+        lastReadbackAtElapsedMs = 0L
         for (i in reusableBitmaps.indices) {
             reusableBitmaps[i]?.recycle()
             reusableBitmaps[i] = null

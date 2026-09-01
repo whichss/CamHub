@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -26,7 +27,8 @@ data class DiscoveredPeer(
 
 @Singleton
 class NsdDiscoveryManager @Inject constructor(
-    @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
+    private val networkTransportManager: NetworkTransportManager
 ) {
     companion object {
         private const val TAG = "NsdDiscovery"
@@ -117,6 +119,10 @@ class NsdDiscoveryManager @Inject constructor(
     }
 
     fun getLocalIpAddress(): String {
+        networkTransportManager.localIpAddress()
+            .takeIf { it != "0.0.0.0" }
+            ?.let { return it }
+
         // Prefer WiFi interface address
         try {
             @Suppress("deprecation")
@@ -258,7 +264,22 @@ class NsdDiscoveryManager @Inject constructor(
         }
 
         try {
-            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                nsdManager.discoverServices(
+                    SERVICE_TYPE,
+                    NsdManager.PROTOCOL_DNS_SD,
+                    null as android.net.Network?,
+                    context.mainExecutor,
+                    requireNotNull(discoveryListener)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                nsdManager.discoverServices(
+                    SERVICE_TYPE,
+                    NsdManager.PROTOCOL_DNS_SD,
+                    requireNotNull(discoveryListener)
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "discoverServices exception", e)
         }
@@ -331,29 +352,45 @@ class NsdDiscoveryManager @Inject constructor(
     private fun startUdpBroadcast(deviceName: String, port: Int) {
         udpBroadcastJob?.cancel()
         udpBroadcastJob = scope.launch {
-            val localIp = getLocalIpAddress()
-            val announce = UdpAnnounce(ip = localIp, port = port)
-            val message = json.encodeToString(announce).toByteArray()
-
-            var socket: DatagramSocket? = null
+            val sockets = mutableMapOf<android.net.Network, DatagramSocket>()
             try {
-                socket = DatagramSocket().apply { broadcast = true }
                 val broadcastAddr = InetAddress.getByName("255.255.255.255")
-
-                Log.d(TAG, "UDP broadcast started: $deviceName at $localIp:$port")
+                Log.d(TAG, "UDP broadcast started for $deviceName on local transports")
                 while (isActive) {
-                    try {
-                        val packet = DatagramPacket(message, message.size, broadcastAddr, UDP_BROADCAST_PORT)
-                        socket.send(packet)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "UDP broadcast send failed: ${e.message}")
+                    val networks = networkTransportManager.networkSnapshot()
+                    sockets.keys.filter { it !in networks }.forEach { stale ->
+                        sockets.remove(stale)?.close()
+                    }
+                    for (network in networks) {
+                        try {
+                            val socket = sockets.getOrPut(network) {
+                                DatagramSocket().apply {
+                                    broadcast = true
+                                    network.bindSocket(this)
+                                }
+                            }
+                            val localIp = networkTransportManager.localIpv4Address(network)
+                                ?.hostAddress ?: continue
+                            val message = json.encodeToString(
+                                UdpAnnounce(ip = localIp, port = port)
+                            ).toByteArray()
+                            val packet = DatagramPacket(
+                                message,
+                                message.size,
+                                broadcastAddr,
+                                UDP_BROADCAST_PORT
+                            )
+                            socket.send(packet)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "UDP broadcast send failed: ${e.message}")
+                        }
                     }
                     delay(UDP_BROADCAST_INTERVAL_MS)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "UDP broadcast error", e)
             } finally {
-                socket?.close()
+                sockets.values.forEach { it.close() }
             }
         }
     }
@@ -388,16 +425,17 @@ class NsdDiscoveryManager @Inject constructor(
 
                         // Don't add ourselves
                         val localIp = getLocalIpAddress()
-                        if (announce.ip != localIp && announce.service == "camhub") {
-                            val peerName = "Camera-${announce.ip}"
-                            val isNew = _discoveredPeers.value.none { it.ip == announce.ip && it.port == announce.port }
+                        val sourceIp = packet.address.hostAddress ?: announce.ip
+                        if (sourceIp != localIp && announce.service == "camhub") {
+                            val peerName = "Camera-$sourceIp"
+                            val isNew = _discoveredPeers.value.none { it.ip == sourceIp && it.port == announce.port }
                             if (isNew) {
-                                Log.d(TAG, "UDP discovered: $peerName at ${announce.ip}:${announce.port}")
+                                Log.d(TAG, "UDP discovered: $peerName at $sourceIp:${announce.port}")
                             }
                             addOrUpdatePeer(
                                 DiscoveredPeer(
                                     name = peerName,
-                                    ip = announce.ip,
+                                    ip = sourceIp,
                                     port = announce.port
                                 )
                             )

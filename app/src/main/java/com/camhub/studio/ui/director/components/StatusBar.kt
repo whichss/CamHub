@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,6 +46,7 @@ import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.CyanAccent
 import com.camhub.studio.ui.theme.ElectricRed
 import com.camhub.studio.ui.theme.JetBrainsMonoFamily
+import com.camhub.studio.ui.theme.GlassBorder
 import com.camhub.studio.ui.theme.NeonGreen
 import com.camhub.studio.ui.theme.LedGreen
 import com.camhub.studio.ui.theme.LedRed
@@ -95,6 +98,8 @@ fun StatusBar(
     batteryPercent: Int,
     audioMasterLevel: Float = 0f,
     connectedCameraCount: Int = 0,
+    hubProfileLabel: String = "CHECKING",
+    networkTransportLabel: String = "AUTO · NO LOCAL LINK",
     onNavigateToSettings: (() -> Unit)? = null,
     onToggleDeviceManager: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -115,7 +120,8 @@ fun StatusBar(
         modifier = modifier
             .fillMaxWidth()
             .background(BackgroundDarker)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .border(1.dp, GlassBorder, RoundedCornerShape(0.dp))
+            .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -152,7 +158,7 @@ fun StatusBar(
                 )
                 Spacer(modifier = Modifier.width(3.dp))
                 Text(
-                    text = "${latencyMs}ms",
+                    text = "CAP→DRAW P95 ${latencyMs}ms",
                     color = NeonGreen,
                     fontSize = 10.sp,
                     fontFamily = JetBrainsMonoFamily,
@@ -214,18 +220,47 @@ fun StatusBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // WiFi
+            Text(
+                text = hubProfileLabel,
+                color = when {
+                    hubProfileLabel == "UNSUPPORTED" -> ElectricRed
+                    '→' in hubProfileLabel || "WATCH" in hubProfileLabel -> AmberYellow
+                    else -> TextSecondary
+                },
+                fontSize = 8.sp,
+                fontFamily = JetBrainsMonoFamily,
+                fontWeight = FontWeight.Medium
+            )
+
+            Text(
+                text = networkTransportLabel,
+                color = when {
+                    "LAN" in networkTransportLabel -> NeonGreen
+                    "WI-FI" in networkTransportLabel -> CyanAccent
+                    else -> AmberYellow
+                },
+                fontSize = 8.sp,
+                fontFamily = JetBrainsMonoFamily,
+                fontWeight = FontWeight.Bold
+            )
+
+            // Active local transport
             Row(verticalAlignment = Alignment.CenterVertically) {
+                val isEthernet = "LAN" in networkTransportLabel
                 Icon(
-                    imageVector = Icons.Filled.Wifi,
-                    contentDescription = "WiFi strength",
-                    tint = wifiColor(wifiStrength),
+                    imageVector = if (isEthernet) {
+                        Icons.Filled.SettingsEthernet
+                    } else {
+                        Icons.Filled.Wifi
+                    },
+                    contentDescription = networkTransportLabel,
+                    tint = if (isEthernet) NeonGreen else wifiColor(wifiStrength),
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(2.dp))
                 Text(
-                    text = "$wifiStrength",
-                    color = wifiColor(wifiStrength),
+                    text = if (isEthernet) "LAN" else "$wifiStrength",
+                    color = if (isEthernet) NeonGreen else wifiColor(wifiStrength),
                     fontSize = 9.sp,
                     fontFamily = JetBrainsMonoFamily
                 )

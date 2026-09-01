@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -88,9 +90,11 @@ fun DeviceManagerPanel(
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.9f)
-                .clip(RoundedCornerShape(12.dp))
+                .widthIn(max = 720.dp)
+                .clip(RoundedCornerShape(18.dp))
                 .background(SurfaceDark)
-                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                .border(1.dp, GlassBorder, RoundedCornerShape(18.dp))
+                .navigationBarsPadding()
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,

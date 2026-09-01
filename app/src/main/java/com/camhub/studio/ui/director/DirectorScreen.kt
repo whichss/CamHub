@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -101,8 +102,23 @@ fun DirectorScreen(
     // Resolve PGM and PVW camera data
     val pgmCamera = uiState.cameras.getOrNull(uiState.pgmCameraIndex)
     val pvwCamera = uiState.cameras.getOrNull(uiState.pvwCameraIndex)
+    val hubProfileLabel = buildString {
+        append(
+            uiState.runtimeRecommendation?.shortLabel
+                ?: uiState.hubCapabilityReport?.profile?.shortLabel
+                ?: "CHECKING"
+        )
+        if (uiState.isAutomaticHubProfile) append(" · AUTO")
+        if (uiState.isRecordingSpatialUpscaling) {
+            append(" · REC↑${uiState.recordingOutputHeight}")
+        } else if (uiState.isPgmSpatialUpscalingEnabled) {
+            append(" · UP${uiState.pgmOutputHeight}")
+        }
+    }
 
-    val safeInsets = WindowInsets.statusBars.union(WindowInsets.displayCutout)
+    val safeInsets = WindowInsets.statusBars
+        .union(WindowInsets.navigationBars)
+        .union(WindowInsets.displayCutout)
 
     Box(
         modifier = modifier
@@ -116,7 +132,7 @@ fun DirectorScreen(
                 // Status bar at top
                 StatusBar(
                     bitrateKbps = uiState.bitrateKbps,
-                    latencyMs = uiState.latencyMs,
+                    latencyMs = uiState.latencyP95Ms,
                     timecode = uiState.timecode,
                     isRecording = uiState.isRecording,
                     isPaused = uiState.isPaused,
@@ -124,29 +140,68 @@ fun DirectorScreen(
                     batteryPercent = uiState.batteryPercent,
                     audioMasterLevel = uiState.audioMasterLevel,
                     connectedCameraCount = uiState.cameras.size,
+                    hubProfileLabel = hubProfileLabel,
+                    networkTransportLabel = uiState.networkTransportLabel,
                     onNavigateToSettings = onNavigateToSettings,
                     onToggleDeviceManager = { viewModel.toggleDeviceManager() }
                 )
 
                 Row(modifier = Modifier.weight(1f)) {
-                    // ViewportPanel (vertical stacking)
+                    // Source multiview on the left: select a camera into PVW.
+                    CameraGrid(
+                        cameras = uiState.cameras,
+                        onSelectPvw = { viewModel.selectPvw(it) },
+                        onOpenCameraControl = { viewModel.showCameraControl(it) },
+                        onDisconnect = { viewModel.disconnectCamera(it) },
+                        onFrameDrawn = { cameraName, frameSequence ->
+                            viewModel.onFrameDrawn(cameraName, frameSequence)
+                        },
+                        gridState = gridState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                    )
+
+                    // PGM/PVW in the center, where framing and transitions are monitored.
                     ViewportPanel(
                         pgmCameraName = pgmCamera?.name ?: "---",
                         pvwCameraName = pvwCamera?.name ?: "---",
                         pgmFps = pgmCamera?.fps ?: 0,
                         pvwFps = pvwCamera?.fps ?: 0,
                         pgmBitmap = pgmCamera?.previewBitmap,
+                        pgmSourceBitmap = pgmCamera?.previewSourceBitmap,
                         pvwBitmap = pvwCamera?.previewBitmap,
+                        enablePgmSpatialUpscaling = uiState.isPgmSpatialUpscalingEnabled,
+                        pgmSpatialUpscaleOutputHeight = uiState.pgmOutputHeight,
+                        pgmFrameSequence = pgmCamera?.frameSequence ?: 0L,
+                        pvwFrameSequence = pvwCamera?.frameSequence ?: 0L,
+                        onFrameDrawn = { cameraName, frameSequence ->
+                            viewModel.onFrameDrawn(cameraName, frameSequence)
+                        },
                         isVertical = true,
                         transitionProgress = uiState.transitionProgress,
                         isTransitioning = uiState.isTransitioning,
                         selectedTransition = uiState.selectedTransition,
+                        pgmPtzState = pgmCamera?.ptzState
+                            ?: com.camhub.studio.data.ptz.HybridPtzState(),
+                        pvwPtzState = pvwCamera?.ptzState
+                            ?: com.camhub.studio.data.ptz.HybridPtzState(),
+                        pgmMaxPtzZoom = pgmCamera?.let {
+                            if (it.supportsRemotePtz) it.maxZoomRatio else 4f
+                        } ?: 4f,
+                        pvwMaxPtzZoom = pvwCamera?.let {
+                            if (it.supportsRemotePtz) it.maxZoomRatio else 4f
+                        } ?: 4f,
+                        isLivePtzUnlocked = uiState.isLivePtzUnlocked,
+                        onToggleLivePtzLock = viewModel::toggleLivePtzLock,
+                        onPtzGesture = viewModel::applyPtzGesture,
+                        onPtzDoubleTap = viewModel::doubleTapPtz,
                         modifier = Modifier
                             .weight(1.4f)
                             .fillMaxHeight()
                     )
 
-                    // Control bar (vertical)
+                    // Live actions stay on the right edge for one-handed operation.
                     ControlBar(
                         isRecording = uiState.isRecording,
                         isPaused = uiState.isPaused,
@@ -164,18 +219,6 @@ fun DirectorScreen(
                         onToggleAutoRecord = { viewModel.toggleAutoRecordCameras() },
                         modifier = Modifier.fillMaxHeight()
                     )
-
-                    // Camera grid
-                    CameraGrid(
-                        cameras = uiState.cameras,
-                        onSelectPvw = { viewModel.selectPvw(it) },
-                        onOpenCameraControl = { viewModel.showCameraControl(it) },
-                        onDisconnect = { viewModel.disconnectCamera(it) },
-                        gridState = gridState,
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                    )
                 }
             }
         } else {
@@ -184,7 +227,7 @@ fun DirectorScreen(
                 // Status bar
                 StatusBar(
                     bitrateKbps = uiState.bitrateKbps,
-                    latencyMs = uiState.latencyMs,
+                    latencyMs = uiState.latencyP95Ms,
                     timecode = uiState.timecode,
                     isRecording = uiState.isRecording,
                     isPaused = uiState.isPaused,
@@ -192,6 +235,8 @@ fun DirectorScreen(
                     batteryPercent = uiState.batteryPercent,
                     audioMasterLevel = uiState.audioMasterLevel,
                     connectedCameraCount = uiState.cameras.size,
+                    hubProfileLabel = hubProfileLabel,
+                    networkTransportLabel = uiState.networkTransportLabel,
                     onNavigateToSettings = onNavigateToSettings,
                     onToggleDeviceManager = { viewModel.toggleDeviceManager() }
                 )
@@ -203,11 +248,33 @@ fun DirectorScreen(
                     pgmFps = pgmCamera?.fps ?: 0,
                     pvwFps = pvwCamera?.fps ?: 0,
                     pgmBitmap = pgmCamera?.previewBitmap,
+                    pgmSourceBitmap = pgmCamera?.previewSourceBitmap,
                     pvwBitmap = pvwCamera?.previewBitmap,
+                    enablePgmSpatialUpscaling = uiState.isPgmSpatialUpscalingEnabled,
+                    pgmSpatialUpscaleOutputHeight = uiState.pgmOutputHeight,
+                    pgmFrameSequence = pgmCamera?.frameSequence ?: 0L,
+                    pvwFrameSequence = pvwCamera?.frameSequence ?: 0L,
+                    onFrameDrawn = { cameraName, frameSequence ->
+                        viewModel.onFrameDrawn(cameraName, frameSequence)
+                    },
                     isVertical = false,
                     transitionProgress = uiState.transitionProgress,
                     isTransitioning = uiState.isTransitioning,
                     selectedTransition = uiState.selectedTransition,
+                    pgmPtzState = pgmCamera?.ptzState
+                        ?: com.camhub.studio.data.ptz.HybridPtzState(),
+                    pvwPtzState = pvwCamera?.ptzState
+                        ?: com.camhub.studio.data.ptz.HybridPtzState(),
+                    pgmMaxPtzZoom = pgmCamera?.let {
+                        if (it.supportsRemotePtz) it.maxZoomRatio else 4f
+                    } ?: 4f,
+                    pvwMaxPtzZoom = pvwCamera?.let {
+                        if (it.supportsRemotePtz) it.maxZoomRatio else 4f
+                    } ?: 4f,
+                    isLivePtzUnlocked = uiState.isLivePtzUnlocked,
+                    onToggleLivePtzLock = viewModel::toggleLivePtzLock,
+                    onPtzGesture = viewModel::applyPtzGesture,
+                    onPtzDoubleTap = viewModel::doubleTapPtz,
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -236,6 +303,9 @@ fun DirectorScreen(
                     onSelectPvw = { viewModel.selectPvw(it) },
                     onOpenCameraControl = { viewModel.showCameraControl(it) },
                     onDisconnect = { viewModel.disconnectCamera(it) },
+                    onFrameDrawn = { cameraName, frameSequence ->
+                        viewModel.onFrameDrawn(cameraName, frameSequence)
+                    },
                     gridState = gridState,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -270,9 +340,18 @@ fun DirectorScreen(
             CameraControlPanel(
                 cameraName = controlCamera?.name ?: "Unknown",
                 isRecording = controlCamera?.isRecording ?: false,
+                currentZoomRatio = controlCamera?.ptzState?.zoom ?: 1f,
+                maxZoomRatio = controlCamera?.let {
+                    if (it.supportsRemotePtz) it.maxZoomRatio else 4f
+                } ?: 4f,
+                isPtzEnabled = controlCamera?.isPgm != true || uiState.isLivePtzUnlocked,
                 onDismiss = { viewModel.hideCameraControl() },
                 onSendCommand = { command, value, stringValue ->
-                    viewModel.sendCameraCommand(command, value, stringValue)
+                    if (command == "set_zoom" && controlCamera != null) {
+                        viewModel.setPtzZoom(controlCamera.name, value)
+                    } else {
+                        viewModel.sendCameraCommand(command, value, stringValue)
+                    }
                 }
             )
         }

@@ -5,6 +5,7 @@ import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
+import android.opengl.EGLExt
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.util.Log
@@ -14,6 +15,7 @@ class EglHelper {
 
     companion object {
         private const val TAG = "EglHelper"
+        private const val EGL_RECORDABLE_ANDROID = 0x3142
 
         private const val VERTEX_SHADER = """
             attribute vec4 aPosition;
@@ -113,6 +115,7 @@ class EglHelper {
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
+            EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_RENDERABLE_TYPE, 0x40,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL14.EGL_NONE
@@ -166,6 +169,10 @@ class EglHelper {
 
     fun swapBuffers(eglSurface: EGLSurface): Boolean {
         return EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+    }
+
+    fun setPresentationTime(eglSurface: EGLSurface, timestampNs: Long) {
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, timestampNs)
     }
 
     fun release() {

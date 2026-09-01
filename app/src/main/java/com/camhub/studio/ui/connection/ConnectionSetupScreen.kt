@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -82,6 +84,10 @@ import com.camhub.studio.ui.theme.TextMuted
 import com.camhub.studio.ui.theme.TextPrimary
 import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
+import com.camhub.studio.ui.components.CamHubScreenBackground
+import com.camhub.studio.ui.components.CamHubTopBar
+import com.camhub.studio.ui.components.StatusChip
+import com.camhub.studio.ui.components.CamHubSectionLabel
 
 @Composable
 fun ConnectionSetupScreen(
@@ -92,11 +98,7 @@ fun ConnectionSetupScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BackgroundDark)
-    ) {
+    CamHubScreenBackground {
         Column(modifier = Modifier.fillMaxSize()) {
             // Top bar
             ConnectionTopBar(
@@ -108,10 +110,19 @@ fun ConnectionSetupScreen(
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 16.dp),
+                    .widthIn(max = 880.dp)
+                    .align(Alignment.CenterHorizontally)
+                    .padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 item { Spacer(modifier = Modifier.height(4.dp)) }
+                item {
+                    ActiveNetworkCard(
+                        label = uiState.networkTransportLabel,
+                        hasEthernet = uiState.hasEthernet,
+                        hasWifi = uiState.hasWifi
+                    )
+                }
 
                 when (uiState.role) {
                     AppRole.CAMERA -> {
@@ -191,7 +202,8 @@ fun ConnectionSetupScreen(
             AnimatedVisibility(
                 visible = uiState.isReadyToProceed,
                 enter = fadeIn(),
-                exit = fadeOut()
+                exit = fadeOut(),
+                modifier = Modifier.navigationBarsPadding()
             ) {
                 ProceedButton(
                     role = uiState.role,
@@ -208,33 +220,68 @@ fun ConnectionSetupScreen(
 }
 
 @Composable
+private fun ActiveNetworkCard(
+    label: String,
+    hasEthernet: Boolean,
+    hasWifi: Boolean
+) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(GlassSurface, shape)
+            .border(1.dp, GlassBorder, shape)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                text = "AUTOMATIC NETWORK",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 10.sp,
+                color = TextTertiary,
+                letterSpacing = 1.2.sp
+            )
+            Text(
+                text = "Ethernet first · Wi-Fi fallback",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 12.sp,
+                color = TextSecondary
+            )
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            StatusChip(label = label, color = Primary)
+            Text(
+                text = "ETH ${if (hasEthernet) "READY" else "--"} · WIFI ${if (hasWifi) "READY" else "--"}",
+                fontFamily = SpaceGroteskFamily,
+                fontSize = 9.sp,
+                color = TextTertiary
+            )
+        }
+    }
+}
+
+@Composable
 private fun ConnectionTopBar(
     role: AppRole,
     onBack: () -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(BackgroundDarker)
-            .padding(horizontal = 8.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(
-                imageVector = Icons.Default.ArrowBack,
-                contentDescription = "Back",
-                tint = TextPrimary
+    CamHubTopBar(
+        title = if (role == AppRole.CAMERA) "Camera Setup" else "Director Setup",
+        subtitle = if (role == AppRole.CAMERA) {
+            "PREPARE THIS DEVICE AS A CAMERA SOURCE"
+        } else {
+            "FIND AND CONNECT CAMERA SOURCES"
+        },
+        onBack = onBack,
+        trailing = {
+            StatusChip(
+                label = if (role == AppRole.CAMERA) "CAMERA" else "HUB",
+                color = if (role == AppRole.CAMERA) CyanAccent else Primary
             )
         }
-        Text(
-            text = if (role == AppRole.CAMERA) "CAMERA SETUP" else "DIRECTOR SETUP",
-            fontFamily = SpaceGroteskFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = 16.sp,
-            color = TextPrimary,
-            letterSpacing = 1.sp
-        )
-    }
+    )
 }
 
 @Composable
@@ -796,13 +843,8 @@ private fun ConnectedCountBadge(count: Int) {
 
 @Composable
 private fun SectionLabel(text: String) {
-    Text(
-        text = text,
-        fontFamily = SpaceGroteskFamily,
-        fontWeight = FontWeight.Normal,
-        fontSize = 11.sp,
-        color = TextTertiary,
-        letterSpacing = 1.5.sp,
+    CamHubSectionLabel(
+        title = text,
         modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
     )
 }
@@ -814,7 +856,7 @@ private fun ProceedButton(
 ) {
     val label = when (role) {
         AppRole.CAMERA -> "Enter Camera HUD"
-        AppRole.DIRECTOR -> "Enter Director"
+        AppRole.DIRECTOR -> "Enter Hub"
     }
 
     Box(
@@ -834,6 +876,8 @@ private fun ProceedButton(
             onClick = onClick,
             modifier = Modifier
                 .fillMaxWidth()
+                .widthIn(max = 880.dp)
+                .align(Alignment.Center)
                 .height(52.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = Primary,

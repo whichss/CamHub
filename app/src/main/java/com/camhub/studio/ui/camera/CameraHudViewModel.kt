@@ -13,11 +13,13 @@ import com.camhub.studio.data.DeviceMonitor
 import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.audio.AudioCaptureService
 import com.camhub.studio.data.camera.CameraController
+import com.camhub.studio.data.camera.AppliedCameraPtz
 import com.camhub.studio.data.camera.CameraValueMapper
 import com.camhub.studio.data.gl.CameraGlRenderer
 import com.camhub.studio.data.network.H264Encoder
 import com.camhub.studio.data.network.HandshakeMessage
 import com.camhub.studio.data.network.PeerConnectionManager
+import com.camhub.studio.data.network.NetworkTransportManager
 import com.camhub.studio.data.network.StreamServer
 import com.camhub.studio.ui.camera.model.CameraUiState
 import com.camhub.studio.ui.camera.model.LensInfo
@@ -33,6 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import kotlin.math.abs
 
 @HiltViewModel
 class CameraHudViewModel @Inject constructor(
@@ -41,6 +44,7 @@ class CameraHudViewModel @Inject constructor(
     private val connectionManager: PeerConnectionManager,
     private val deviceMonitor: DeviceMonitor,
     private val audioCaptureService: AudioCaptureService,
+    private val networkTransportManager: NetworkTransportManager,
     private val streamingConfig: StreamingConfig
 ) : ViewModel() {
 
@@ -61,19 +65,42 @@ class CameraHudViewModel @Inject constructor(
     )
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
+    init {
+        viewModelScope.launch {
+            networkTransportManager.state.collect { networkState ->
+                _uiState.update {
+                    it.copy(networkTransportLabel = networkState.displayLabel)
+                }
+            }
+        }
+    }
+
     private fun streamStatusText(
         isLive: Boolean = streamServer.getPort() > 0,
         videoClientCount: Int = _uiState.value.videoClientCount,
+        bitrateMbps: Int = streamingConfig.bitrateMbps,
         label: String? = null
     ): String {
         val prefix = label ?: if (isLive) "LIVE" else "OFF"
-        return "$prefix ${streamingConfig.maxResolution}p${streamingConfig.fps} ${streamingConfig.bitrateMbps}M V$videoClientCount"
+        return "$prefix ${streamingConfig.maxResolution}p${streamingConfig.fps} ${bitrateMbps}M V$videoClientCount"
     }
 
     private fun handleRemoteCommand(msg: HandshakeMessage) {
         viewModelScope.launch {
             when (msg.command) {
                 "set_zoom" -> setZoom(msg.value)
+                "set_ptz" -> {
+                    val center = msg.stringValue.split(',')
+                    val centerX = center.getOrNull(0)?.toFloatOrNull() ?: 0.5f
+                    val centerY = center.getOrNull(1)?.toFloatOrNull() ?: 0.5f
+                    val applied = applyRemotePtz(msg.value, centerX, centerY)
+                    connectionManager.sendPtzAppliedToAll(
+                        requestId = msg.requestId,
+                        zoom = applied.zoomRatio,
+                        centerX = applied.centerX,
+                        centerY = applied.centerY
+                    )
+                }
                 "set_iso" -> {
                     val idx = _uiState.value.isoValues.indexOf(msg.stringValue)
                     if (idx >= 0) updateIso(idx)
@@ -98,7 +125,7 @@ class CameraHudViewModel @Inject constructor(
                 }
                 "set_stream_bitrate" -> {
                     val mbps = msg.value.toInt().coerceIn(1, 20)
-                    updateStreamBitrate(mbps)
+                    applyRemoteStreamBitrate(mbps)
                 }
                 "set_stream_fps" -> {
                     val fps = msg.value.toInt().coerceIn(1, 60)
@@ -125,6 +152,11 @@ class CameraHudViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 cameraController.hardwareState.collect { hw ->
+                    connectionManager.updateLocalCameraCapabilities(
+                        supportsRemotePtz = hw.supportsRemotePtz,
+                        minZoomRatio = hw.minZoomRatio,
+                        maxZoomRatio = hw.maxZoomRatio
+                    )
                     _uiState.update { ui ->
                         ui.copy(
                             isCameraBound = hw.isBound,
@@ -245,43 +277,45 @@ class CameraHudViewModel @Inject constructor(
     private var lastViewfinderSurface: Surface? = null
     private var lastSurfaceSize: Size? = null
     private var lastIsDevicePortrait: Boolean = false
+    private var lastIsPortraitOutput: Boolean = false
+    private var lastTargetRotation: Int = Surface.ROTATION_0
     private var streamRestartJob: Job? = null
+    private var zoomDriveJob: Job? = null
+    private var zoomVelocity: Float = 0f
 
     @ExperimentalCamera2Interop
-    fun onViewfinderSurfaceReady(lifecycleOwner: LifecycleOwner, viewfinderSurface: Surface, size: Size, isDevicePortrait: Boolean = false) {
+    fun onViewfinderSurfaceReady(
+        lifecycleOwner: LifecycleOwner,
+        viewfinderSurface: Surface,
+        size: Size,
+        isDevicePortrait: Boolean = false,
+        isPortraitOutput: Boolean = isDevicePortrait,
+        targetRotation: Int = Surface.ROTATION_0
+    ) {
         lastLifecycleOwner = lifecycleOwner
         lastViewfinderSurface = viewfinderSurface
         lastSurfaceSize = size
         lastIsDevicePortrait = isDevicePortrait
+        lastIsPortraitOutput = isPortraitOutput
+        lastTargetRotation = targetRotation
         try {
             val viewW = size.width
             val viewH = size.height
 
-            // Force 16:9 encode resolution, aligned to 16 for H.264 encoder compatibility
+            // Stream dimensions follow device orientation rather than the transient
+            // TextureView size reported while Android is rotating the layout.
             val maxRes = streamingConfig.maxResolution
-            val encW: Int
-            val encH: Int
-            if (viewW >= viewH) {
-                // Landscape (or portrait 16:9 view): 16:9
-                encH = (minOf(viewH, maxRes) / 16) * 16
-                encW = (encH * 16 / 9 + 15) / 16 * 16
+            val (encW, encH) = calculateStreamFrameDimensions(
+                maxResolution = maxRes,
+                isPortrait = isPortraitOutput
+            )
+            // CameraX still receives an upright portrait buffer while the phone is
+            // held vertically. A 16:9 portrait-UI mode crops that upright source
+            // into the landscape encoder surface instead of rotating the UI.
+            val (bufW, bufH) = if (isDevicePortrait && !isPortraitOutput) {
+                encH to encW
             } else {
-                // Portrait: 9:16
-                encW = (minOf(viewW, maxRes) / 16) * 16
-                encH = (encW * 16 / 9 + 15) / 16 * 16
-            }
-
-            // Portrait 16:9 mode: use portrait camera buffer for consistent
-            // texMatrix with 9:16 mode (prevents content inversion)
-            val isPortrait16x9 = isDevicePortrait && viewW >= viewH
-            val bufW: Int
-            val bufH: Int
-            if (isPortrait16x9) {
-                bufW = (minOf(viewW, maxRes) / 16) * 16
-                bufH = (bufW * 16 / 9 + 15) / 16 * 16
-            } else {
-                bufW = encW
-                bufH = encH
+                encW to encH
             }
 
             // 1. Start Surface-mode encoder at 16:9
@@ -307,6 +341,10 @@ class CameraHudViewModel @Inject constructor(
             //    Viewfinder uses actual surface dimensions; encoder uses 16-aligned dims
             val glRenderer = CameraGlRenderer()
             glRenderer.start(encW, encH, viewfinderSurface, encoderInputSurface, viewW, viewH, bufW, bufH, isDevicePortrait)
+            glRenderer.updateRotation(surfaceRotationToDegrees(targetRotation))
+            glRenderer.onFrameSubmitted = { presentationTimeUs, captureAtWallMs ->
+                encoder.registerInputTiming(presentationTimeUs, captureAtWallMs)
+            }
 
             // Wait for GL thread to create cameraSurface (poll instead of fixed sleep)
             var waitMs = 0
@@ -334,7 +372,15 @@ class CameraHudViewModel @Inject constructor(
             // SurfaceTexture.getTransformMatrix() already includes sensor→display rotation,
             // so no additional rotation is needed from TransformationInfo.
             // Don't hardcode targetRotation — CameraController uses actual display rotation
-            cameraController.bindCameraWithSurface(lifecycleOwner, cameraSurface, Size(bufW, bufH))
+            cameraController.onPreviewTransformChanged = { rotationDegrees ->
+                glRenderer.updateRotation(rotationDegrees)
+            }
+            cameraController.bindCameraWithSurface(
+                lifecycleOwner = lifecycleOwner,
+                cameraSurface = cameraSurface,
+                resolution = Size(bufW, bufH),
+                targetRotation = targetRotation
+            )
 
             cameraGlRenderer = glRenderer
             surfaceEncoder = encoder
@@ -424,7 +470,21 @@ class CameraHudViewModel @Inject constructor(
 
         Log.d(TAG, "Restarting surface pipeline for stream quality change")
         cleanupSurfacePipeline()
-        onViewfinderSurfaceReady(lifecycleOwner, surface, size, lastIsDevicePortrait)
+        onViewfinderSurfaceReady(
+            lifecycleOwner = lifecycleOwner,
+            viewfinderSurface = surface,
+            size = size,
+            isDevicePortrait = lastIsDevicePortrait,
+            isPortraitOutput = lastIsPortraitOutput,
+            targetRotation = lastTargetRotation
+        )
+    }
+
+    private fun surfaceRotationToDegrees(rotation: Int): Int = when (rotation) {
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
     }
 
     @ExperimentalCamera2Interop
@@ -526,6 +586,59 @@ class CameraHudViewModel @Inject constructor(
         _uiState.update { it.copy(zoomRatio = clamped, selectedZoomIndex = closestIndex) }
     }
 
+    /**
+     * Drives zoom like a spring-loaded rocker. The signed input is -1..1:
+     * farther from center means faster zoom, and zero immediately stops it.
+     */
+    fun setZoomVelocity(velocity: Float) {
+        zoomVelocity = velocity.coerceIn(-1f, 1f)
+        if (abs(zoomVelocity) < 0.01f) {
+            zoomDriveJob?.cancel()
+            zoomDriveJob = null
+            return
+        }
+        if (zoomDriveJob?.isActive == true) return
+
+        zoomDriveJob = viewModelScope.launch {
+            var previousNs = System.nanoTime()
+            while (isActive) {
+                val nowNs = System.nanoTime()
+                val deltaSeconds = ((nowNs - previousNs) / 1_000_000_000f)
+                    .coerceIn(0f, 0.1f)
+                previousNs = nowNs
+                val state = _uiState.value
+                val nextRatio = calculateVelocityZoomRatio(
+                    currentRatio = state.zoomRatio,
+                    minRatio = state.minZoomRatio,
+                    maxRatio = state.maxZoomRatio,
+                    leverPosition = zoomVelocity,
+                    deltaSeconds = deltaSeconds
+                )
+                if (nextRatio != state.zoomRatio) setZoom(nextRatio)
+                delay(32)
+            }
+        }
+    }
+
+    @ExperimentalCamera2Interop
+    private fun applyRemotePtz(
+        ratio: Float,
+        centerX: Float,
+        centerY: Float
+    ): AppliedCameraPtz {
+        val clamped = ratio.coerceIn(_uiState.value.minZoomRatio, _uiState.value.maxZoomRatio)
+        val applied = cameraController.setPtz(clamped, centerX, centerY)
+        if (applied == null) {
+            cameraController.setZoomRatio(clamped)
+        }
+        _uiState.update { it.copy(zoomRatio = clamped) }
+        return applied ?: AppliedCameraPtz(
+            zoomRatio = clamped,
+            centerX = 0.5f,
+            centerY = 0.5f
+        )
+    }
+
     fun setZoomByIndex(index: Int) {
         val zoomStr = _uiState.value.zoomSteps.getOrNull(index) ?: return
         val ratio = CameraValueMapper.zoomStepToFloat(zoomStr)
@@ -581,7 +694,21 @@ class CameraHudViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 streamBitrateMbps = mbps,
-                bitrate = streamStatusText()
+                bitrate = streamStatusText(bitrateMbps = mbps)
+            )
+        }
+    }
+
+    /** Apply hub ABR for this session without overwriting the camera's saved ceiling. */
+    private fun applyRemoteStreamBitrate(mbps: Int) {
+        val clamped = mbps.coerceIn(1, 20)
+        val bitrate = clamped * 1_000_000
+        surfaceEncoder?.setBitrate(bitrate)
+        streamServer.updateBitrate(bitrate)
+        _uiState.update {
+            it.copy(
+                streamBitrateMbps = clamped,
+                bitrate = streamStatusText(bitrateMbps = clamped)
             )
         }
     }
@@ -602,6 +729,8 @@ class CameraHudViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        zoomDriveJob?.cancel()
+        connectionManager.onCommandReceived = null
         try { cleanupSurfacePipeline() } catch (_: Exception) {}
         try { cameraController.unbindCamera() } catch (_: Exception) {}
         try { deviceMonitor.stopMonitoring() } catch (_: Exception) {}

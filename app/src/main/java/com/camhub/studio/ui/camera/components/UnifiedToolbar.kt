@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import com.camhub.studio.ui.camera.model.MicDirection
 import com.camhub.studio.ui.camera.model.ToolMode
 import com.camhub.studio.ui.components.HorizontalControlSlider
+import com.camhub.studio.ui.components.ZoomVelocityControl
 import com.camhub.studio.ui.theme.AmberYellow
 import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.CyanAccent
@@ -55,11 +56,7 @@ fun UnifiedToolbar(
     onResetAuto: () -> Unit,
     // Zoom
     zoomRatio: Float,
-    minZoomRatio: Float,
-    maxZoomRatio: Float,
-    zoomSteps: List<String>,
-    selectedZoomIndex: Int,
-    onZoomChanged: (Float) -> Unit,
+    onZoomVelocityChanged: (Float) -> Unit,
     // ISO
     isoValues: List<String>,
     selectedIsoIndex: Int,
@@ -102,18 +99,9 @@ fun UnifiedToolbar(
             ) {
                 when (activeToolMode) {
                     ToolMode.ZOOM -> {
-                        val normalized = if (maxZoomRatio > minZoomRatio) {
-                            (zoomRatio - minZoomRatio) / (maxZoomRatio - minZoomRatio)
-                        } else 0f
-                        HorizontalControlSlider(
-                            values = zoomSteps,
-                            selectedIndex = selectedZoomIndex,
-                            onIndexChanged = {},
-                            continuousValue = normalized,
-                            onContinuousValueChanged = { fraction ->
-                                val ratio = minZoomRatio + fraction * (maxZoomRatio - minZoomRatio)
-                                onZoomChanged(ratio)
-                            }
+                        ZoomVelocityControl(
+                            zoomRatio = zoomRatio,
+                            onVelocityChanged = onZoomVelocityChanged
                         )
                     }
                     ToolMode.ISO -> HorizontalControlSlider(

@@ -2,6 +2,7 @@ package com.camhub.studio.data.camera
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Rect
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
@@ -51,7 +52,16 @@ data class CameraHardwareState(
     val exposureTimeRange: Range<Long>? = null,
     val minFocusDistance: Float = 0f,
     val isManualExposureSupported: Boolean = false,
+    val supportsRemotePtz: Boolean = false,
+    val minZoomRatio: Float = 1f,
+    val maxZoomRatio: Float = 1f,
     val error: String? = null
+)
+
+data class AppliedCameraPtz(
+    val zoomRatio: Float,
+    val centerX: Float,
+    val centerY: Float
 )
 
 @Singleton
@@ -67,7 +77,9 @@ class CameraController @Inject constructor(
     private var activeRecording: Recording? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var imageAnalysis: ImageAnalysis? = null
-    private val analysisExecutor = Executors.newSingleThreadExecutor()
+    private val analysisExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "CameraAnalysis").apply { isDaemon = true }
+    }
 
     var onFrameCallback: ((ImageProxy) -> Unit)? = null
 
@@ -85,7 +97,9 @@ class CameraController @Inject constructor(
 
     private var currentCameraSurface: Surface? = null
     private var currentSurfaceResolution: Size? = null
+    private var currentTargetRotation: Int = Surface.ROTATION_0
     private var currentSensorOrientation: Int = 90
+    private var activeSensorArray: Rect? = null
     var onRotationChanged: ((Int) -> Unit)? = null
     /**
      * Callback with device rotation degrees for GL renderer.
@@ -98,11 +112,13 @@ class CameraController @Inject constructor(
     fun bindCameraWithSurface(
         lifecycleOwner: LifecycleOwner,
         cameraSurface: Surface,
-        resolution: Size
+        resolution: Size,
+        targetRotation: Int
     ) {
         currentLifecycleOwner = lifecycleOwner
         currentCameraSurface = cameraSurface
         currentSurfaceResolution = resolution
+        currentTargetRotation = targetRotation
         currentPreviewView = null
 
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -115,10 +131,6 @@ class CameraController @Inject constructor(
                 val provider = providerFuture.get()
                 cameraProvider = provider
 
-                // Use actual display rotation so CameraX selects correct resolution
-                val display = (context as? android.app.Activity)?.windowManager?.defaultDisplay
-                val actualDisplayRotation = display?.rotation ?: Surface.ROTATION_0
-
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
@@ -127,7 +139,7 @@ class CameraController @Inject constructor(
                     .build()
 
                 val preview = Preview.Builder()
-                    .setTargetRotation(actualDisplayRotation)
+                    .setTargetRotation(targetRotation)
                     .setResolutionSelector(resolutionSelector)
                     .build().also { prev ->
                         prev.surfaceProvider = Preview.SurfaceProvider { request ->
@@ -197,6 +209,11 @@ class CameraController @Inject constructor(
                     val minFocusDist = camera2Info.getCameraCharacteristic(
                         CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
                     ) ?: 0f
+                    activeSensorArray = camera2Info.getCameraCharacteristic(
+                        CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
+                    )
+                    val minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f
+                    val maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
 
                     // Enable continuous AF by default
                     enableContinuousAf()
@@ -207,14 +224,17 @@ class CameraController @Inject constructor(
                     ) ?: 90
                     // SurfaceTexture's getTransformMatrix() handles sensor orientation.
                     // Only pass device rotation for orientation change compensation.
-                    onPreviewTransformChanged?.invoke(surfaceRotationToDegrees(actualDisplayRotation))
+                    onPreviewTransformChanged?.invoke(surfaceRotationToDegrees(targetRotation))
 
                     _hardwareState.value = CameraHardwareState(
                         isBound = true,
                         isoRange = isoRange,
                         exposureTimeRange = exposureRange,
                         minFocusDistance = minFocusDist,
-                        isManualExposureSupported = isoRange != null && exposureRange != null
+                        isManualExposureSupported = isoRange != null && exposureRange != null,
+                        supportsRemotePtz = activeSensorArray != null && maxZoom > minZoom,
+                        minZoomRatio = minZoom,
+                        maxZoomRatio = maxZoom
                     )
                 }
             } catch (e: Exception) {
@@ -324,6 +344,11 @@ class CameraController @Inject constructor(
                     val minFocusDist = camera2Info.getCameraCharacteristic(
                         CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
                     ) ?: 0f
+                    activeSensorArray = camera2Info.getCameraCharacteristic(
+                        CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
+                    )
+                    val minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f
+                    val maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
 
                     // Enable continuous AF by default
                     enableContinuousAf()
@@ -333,7 +358,10 @@ class CameraController @Inject constructor(
                         isoRange = isoRange,
                         exposureTimeRange = exposureRange,
                         minFocusDistance = minFocusDist,
-                        isManualExposureSupported = isoRange != null && exposureRange != null
+                        isManualExposureSupported = isoRange != null && exposureRange != null,
+                        supportsRemotePtz = activeSensorArray != null && maxZoom > minZoom,
+                        minZoomRatio = minZoom,
+                        maxZoomRatio = maxZoom
                     )
                 }
             } catch (e: Exception) {
@@ -359,7 +387,7 @@ class CameraController @Inject constructor(
         if (preview != null) {
             bindCamera(lifecycle, preview)
         } else if (surface != null && resolution != null) {
-            bindCameraWithSurface(lifecycle, surface, resolution)
+            bindCameraWithSurface(lifecycle, surface, resolution, currentTargetRotation)
         }
     }
 
@@ -380,6 +408,7 @@ class CameraController @Inject constructor(
         currentPreviewView = null
         currentCameraSurface = null
         currentSurfaceResolution = null
+        activeSensorArray = null
         currentLifecycleOwner = null
         lastManualIso = null
         lastManualShutterNanos = null
@@ -578,6 +607,36 @@ class CameraController @Inject constructor(
 
     fun setZoomRatio(ratio: Float) {
         camera?.cameraControl?.setZoomRatio(ratio)
+    }
+
+    @androidx.camera.camera2.interop.ExperimentalCamera2Interop
+    fun setPtz(zoomRatio: Float, centerX: Float, centerY: Float): AppliedCameraPtz? {
+        val sensor = activeSensorArray ?: return null
+        val control = camera2Control ?: return null
+        val minZoom = getMinZoomRatio()
+        val maxZoom = getMaxZoomRatio()
+        if (maxZoom <= minZoom) return null
+        val zoom = zoomRatio.coerceIn(minZoom, maxZoom)
+        val cropWidth = (sensor.width() / zoom).toInt().coerceAtLeast(2)
+        val cropHeight = (sensor.height() / zoom).toInt().coerceAtLeast(2)
+        val targetCenterX = sensor.left + centerX.coerceIn(0f, 1f) * sensor.width()
+        val targetCenterY = sensor.top + centerY.coerceIn(0f, 1f) * sensor.height()
+        val left = (targetCenterX - cropWidth / 2f).toInt()
+            .coerceIn(sensor.left, sensor.right - cropWidth)
+        val top = (targetCenterY - cropHeight / 2f).toInt()
+            .coerceIn(sensor.top, sensor.bottom - cropHeight)
+        val crop = Rect(left, top, left + cropWidth, top + cropHeight)
+        val options = CaptureRequestOptions.Builder()
+            .setCaptureRequestOption(CaptureRequest.SCALER_CROP_REGION, crop)
+            .build()
+        control.addCaptureRequestOptions(options)
+        return AppliedCameraPtz(
+            zoomRatio = sensor.width().toFloat() / crop.width().coerceAtLeast(1),
+            centerX = ((crop.exactCenterX() - sensor.left) / sensor.width())
+                .coerceIn(0f, 1f),
+            centerY = ((crop.exactCenterY() - sensor.top) / sensor.height())
+                .coerceIn(0f, 1f)
+        )
     }
 
     fun getMinZoomRatio(): Float =

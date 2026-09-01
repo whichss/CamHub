@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -67,7 +68,9 @@ private fun ControlButton(
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
             .background(backgroundColor.copy(alpha = alpha))
+            .border(1.dp, textColor.copy(alpha = 0.16f * alpha), RoundedCornerShape(6.dp))
             .clickable(enabled = enabled, onClick = onClick)
+            .heightIn(min = 36.dp)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -220,7 +223,8 @@ private fun ControlBarHorizontal(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(SurfaceDark)
+            .background(BackgroundDark)
+            .border(1.dp, GlassBorder, RoundedCornerShape(0.dp))
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -233,14 +237,14 @@ private fun ControlBarHorizontal(
         ) {
             if (!isRecording) {
                 ControlButton(
-                    label = "REC",
+                    label = "PGM REC",
                     backgroundColor = ElectricRed,
                     textColor = TextPrimary,
                     onClick = onRecord
                 )
             } else {
                 ControlButton(
-                    label = "STOP",
+                    label = "PGM STOP",
                     backgroundColor = SurfaceLight,
                     textColor = ElectricRed,
                     onClick = onStop,
@@ -302,7 +306,7 @@ private fun ControlBarHorizontal(
 
         // Auto-record cameras toggle
         ControlButton(
-            label = "CAM REC",
+            label = if (autoRecordCameras) "ISO ARMED" else "ISO ARM",
             backgroundColor = if (autoRecordCameras) AmberYellow.copy(alpha = 0.2f) else GlassSurface,
             textColor = if (autoRecordCameras) AmberYellow else TextTertiary,
             onClick = onToggleAutoRecord
@@ -330,7 +334,8 @@ private fun ControlBarVertical(
     Column(
         modifier = modifier
             .width(72.dp)
-            .background(SurfaceDark)
+            .background(BackgroundDark)
+            .border(1.dp, GlassBorder, RoundedCornerShape(0.dp))
             .verticalScroll(rememberScrollState())
             .padding(vertical = 8.dp, horizontal = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -339,14 +344,14 @@ private fun ControlBarVertical(
         // Recording controls
         if (!isRecording) {
             ControlButton(
-                label = "REC",
+                label = "PGM REC",
                 backgroundColor = ElectricRed,
                 textColor = TextPrimary,
                 onClick = onRecord
             )
         } else {
             ControlButton(
-                label = "STOP",
+                label = "PGM STOP",
                 backgroundColor = SurfaceLight,
                 textColor = ElectricRed,
                 onClick = onStop,
@@ -410,6 +415,17 @@ private fun ControlBarVertical(
                 modifier = Modifier.size(18.dp)
             )
         }
+
+        ControlButton(
+            label = if (autoRecordCameras) "ISO ARMED" else "ISO ARM",
+            backgroundColor = if (autoRecordCameras) {
+                AmberYellow.copy(alpha = 0.2f)
+            } else {
+                GlassSurface
+            },
+            textColor = if (autoRecordCameras) AmberYellow else TextTertiary,
+            onClick = onToggleAutoRecord
+        )
 
     }
 }

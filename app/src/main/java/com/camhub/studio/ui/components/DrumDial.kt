@@ -30,6 +30,7 @@ fun DrumDial(
     values: List<String>,
     selectedIndex: Int,
     onIndexChanged: (Int) -> Unit,
+    enabled: Boolean = true,
     visibleItems: Int = 5,
     modifier: Modifier = Modifier
 ) {
@@ -42,8 +43,8 @@ fun DrumDial(
 
     Canvas(
         modifier = modifier
-            .pointerInput(values.size) {
-                detectVerticalDragGestures(
+            .pointerInput(values.size, enabled) {
+                if (enabled) detectVerticalDragGestures(
                     onDragStart = { dragAccumulator = 0f },
                     onDragEnd = {
                         dragAccumulator = 0f
@@ -79,7 +80,9 @@ fun DrumDial(
 
             val distFromCenter = abs(offset).toFloat()
             val normalizedDist = distFromCenter / half.toFloat()
-            val alpha = (1f - normalizedDist * 0.7f).coerceIn(0.15f, 1f)
+            val enabledAlpha = if (enabled) 1f else 0.35f
+            val alpha = (1f - normalizedDist * 0.7f)
+                .coerceIn(0.15f, 1f) * enabledAlpha
             val fontSize = maxFontSize - (maxFontSize - minFontSize) * normalizedDist
             val yCenter = centerY + offset * itemHeight
 
@@ -106,7 +109,7 @@ fun DrumDial(
         }
 
         // Selection indicator lines
-        val lineColor = Primary.copy(alpha = 0.6f)
+        val lineColor = Primary.copy(alpha = if (enabled) 0.6f else 0.18f)
         val lineY1 = centerY - itemHeight / 2f
         val lineY2 = centerY + itemHeight / 2f
         val lineInset = w * 0.1f

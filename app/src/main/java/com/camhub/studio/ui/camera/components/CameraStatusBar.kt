@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +25,7 @@ import com.camhub.studio.ui.theme.TextTertiary
 fun CameraStatusBar(
     bitrate: String,
     wifiStrength: Int,
+    networkTransportLabel: String,
     storageUsedGb: Float,
     storageTotalGb: Float,
     modifier: Modifier = Modifier
@@ -39,15 +41,20 @@ fun CameraStatusBar(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val isConnected = wifiStrength > 0
+            val isEthernet = "LAN" in networkTransportLabel
+            val isConnected = isEthernet || wifiStrength > 0
             Icon(
-                imageVector = if (isConnected) Icons.Default.Wifi else Icons.Default.WifiOff,
-                contentDescription = "WiFi",
+                imageVector = when {
+                    isEthernet -> Icons.Default.SettingsEthernet
+                    isConnected -> Icons.Default.Wifi
+                    else -> Icons.Default.WifiOff
+                },
+                contentDescription = networkTransportLabel,
                 tint = if (isConnected) NeonGreen else TextTertiary,
                 modifier = Modifier.size(16.dp)
             )
             Text(
-                text = bitrate,
+                text = "$bitrate · $networkTransportLabel",
                 color = if (isLive) NeonGreen else TextSecondary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,

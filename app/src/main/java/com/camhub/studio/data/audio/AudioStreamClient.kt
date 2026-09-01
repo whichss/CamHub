@@ -3,9 +3,11 @@ package com.camhub.studio.data.audio
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.net.Network
 import android.os.Build
 import android.util.Log
 import com.camhub.studio.data.network.FrameCipher
+import com.camhub.studio.data.network.NetworkTransportManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,7 +28,9 @@ data class AudioChannelState(
 )
 
 @Singleton
-class AudioStreamClient @Inject constructor() {
+class AudioStreamClient @Inject constructor(
+    private val networkTransportManager: NetworkTransportManager
+) {
 
     companion object {
         private const val TAG = "AudioStreamClient"
@@ -324,7 +328,8 @@ class AudioStreamClient @Inject constructor() {
         cameraName: String,
         ip: String,
         audioPort: Int,
-        sessionKey: ByteArray? = null
+        sessionKey: ByteArray? = null,
+        network: Network? = null
     ) {
         // Cancel existing stream for this camera
         streamJobs.remove(cameraName)?.cancel()
@@ -356,7 +361,8 @@ class AudioStreamClient @Inject constructor() {
                     resetAudioReceiveStateForReconnect(cameraName)
                     updateChannelState(cameraName, AudioChannelState(statusText = "Connecting"))
 
-                    socket = Socket(ip, audioPort).apply {
+                    socket = networkTransportManager.createBoundSocket(network).apply {
+                        connect(java.net.InetSocketAddress(ip, audioPort), 2_500)
                         soTimeout = 15_000
                         keepAlive = true
                         tcpNoDelay = true

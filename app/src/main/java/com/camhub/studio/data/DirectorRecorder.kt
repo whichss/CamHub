@@ -3,7 +3,9 @@ package com.camhub.studio.data
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Rect
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Paint
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -13,6 +15,9 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
+import com.camhub.studio.data.gl.SpatialUpscaleWindowRenderer
+import com.camhub.studio.data.ptz.HubPtzTransform
+import com.camhub.studio.data.ptz.HybridPtzController
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,7 +40,9 @@ data class RecordingInfo(
     val isPaused: Boolean = false,
     val startTimeMs: Long = 0L,
     val pausedDurationMs: Long = 0L,
-    val outputPath: String = ""
+    val outputPath: String = "",
+    val isSpatialUpscaling: Boolean = false,
+    val outputHeight: Int = 0
 )
 
 @Singleton
@@ -58,6 +65,7 @@ class DirectorRecorder @Inject constructor(
     private var encoder: MediaCodec? = null
     private var muxer: MediaMuxer? = null
     private var inputSurface: Surface? = null
+    private var spatialUpscaleRenderer: SpatialUpscaleWindowRenderer? = null
     private var videoTrackIndex = -1
     private var muxerStarted = false
     private var drainJob: Job? = null
@@ -84,7 +92,8 @@ class DirectorRecorder @Inject constructor(
     fun startRecording(
         width: Int,
         height: Int,
-        sessionTimestamp: String = ""
+        sessionTimestamp: String = "",
+        useSpatialUpscaling: Boolean = false
     ): String? {
         if (_recordingInfo.value.isRecording) return null
 
@@ -114,6 +123,32 @@ class DirectorRecorder @Inject constructor(
                 start()
             }
 
+            if (useSpatialUpscaling) {
+                val encoderSurface = inputSurface
+                    ?: throw IllegalStateException("Encoder input surface is unavailable")
+                val glRenderer = SpatialUpscaleWindowRenderer(
+                    surface = encoderSurface,
+                    outputWidth = w,
+                    outputHeight = h,
+                    onFrameRendered = { rendered ->
+                        if (rendered) {
+                            frameCount++
+                            if (frameCount == 1) {
+                                Log.d(TAG, "First frame rendered to encoder by OpenGL")
+                            }
+                        } else {
+                            noteDroppedRecordFrame()
+                        }
+                        frameWriteInFlight.set(false)
+                    }
+                )
+                if (glRenderer.start()) {
+                    spatialUpscaleRenderer = glRenderer
+                } else {
+                    Log.w(TAG, "OpenGL recording unavailable; using Canvas fallback")
+                }
+            }
+
             val muxerResult = createMuxer(sessionTimestamp)
             muxer = muxerResult.first
             val displayPath = muxerResult.second
@@ -126,7 +161,9 @@ class DirectorRecorder @Inject constructor(
             _recordingInfo.value = RecordingInfo(
                 isRecording = true,
                 startTimeMs = System.currentTimeMillis(),
-                outputPath = displayPath
+                outputPath = displayPath,
+                isSpatialUpscaling = spatialUpscaleRenderer != null,
+                outputHeight = h
             )
 
             drainJob = scope.launch { drainEncoder() }
@@ -207,10 +244,22 @@ class DirectorRecorder @Inject constructor(
         pendingMediaUri = null
     }
 
-    fun onFrame(bitmap: Bitmap) {
+    fun onFrame(
+        bitmap: Bitmap,
+        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM
+    ) {
         if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused) return
         if (!frameWriteInFlight.compareAndSet(false, true)) {
             noteDroppedRecordFrame()
+            return
+        }
+
+        val glRenderer = spatialUpscaleRenderer
+        if (glRenderer != null) {
+            if (!glRenderer.render(bitmap, System.nanoTime(), ptzTransform)) {
+                frameWriteInFlight.set(false)
+                noteDroppedRecordFrame()
+            }
             return
         }
 
@@ -221,7 +270,7 @@ class DirectorRecorder @Inject constructor(
                     if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused || stopRequested) {
                         return@execute
                     }
-                    drawFrameToSurface(surface, bitmap)
+                    drawFrameToSurface(surface, bitmap, ptzTransform)
                 } finally {
                     frameWriteInFlight.set(false)
                 }
@@ -232,7 +281,11 @@ class DirectorRecorder @Inject constructor(
         }
     }
 
-    private fun drawFrameToSurface(surface: Surface, bitmap: Bitmap) {
+    private fun drawFrameToSurface(
+        surface: Surface,
+        bitmap: Bitmap,
+        ptzTransform: HubPtzTransform
+    ) {
         var posted = false
         val canvas = try {
             surface.lockCanvas(null)
@@ -242,11 +295,23 @@ class DirectorRecorder @Inject constructor(
         } ?: return
 
         try {
+            canvas.drawColor(Color.BLACK)
+            val fitScale = minOf(
+                canvas.width.toFloat() / bitmap.width,
+                canvas.height.toFloat() / bitmap.height
+            )
+            val outputScale = fitScale * ptzTransform.scale
+            val matrix = Matrix().apply {
+                setScale(outputScale, outputScale)
+                postTranslate(
+                    canvas.width / 2f - ptzTransform.centerX * bitmap.width * outputScale,
+                    canvas.height / 2f - ptzTransform.centerY * bitmap.height * outputScale
+                )
+            }
             canvas.drawBitmap(
                 bitmap,
-                null,
-                Rect(0, 0, canvas.width, canvas.height),
-                null
+                matrix,
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
             )
             surface.unlockCanvasAndPost(canvas)
             posted = true
@@ -294,11 +359,19 @@ class DirectorRecorder @Inject constructor(
         if (!_recordingInfo.value.isRecording) return
         val path = currentOutputPath
 
-        _recordingInfo.value = _recordingInfo.value.copy(isRecording = false, isPaused = false)
+        _recordingInfo.value = _recordingInfo.value.copy(
+            isRecording = false,
+            isPaused = false,
+            isSpatialUpscaling = false
+        )
         pauseStartTimeMs = 0L
 
         scope.launch {
             stopRequested = true
+
+            spatialUpscaleRenderer?.release()
+            spatialUpscaleRenderer = null
+            frameWriteInFlight.set(false)
 
             // Signal EOS to encoder
             try {
@@ -380,6 +453,9 @@ class DirectorRecorder @Inject constructor(
     }
 
     private fun releaseResources() {
+        try { spatialUpscaleRenderer?.release() } catch (_: Exception) {}
+        spatialUpscaleRenderer = null
+        frameWriteInFlight.set(false)
         try { encoder?.stop() } catch (e: Exception) {
             Log.w(TAG, "encoder.stop() error: ${e.message}")
         }
