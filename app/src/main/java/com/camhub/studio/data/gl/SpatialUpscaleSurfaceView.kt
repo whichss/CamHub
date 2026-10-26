@@ -16,6 +16,8 @@ data class SpatialUpscaleFrame(
     val cameraName: String,
     val frameSequence: Long,
     val ptzTransform: HubPtzTransform,
+    val transition: PgmTransitionFrame?,
+    val enableSpatialReconstruction: Boolean,
     val onFrameSubmitted: (String, Long, Long) -> Unit
 )
 
@@ -31,6 +33,7 @@ class SpatialUpscaleSurfaceView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : GLSurfaceView(context, attrs) {
     private val upscaleRenderer = SpatialUpscaleRenderer()
+    private var fixedOutputWidth = 0
     private var fixedOutputHeight = 0
 
     init {
@@ -46,6 +49,8 @@ class SpatialUpscaleSurfaceView @JvmOverloads constructor(
         cameraName: String,
         frameSequence: Long,
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+        transition: PgmTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean = true,
         onFrameSubmitted: (String, Long, Long) -> Unit
     ) {
         if (bitmap.isRecycled || frameSequence <= 0L) return
@@ -54,16 +59,46 @@ class SpatialUpscaleSurfaceView @JvmOverloads constructor(
                 cameraName,
                 frameSequence,
                 ptzTransform,
+                transition,
+                enableSpatialReconstruction,
                 onFrameSubmitted
             )
         ) return
         requestRender()
     }
 
-    fun setOutputHeight(height: Int) {
-        if (height <= 0 || height == fixedOutputHeight) return
-        fixedOutputHeight = height
-        holder.setFixedSize(height * 16 / 9, height)
+    /**
+     * A compact in-app PGM preview should render at its real view size. Forcing a
+     * 1920x1080 Surface behind a small Compose card wastes fill-rate and texture
+     * bandwidth. A clean external feed may opt into a fixed output buffer because
+     * its surface is the actual programme output.
+     */
+    fun setOutputSize(
+        shortEdge: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        forceFixedBuffer: Boolean = false
+    ) {
+        if (!forceFixedBuffer || shortEdge <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+            if (fixedOutputWidth != 0 || fixedOutputHeight != 0) {
+                fixedOutputWidth = 0
+                fixedOutputHeight = 0
+                holder.setSizeFromLayout()
+            }
+            return
+        }
+        val evenShortEdge = shortEdge.coerceAtLeast(2) and 0x7FFFFFFE
+        val sourceShortEdge = minOf(sourceWidth, sourceHeight)
+        val sourceLongEdge = maxOf(sourceWidth, sourceHeight)
+        val evenLongEdge = (
+            evenShortEdge.toLong() * sourceLongEdge / sourceShortEdge
+        ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() and 0x7FFFFFFE
+        val outputWidth = if (sourceWidth >= sourceHeight) evenLongEdge else evenShortEdge
+        val outputHeight = if (sourceHeight > sourceWidth) evenLongEdge else evenShortEdge
+        if (outputWidth == fixedOutputWidth && outputHeight == fixedOutputHeight) return
+        fixedOutputWidth = outputWidth
+        fixedOutputHeight = outputHeight
+        holder.setFixedSize(outputWidth, outputHeight)
     }
 }
 
@@ -76,6 +111,8 @@ private class SpatialUpscaleRenderer : GLSurfaceView.Renderer {
     private var lastOfferedFrameSequence = 0L
     private var lastDrawnCameraName = ""
     private var lastDrawnFrameSequence = 0L
+    private var lastDrawnTransitionCameraName = ""
+    private var lastDrawnTransitionFrameSequence = 0L
 
     @Synchronized
     fun offerFrame(
@@ -83,15 +120,29 @@ private class SpatialUpscaleRenderer : GLSurfaceView.Renderer {
         cameraName: String,
         frameSequence: Long,
         ptzTransform: HubPtzTransform,
+        transition: PgmTransitionFrame?,
+        enableSpatialReconstruction: Boolean,
         onFrameSubmitted: (String, Long, Long) -> Unit
     ): Boolean {
-        if (cameraName == lastOfferedCameraName && frameSequence <= lastOfferedFrameSequence) {
+        if (
+            transition == null &&
+            cameraName == lastOfferedCameraName &&
+            frameSequence <= lastOfferedFrameSequence
+        ) {
             return false
         }
         lastOfferedCameraName = cameraName
         lastOfferedFrameSequence = frameSequence
         pendingFrame.set(
-            SpatialUpscaleFrame(bitmap, cameraName, frameSequence, ptzTransform, onFrameSubmitted)
+            SpatialUpscaleFrame(
+                bitmap,
+                cameraName,
+                frameSequence,
+                ptzTransform,
+                transition,
+                enableSpatialReconstruction,
+                onFrameSubmitted
+            )
         )
         return true
     }
@@ -107,7 +158,15 @@ private class SpatialUpscaleRenderer : GLSurfaceView.Renderer {
 
     override fun onDrawFrame(gl: GL10?) {
         val frame = pendingFrame.get() ?: return
-        if (!glProgram.render(frame.bitmap, outputWidth, outputHeight, frame.ptzTransform)) return
+        if (!glProgram.render(
+                frame.bitmap,
+                outputWidth,
+                outputHeight,
+                frame.ptzTransform,
+                frame.transition,
+                frame.enableSpatialReconstruction
+            )
+        ) return
 
         if (
             frame.cameraName != lastDrawnCameraName ||
@@ -118,6 +177,20 @@ private class SpatialUpscaleRenderer : GLSurfaceView.Renderer {
             frame.onFrameSubmitted(
                 frame.cameraName,
                 frame.frameSequence,
+                SystemClock.elapsedRealtime()
+            )
+        }
+        frame.transition?.takeIf {
+            it.frameSequence > 0L && (
+                it.cameraName != lastDrawnTransitionCameraName ||
+                    it.frameSequence > lastDrawnTransitionFrameSequence
+                )
+        }?.let { transition ->
+            lastDrawnTransitionCameraName = transition.cameraName
+            lastDrawnTransitionFrameSequence = transition.frameSequence
+            frame.onFrameSubmitted(
+                transition.cameraName,
+                transition.frameSequence,
                 SystemClock.elapsedRealtime()
             )
         }

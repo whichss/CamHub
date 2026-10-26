@@ -151,6 +151,7 @@ private fun TransitionPill(
 @Composable
 fun ControlBar(
     isRecording: Boolean,
+    isStartingRecording: Boolean = false,
     isPaused: Boolean,
     selectedTransition: TransitionType,
     isVertical: Boolean = false,
@@ -169,6 +170,7 @@ fun ControlBar(
     if (isVertical) {
         ControlBarVertical(
             isRecording = isRecording,
+            isStartingRecording = isStartingRecording,
             isPaused = isPaused,
             selectedTransition = selectedTransition,
             autoRecordCameras = autoRecordCameras,
@@ -186,6 +188,7 @@ fun ControlBar(
     } else {
         ControlBarHorizontal(
             isRecording = isRecording,
+            isStartingRecording = isStartingRecording,
             isPaused = isPaused,
             selectedTransition = selectedTransition,
             autoRecordCameras = autoRecordCameras,
@@ -206,6 +209,7 @@ fun ControlBar(
 @Composable
 private fun ControlBarHorizontal(
     isRecording: Boolean,
+    isStartingRecording: Boolean,
     isPaused: Boolean,
     selectedTransition: TransitionType,
     autoRecordCameras: Boolean = false,
@@ -235,7 +239,15 @@ private fun ControlBarHorizontal(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (!isRecording) {
+            if (isStartingRecording) {
+                ControlButton(
+                    label = "STARTING…",
+                    backgroundColor = SurfaceLight,
+                    textColor = TextSecondary,
+                    onClick = {},
+                    enabled = false
+                )
+            } else if (!isRecording) {
                 ControlButton(
                     label = "PGM REC",
                     backgroundColor = ElectricRed,
@@ -317,6 +329,7 @@ private fun ControlBarHorizontal(
 @Composable
 private fun ControlBarVertical(
     isRecording: Boolean,
+    isStartingRecording: Boolean,
     isPaused: Boolean,
     selectedTransition: TransitionType,
     autoRecordCameras: Boolean = false,
@@ -342,7 +355,15 @@ private fun ControlBarVertical(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         // Recording controls
-        if (!isRecording) {
+        if (isStartingRecording) {
+            ControlButton(
+                label = "STARTING",
+                backgroundColor = SurfaceLight,
+                textColor = TextSecondary,
+                onClick = {},
+                enabled = false
+            )
+        } else if (!isRecording) {
             ControlButton(
                 label = "PGM REC",
                 backgroundColor = ElectricRed,

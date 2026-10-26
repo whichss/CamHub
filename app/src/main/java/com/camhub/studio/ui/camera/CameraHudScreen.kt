@@ -329,6 +329,8 @@ private fun PortraitLayout(
                     bitrate = uiState.bitrate,
                     wifiStrength = uiState.wifiStrength,
                     networkTransportLabel = uiState.networkTransportLabel,
+                    pairingFingerprint = uiState.pairingFingerprint,
+                    pairingPin = uiState.pairingPin,
                     storageUsedGb = uiState.storageUsedGb,
                     storageTotalGb = uiState.storageTotalGb
                 )

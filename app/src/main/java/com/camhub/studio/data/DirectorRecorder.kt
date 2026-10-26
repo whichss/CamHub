@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.RectF
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -15,6 +16,8 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
+import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.gl.SpatialUpscaleWindowRenderer
 import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.HybridPtzController
@@ -29,20 +32,27 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.ArrayDeque
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.nio.ByteOrder
 import javax.inject.Inject
 import javax.inject.Singleton
 
 data class RecordingInfo(
     val isRecording: Boolean = false,
+    val isStarting: Boolean = false,
+    val isStopping: Boolean = false,
     val isPaused: Boolean = false,
     val startTimeMs: Long = 0L,
     val pausedDurationMs: Long = 0L,
     val outputPath: String = "",
     val isSpatialUpscaling: Boolean = false,
-    val outputHeight: Int = 0
+    val outputHeight: Int = 0,
+    val includesAudio: Boolean = false,
+    val errorMessage: String? = null
 )
 
 @Singleton
@@ -54,6 +64,12 @@ class DirectorRecorder @Inject constructor(
         private const val I_FRAME_INTERVAL = 2
         private const val DRAIN_TIMEOUT_US = 10_000L
         private const val STOP_DRAIN_TIMEOUT_MS = 3000L
+        private const val AUDIO_SAMPLE_RATE = 48_000
+        private const val AUDIO_CHANNEL_COUNT = 1
+        private const val AUDIO_BITRATE = 96_000
+        private const val MAX_PENDING_AUDIO_CHUNKS = 12
+        private const val MAX_PRE_MUX_SAMPLES = 96
+        private const val AUDIO_FORMAT_TIMEOUT_MS = 1_000L
     }
 
     var bitrateMbps: Int = 10
@@ -61,6 +77,13 @@ class DirectorRecorder @Inject constructor(
     var useHevc: Boolean = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lifecycleLock = Any()
+    @Volatile private var startInProgress = false
+    @Volatile private var cancelStartRequested = false
+    @Volatile private var stopInProgress = false
+    @Volatile private var recordingStartNs = 0L
+    @Volatile private var accumulatedPauseNs = 0L
+    @Volatile private var pauseStartNs = 0L
 
     private var encoder: MediaCodec? = null
     private var muxer: MediaMuxer? = null
@@ -69,15 +92,31 @@ class DirectorRecorder @Inject constructor(
     private var videoTrackIndex = -1
     private var muxerStarted = false
     private var drainJob: Job? = null
+    private var audioInputJob: Job? = null
+    private var audioEncoder: MediaCodec? = null
+    private var audioTrackIndex = -1
+    private var videoFormatReady = false
+    private var audioFormatReady = false
+    @Volatile private var audioExpected = false
+    private val audioInputQueue = ArrayBlockingQueue<AudioInputChunk>(MAX_PENDING_AUDIO_CHUNKS)
+    private val preMuxSamples = ArrayDeque<PendingMuxSample>()
+    private var recordingStartedElapsedMs = 0L
     private var frameCount = 0
 
-    private var pauseStartTimeMs: Long = 0L
     private var currentOutputPath: String? = null
     private val frameWriter: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "DirectorRecorderFrameWriter").apply { isDaemon = true }
     }
     private val frameWriteInFlight = AtomicBoolean(false)
     private val droppedFrameCount = AtomicLong(0)
+
+    private data class AudioInputChunk(val samples: ShortArray, val presentationTimeUs: Long)
+    private data class PendingMuxSample(
+        val isAudio: Boolean,
+        val bytes: ByteArray,
+        val presentationTimeUs: Long,
+        val flags: Int
+    )
 
     private val _recordingInfo = MutableStateFlow(RecordingInfo())
     val recordingInfo: StateFlow<RecordingInfo> = _recordingInfo.asStateFlow()
@@ -93,9 +132,16 @@ class DirectorRecorder @Inject constructor(
         width: Int,
         height: Int,
         sessionTimestamp: String = "",
-        useSpatialUpscaling: Boolean = false
+        useSpatialUpscaling: Boolean = false,
+        includeAudio: Boolean = false
     ): String? {
-        if (_recordingInfo.value.isRecording) return null
+        synchronized(lifecycleLock) {
+            if (startInProgress || stopInProgress || _recordingInfo.value.isRecording) return null
+            startInProgress = true
+            cancelStartRequested = false
+            currentOutputPath = null
+            _recordingInfo.value = _recordingInfo.value.copy(isStarting = true, errorMessage = null)
+        }
 
         // Ensure dimensions are even (required by most encoders)
         val w = (width.coerceAtLeast(320) + 1) and 0x7FFFFFFE
@@ -123,30 +169,40 @@ class DirectorRecorder @Inject constructor(
                 start()
             }
 
-            if (useSpatialUpscaling) {
-                val encoderSurface = inputSurface
-                    ?: throw IllegalStateException("Encoder input surface is unavailable")
-                val glRenderer = SpatialUpscaleWindowRenderer(
-                    surface = encoderSurface,
-                    outputWidth = w,
-                    outputHeight = h,
-                    onFrameRendered = { rendered ->
-                        if (rendered) {
-                            frameCount++
-                            if (frameCount == 1) {
-                                Log.d(TAG, "First frame rendered to encoder by OpenGL")
-                            }
-                        } else {
-                            noteDroppedRecordFrame()
+            audioEncoder = if (includeAudio) createAudioEncoder() else null
+            audioExpected = audioEncoder != null
+            audioTrackIndex = -1
+            videoFormatReady = false
+            audioFormatReady = !audioExpected
+            preMuxSamples.clear()
+            audioInputQueue.clear()
+
+            // Keep recording composition on its dedicated GL thread even when
+            // the source is already at output resolution. This lets transitions
+            // reach MediaCodec without allocating intermediate CPU bitmaps.
+            val encoderSurface = inputSurface
+                ?: throw IllegalStateException("Encoder input surface is unavailable")
+            val glRenderer = SpatialUpscaleWindowRenderer(
+                surface = encoderSurface,
+                outputWidth = w,
+                outputHeight = h,
+                enableSpatialReconstruction = useSpatialUpscaling,
+                onFrameRendered = { rendered ->
+                    if (rendered) {
+                        frameCount++
+                        if (frameCount == 1) {
+                            Log.d(TAG, "First frame rendered to encoder by OpenGL")
                         }
-                        frameWriteInFlight.set(false)
+                    } else {
+                        noteDroppedRecordFrame()
                     }
-                )
-                if (glRenderer.start()) {
-                    spatialUpscaleRenderer = glRenderer
-                } else {
-                    Log.w(TAG, "OpenGL recording unavailable; using Canvas fallback")
+                    frameWriteInFlight.set(false)
                 }
+            )
+            if (glRenderer.start()) {
+                spatialUpscaleRenderer = glRenderer
+            } else {
+                Log.w(TAG, "OpenGL recording unavailable; using Canvas fallback")
             }
 
             val muxerResult = createMuxer(sessionTimestamp)
@@ -158,22 +214,169 @@ class DirectorRecorder @Inject constructor(
             stopRequested = false
             currentOutputPath = displayPath
 
-            _recordingInfo.value = RecordingInfo(
-                isRecording = true,
-                startTimeMs = System.currentTimeMillis(),
-                outputPath = displayPath,
-                isSpatialUpscaling = spatialUpscaleRenderer != null,
-                outputHeight = h
-            )
+            synchronized(lifecycleLock) {
+                check(!cancelStartRequested) { "Recording start cancelled" }
+                recordingStartNs = System.nanoTime()
+                accumulatedPauseNs = 0L
+                pauseStartNs = 0L
+                _recordingInfo.value = RecordingInfo(
+                    isRecording = true,
+                    startTimeMs = System.currentTimeMillis(),
+                    outputPath = displayPath,
+                    isSpatialUpscaling = useSpatialUpscaling && spatialUpscaleRenderer != null,
+                    outputHeight = h,
+                    includesAudio = audioExpected
+                )
+            }
 
+            recordingStartedElapsedMs = android.os.SystemClock.elapsedRealtime()
+            if (audioExpected) startAudioInputPump()
             drainJob = scope.launch { drainEncoder() }
+            val stopRequestedDuringStart = synchronized(lifecycleLock) {
+                startInProgress = false
+                val cancel = cancelStartRequested
+                cancelStartRequested = false
+                cancel
+            }
             Log.d(TAG, "Recording started: $displayPath")
+            if (stopRequestedDuringStart) {
+                stopRecording()
+                return null
+            }
             displayPath
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
             releaseResources()
+            discardUnstartedOutput()
+            synchronized(lifecycleLock) {
+                _recordingInfo.value = RecordingInfo(errorMessage = e.message ?: "Recording could not start")
+            }
+            null
+        } finally {
+            synchronized(lifecycleLock) {
+                startInProgress = false
+                cancelStartRequested = false
+                if (_recordingInfo.value.isStarting) {
+                    _recordingInfo.value = _recordingInfo.value.copy(isStarting = false)
+                }
+            }
+        }
+    }
+
+    /** Called from the audio mixer thread; only bounded, non-blocking enqueue work is done here. */
+    fun offerMixedAudio(samples: ShortArray, timestampNs: Long) {
+        if (!audioExpected || !_recordingInfo.value.isRecording || _recordingInfo.value.isPaused) return
+        val presentationTimeUs = recordingPresentationTimeUs(timestampNs) ?: return
+        val chunk = AudioInputChunk(samples.copyOf(), presentationTimeUs)
+        if (!audioInputQueue.offer(chunk)) {
+            audioInputQueue.poll()
+            audioInputQueue.offer(chunk)
+        }
+    }
+
+    private fun createAudioEncoder(): MediaCodec? {
+        var codec: MediaCodec? = null
+        return try {
+            val format = MediaFormat.createAudioFormat(
+                MediaFormat.MIMETYPE_AUDIO_AAC,
+                AUDIO_SAMPLE_RATE,
+                AUDIO_CHANNEL_COUNT
+            ).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4_096)
+            }
+            val created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            codec = created
+            created.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            created.start()
+            created
+        } catch (error: Exception) {
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+            Log.w(TAG, "AAC recorder unavailable; recording video without audio", error)
             null
         }
+    }
+
+    private fun startAudioInputPump() {
+        audioInputJob?.cancel()
+        audioInputJob = scope.launch(Dispatchers.IO) {
+            while (isActive && (_recordingInfo.value.isRecording || audioInputQueue.isNotEmpty())) {
+                val chunk = audioInputQueue.poll()
+                if (chunk == null) {
+                    delay(5)
+                    continue
+                }
+                val codec = audioEncoder ?: break
+                try {
+                    val inputIndex = codec.dequeueInputBuffer(5_000)
+                    if (inputIndex < 0) continue
+                    val input = codec.getInputBuffer(inputIndex)
+                    if (input == null) {
+                        codec.queueInputBuffer(inputIndex, 0, 0, chunk.presentationTimeUs, 0)
+                        continue
+                    }
+                    input.clear()
+                    input.order(ByteOrder.nativeOrder())
+                    val count = minOf(chunk.samples.size, input.remaining() / Short.SIZE_BYTES)
+                    repeat(count) { input.putShort(chunk.samples[it]) }
+                    codec.queueInputBuffer(
+                        inputIndex,
+                        0,
+                        count * Short.SIZE_BYTES,
+                        chunk.presentationTimeUs,
+                        0
+                    )
+                } catch (error: Exception) {
+                    Log.w(TAG, "AAC input failed; dropping mixed audio chunk", error)
+                }
+            }
+        }
+    }
+
+    private suspend fun signalAudioEndOfStream() {
+        val codec = audioEncoder ?: return
+        val deadline = android.os.SystemClock.elapsedRealtime() + 500L
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val index = runCatching { codec.dequeueInputBuffer(10_000) }.getOrDefault(-1)
+            if (index >= 0) {
+                runCatching {
+                    codec.queueInputBuffer(
+                        index,
+                        0,
+                        0,
+                        System.nanoTime() / 1_000L,
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                    )
+                }
+                return
+            }
+        }
+        Log.w(TAG, "Could not signal AAC end-of-stream")
+    }
+
+    private fun startMuxerWhenReady() {
+        if (muxerStarted || !videoFormatReady || !audioFormatReady) return
+        val mux = muxer ?: return
+        try {
+            mux.start()
+            muxerStarted = true
+            while (preMuxSamples.isNotEmpty()) writeMuxSample(mux, preMuxSamples.removeFirst())
+            Log.d(TAG, "A/V muxer started")
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not start A/V muxer", error)
+        }
+    }
+
+    private fun writeMuxSample(mux: MediaMuxer, sample: PendingMuxSample) {
+        val track = if (sample.isAudio) audioTrackIndex else videoTrackIndex
+        if (track < 0 || sample.bytes.isEmpty()) return
+        val buffer = java.nio.ByteBuffer.wrap(sample.bytes)
+        val info = MediaCodec.BufferInfo().apply {
+            set(0, sample.bytes.size, sample.presentationTimeUs, sample.flags)
+        }
+        mux.writeSampleData(track, buffer, info)
     }
 
     /** Creates MediaMuxer via MediaStore (gallery-visible) or fallback file path. Returns (muxer, displayPath). */
@@ -244,9 +447,23 @@ class DirectorRecorder @Inject constructor(
         pendingMediaUri = null
     }
 
+    private fun discardUnstartedOutput() {
+        val uri = pendingMediaUri
+        if (uri != null) {
+            runCatching { context.contentResolver.delete(uri, null, null) }
+            try { pendingFd?.close() } catch (_: Exception) {}
+            pendingFd = null
+            pendingMediaUri = null
+        } else {
+            currentOutputPath?.let { path -> runCatching { File(path).delete() } }
+        }
+        currentOutputPath = null
+    }
+
     fun onFrame(
         bitmap: Bitmap,
-        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM
+        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+        transition: PgmTransitionFrame? = null
     ) {
         if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused) return
         if (!frameWriteInFlight.compareAndSet(false, true)) {
@@ -255,8 +472,12 @@ class DirectorRecorder @Inject constructor(
         }
 
         val glRenderer = spatialUpscaleRenderer
+        val presentationTimeNs = recordingPresentationTimeNs(System.nanoTime()) ?: run {
+            frameWriteInFlight.set(false)
+            return
+        }
         if (glRenderer != null) {
-            if (!glRenderer.render(bitmap, System.nanoTime(), ptzTransform)) {
+            if (!glRenderer.render(bitmap, presentationTimeNs, ptzTransform, transition)) {
                 frameWriteInFlight.set(false)
                 noteDroppedRecordFrame()
             }
@@ -270,7 +491,7 @@ class DirectorRecorder @Inject constructor(
                     if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused || stopRequested) {
                         return@execute
                     }
-                    drawFrameToSurface(surface, bitmap, ptzTransform)
+                    drawFrameToSurface(surface, bitmap, ptzTransform, transition)
                 } finally {
                     frameWriteInFlight.set(false)
                 }
@@ -284,7 +505,8 @@ class DirectorRecorder @Inject constructor(
     private fun drawFrameToSurface(
         surface: Surface,
         bitmap: Bitmap,
-        ptzTransform: HubPtzTransform
+        ptzTransform: HubPtzTransform,
+        transition: PgmTransitionFrame? = null
     ) {
         var posted = false
         val canvas = try {
@@ -296,23 +518,38 @@ class DirectorRecorder @Inject constructor(
 
         try {
             canvas.drawColor(Color.BLACK)
-            val fitScale = minOf(
-                canvas.width.toFloat() / bitmap.width,
-                canvas.height.toFloat() / bitmap.height
-            )
-            val outputScale = fitScale * ptzTransform.scale
-            val matrix = Matrix().apply {
-                setScale(outputScale, outputScale)
-                postTranslate(
-                    canvas.width / 2f - ptzTransform.centerX * bitmap.width * outputScale,
-                    canvas.height / 2f - ptzTransform.centerY * bitmap.height * outputScale
-                )
+            val progress = transition?.progress?.coerceIn(0f, 1f) ?: 0f
+            when (transition?.mode) {
+                PgmTransitionMode.MIX -> {
+                    drawPgmBitmap(canvas, bitmap, ptzTransform)
+                    drawPgmBitmap(
+                        canvas,
+                        transition.bitmap,
+                        transition.ptzTransform,
+                        progress * 255f
+                    )
+                }
+                PgmTransitionMode.DIP -> {
+                    if (progress <= 0.5f) {
+                        drawPgmBitmap(canvas, bitmap, ptzTransform, (1f - progress * 2f) * 255f)
+                    } else {
+                        drawPgmBitmap(
+                            canvas,
+                            transition.bitmap,
+                            transition.ptzTransform,
+                            ((progress - 0.5f) * 2f) * 255f
+                        )
+                    }
+                }
+                PgmTransitionMode.WIPE -> {
+                    drawPgmBitmap(canvas, bitmap, ptzTransform)
+                    val saveCount = canvas.save()
+                    canvas.clipRect(RectF(0f, 0f, canvas.width * progress, canvas.height.toFloat()))
+                    drawPgmBitmap(canvas, transition.bitmap, transition.ptzTransform)
+                    canvas.restoreToCount(saveCount)
+                }
+                else -> drawPgmBitmap(canvas, bitmap, ptzTransform)
             }
-            canvas.drawBitmap(
-                bitmap,
-                matrix,
-                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            )
             surface.unlockCanvasAndPost(canvas)
             posted = true
             frameCount++
@@ -328,6 +565,34 @@ class DirectorRecorder @Inject constructor(
         }
     }
 
+    private fun drawPgmBitmap(
+        canvas: android.graphics.Canvas,
+        bitmap: Bitmap,
+        ptzTransform: HubPtzTransform,
+        alpha: Float = 255f
+    ) {
+        if (bitmap.isRecycled || alpha <= 0f) return
+        val fitScale = minOf(
+            canvas.width.toFloat() / bitmap.width,
+            canvas.height.toFloat() / bitmap.height
+        )
+        val outputScale = fitScale * ptzTransform.scale
+        val matrix = Matrix().apply {
+            setScale(outputScale, outputScale)
+            postTranslate(
+                canvas.width / 2f - ptzTransform.centerX * bitmap.width * outputScale,
+                canvas.height / 2f - ptzTransform.centerY * bitmap.height * outputScale
+            )
+        }
+        canvas.drawBitmap(
+            bitmap,
+            matrix,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                this.alpha = alpha.toInt().coerceIn(0, 255)
+            }
+        )
+    }
+
     private fun noteDroppedRecordFrame() {
         val dropped = droppedFrameCount.incrementAndGet()
         if (dropped % 30L == 0L) {
@@ -338,7 +603,7 @@ class DirectorRecorder @Inject constructor(
     fun pauseRecording() {
         val info = _recordingInfo.value
         if (!info.isRecording || info.isPaused) return
-        pauseStartTimeMs = System.currentTimeMillis()
+        pauseStartNs = System.nanoTime()
         _recordingInfo.value = info.copy(isPaused = true)
         Log.d(TAG, "Recording paused")
     }
@@ -346,113 +611,226 @@ class DirectorRecorder @Inject constructor(
     fun resumeRecording() {
         val info = _recordingInfo.value
         if (!info.isRecording || !info.isPaused) return
-        val pausedElapsed = System.currentTimeMillis() - pauseStartTimeMs
+        val nowNs = System.nanoTime()
+        val pausedElapsed = ((nowNs - pauseStartNs).coerceAtLeast(0L)) / 1_000_000L
+        accumulatedPauseNs += (nowNs - pauseStartNs).coerceAtLeast(0L)
         _recordingInfo.value = info.copy(
             isPaused = false,
             pausedDurationMs = info.pausedDurationMs + pausedElapsed
         )
-        pauseStartTimeMs = 0L
+        pauseStartNs = 0L
         Log.d(TAG, "Recording resumed")
     }
 
     fun stopRecording() {
-        if (!_recordingInfo.value.isRecording) return
+        synchronized(lifecycleLock) {
+            if (startInProgress) {
+                cancelStartRequested = true
+                return
+            }
+            if (stopInProgress || !_recordingInfo.value.isRecording) return
+            stopInProgress = true
+        }
         val path = currentOutputPath
 
         _recordingInfo.value = _recordingInfo.value.copy(
             isRecording = false,
+            isStopping = true,
             isPaused = false,
             isSpatialUpscaling = false
         )
-        pauseStartTimeMs = 0L
+        pauseStartNs = 0L
 
         scope.launch {
-            stopRequested = true
+            finishRecording(path)
+        }
+    }
 
+    private suspend fun finishRecording(path: String?) {
+        stopRequested = true
+        try {
             spatialUpscaleRenderer?.release()
             spatialUpscaleRenderer = null
             frameWriteInFlight.set(false)
 
-            // Signal EOS to encoder
             try {
+                audioInputJob?.join()
+                audioInputJob = null
+                audioInputQueue.clear()
+                signalAudioEndOfStream()
                 encoder?.signalEndOfInputStream()
-                Log.d(TAG, "EOS signaled, waiting for drain (frames written: $frameCount)")
-            } catch (e: Exception) {
-                Log.w(TAG, "signalEndOfInputStream error: ${e.message}")
+            } catch (error: Exception) {
+                Log.w(TAG, "Could not signal encoder end-of-stream", error)
             }
 
-            // Wait for drain to finish with timeout
             try {
-                withTimeout(STOP_DRAIN_TIMEOUT_MS) {
-                    drainJob?.join()
-                }
-            } catch (e: TimeoutCancellationException) {
+                withTimeout(STOP_DRAIN_TIMEOUT_MS) { drainJob?.join() }
+            } catch (error: TimeoutCancellationException) {
                 Log.w(TAG, "Drain timeout after ${STOP_DRAIN_TIMEOUT_MS}ms, forcing stop")
                 drainJob?.cancel()
             }
-
             drainJob = null
-            releaseResources()
-            finalizeMediaStore()  // safe even if FD already closed by releaseResources
-            stopRequested = false
             Log.d(TAG, "Recording stopped: $path (total frames: $frameCount)")
+        } catch (error: Exception) {
+            Log.e(TAG, "Recording finalization failed", error)
+            _recordingInfo.value = _recordingInfo.value.copy(
+                errorMessage = error.message ?: "Recording could not be finalized"
+            )
+        } finally {
+            releaseResources()
+            finalizeMediaStore()
+            stopRequested = false
+            synchronized(lifecycleLock) {
+                stopInProgress = false
+                _recordingInfo.value = _recordingInfo.value.copy(isStopping = false)
+            }
         }
     }
 
+    private fun recordingPresentationTimeNs(timestampNs: Long): Long? {
+        val startedAt = recordingStartNs
+        if (startedAt == 0L || timestampNs < startedAt) return null
+        val pausedAt = pauseStartNs
+        val pausedSoFar = if (pausedAt > 0L) (timestampNs - pausedAt).coerceAtLeast(0L) else 0L
+        return (timestampNs - startedAt - accumulatedPauseNs - pausedSoFar).coerceAtLeast(0L)
+    }
+
+    private fun recordingPresentationTimeUs(timestampNs: Long): Long? =
+        recordingPresentationTimeNs(timestampNs)?.div(1_000L)
+
     private suspend fun drainEncoder() {
         val enc = encoder ?: return
-        val bufferInfo = MediaCodec.BufferInfo()
+        val videoInfo = MediaCodec.BufferInfo()
+        val audioInfo = MediaCodec.BufferInfo()
         var drainedFrames = 0
+        var videoEos = false
+        var audioEos = !audioExpected
 
         try {
-            while (true) {
-                val outputIndex = enc.dequeueOutputBuffer(bufferInfo, DRAIN_TIMEOUT_US)
-                when {
-                    outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                        // Do NOT break here even if stopRequested.
-                        // We must wait for EOS buffer from the encoder.
-                        // Only timeout in stopRecording() will force exit.
-                        if (!stopRequested) {
-                            // Normal operation: no output available yet, continue polling
-                        }
-                        // When stopRequested, keep polling - EOS should arrive soon
-                    }
-                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        val mux = muxer ?: break
-                        videoTrackIndex = mux.addTrack(enc.outputFormat)
-                        mux.start()
-                        muxerStarted = true
-                        Log.d(TAG, "Muxer started with format: ${enc.outputFormat}")
-                    }
-                    outputIndex >= 0 -> {
-                        if (muxerStarted && bufferInfo.size > 0) {
-                            val mux = muxer ?: break
-                            val outputBuffer = enc.getOutputBuffer(outputIndex)
-                            if (outputBuffer != null) {
-                                outputBuffer.position(bufferInfo.offset)
-                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                                mux.writeSampleData(videoTrackIndex, outputBuffer, bufferInfo)
-                                drainedFrames++
-                            }
-                        }
-                        enc.releaseOutputBuffer(outputIndex, false)
+            while (!videoEos || !audioEos) {
+                if (
+                    audioExpected && !audioFormatReady &&
+                    android.os.SystemClock.elapsedRealtime() - recordingStartedElapsedMs >= AUDIO_FORMAT_TIMEOUT_MS
+                ) {
+                    Log.w(TAG, "No mixed audio arrived; continuing this recording as video-only")
+                    audioExpected = false
+                    audioFormatReady = true
+                    audioInputJob?.cancelAndJoin()
+                    audioInputJob = null
+                    audioInputQueue.clear()
+                    runCatching { audioEncoder?.stop() }
+                    runCatching { audioEncoder?.release() }
+                    audioEncoder = null
+                    audioEos = true
+                    _recordingInfo.value = _recordingInfo.value.copy(includesAudio = false)
+                    startMuxerWhenReady()
+                }
 
-                        // Check for EOS flag
-                        if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                            Log.d(TAG, "EOS received, drain complete (drained $drainedFrames frames)")
-                            break
+                val videoIndex = enc.dequeueOutputBuffer(videoInfo, DRAIN_TIMEOUT_US)
+                when {
+                    videoIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        videoTrackIndex = muxer?.addTrack(enc.outputFormat) ?: -1
+                        videoFormatReady = videoTrackIndex >= 0
+                        startMuxerWhenReady()
+                    }
+                    videoIndex >= 0 -> {
+                        copyEncodedSample(enc, videoIndex, videoInfo)?.let { bytes ->
+                            enqueueOrWriteSample(
+                                PendingMuxSample(false, bytes, videoInfo.presentationTimeUs, videoInfo.flags)
+                            )
+                            drainedFrames++
                         }
+                        videoEos = videoInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        enc.releaseOutputBuffer(videoIndex, false)
                     }
                 }
+
+                val audio = audioEncoder
+                if (audioExpected && audio != null) {
+                    val audioIndex = audio.dequeueOutputBuffer(audioInfo, 0)
+                    when {
+                        audioIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            audioTrackIndex = muxer?.addTrack(audio.outputFormat) ?: -1
+                            audioFormatReady = audioTrackIndex >= 0
+                            startMuxerWhenReady()
+                        }
+                        audioIndex >= 0 -> {
+                            copyEncodedSample(audio, audioIndex, audioInfo)?.let { bytes ->
+                                enqueueOrWriteSample(
+                                    PendingMuxSample(true, bytes, audioInfo.presentationTimeUs, audioInfo.flags)
+                                )
+                            }
+                            audioEos = audioInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                            audio.releaseOutputBuffer(audioIndex, false)
+                        }
+                    }
+                } else {
+                    audioEos = true
+                }
             }
+            Log.d(TAG, "A/V drain complete (video frames drained: $drainedFrames)")
         } catch (e: CancellationException) {
             Log.w(TAG, "Drain cancelled (drained $drainedFrames frames)")
         } catch (e: Exception) {
             Log.e(TAG, "drainEncoder error (drained $drainedFrames frames)", e)
+            var shouldFinalize = false
+            synchronized(lifecycleLock) {
+                if (_recordingInfo.value.isRecording && !stopInProgress) {
+                    stopInProgress = true
+                    shouldFinalize = true
+                    _recordingInfo.value = _recordingInfo.value.copy(
+                        isRecording = false,
+                        isStopping = true,
+                        isPaused = false,
+                        errorMessage = e.message ?: "Encoder output failed"
+                    )
+                } else {
+                    _recordingInfo.value = _recordingInfo.value.copy(
+                        errorMessage = e.message ?: "Encoder output failed"
+                    )
+                }
+            }
+            if (shouldFinalize) scope.launch { finishRecording(currentOutputPath) }
+        }
+    }
+
+    private fun copyEncodedSample(
+        codec: MediaCodec,
+        outputIndex: Int,
+        info: MediaCodec.BufferInfo
+    ): ByteArray? {
+        if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return null
+        val output = codec.getOutputBuffer(outputIndex) ?: return null
+        output.position(info.offset)
+        output.limit(info.offset + info.size)
+        return ByteArray(info.size).also(output::get)
+    }
+
+    private fun enqueueOrWriteSample(sample: PendingMuxSample) {
+        val mux = muxer ?: return
+        if (muxerStarted) {
+            writeMuxSample(mux, sample)
+        } else if (preMuxSamples.size < MAX_PRE_MUX_SAMPLES) {
+            preMuxSamples.addLast(sample)
+        } else {
+            preMuxSamples.removeFirst()
+            preMuxSamples.addLast(sample)
+            noteDroppedRecordFrame()
         }
     }
 
     private fun releaseResources() {
+        audioInputJob?.cancel()
+        audioInputJob = null
+        audioInputQueue.clear()
+        preMuxSamples.clear()
+        try { audioEncoder?.stop() } catch (_: Exception) {}
+        try { audioEncoder?.release() } catch (_: Exception) {}
+        audioEncoder = null
+        audioExpected = false
+        audioTrackIndex = -1
+        videoFormatReady = false
+        audioFormatReady = false
         try { spatialUpscaleRenderer?.release() } catch (_: Exception) {}
         spatialUpscaleRenderer = null
         frameWriteInFlight.set(false)
@@ -475,6 +853,9 @@ class DirectorRecorder @Inject constructor(
         inputSurface = null
         videoTrackIndex = -1
         muxerStarted = false
+        recordingStartNs = 0L
+        accumulatedPauseNs = 0L
+        pauseStartNs = 0L
 
         // Ensure ParcelFileDescriptor is closed even if finalizeMediaStore() hasn't been called yet
         // (e.g., abnormal stop, crash recovery)

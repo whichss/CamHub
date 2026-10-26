@@ -20,6 +20,8 @@ import com.camhub.studio.data.network.H264Encoder
 import com.camhub.studio.data.network.HandshakeMessage
 import com.camhub.studio.data.network.PeerConnectionManager
 import com.camhub.studio.data.network.NetworkTransportManager
+import com.camhub.studio.data.network.NsdDiscoveryManager
+import com.camhub.studio.data.network.TlsHelper
 import com.camhub.studio.data.network.StreamServer
 import com.camhub.studio.ui.camera.model.CameraUiState
 import com.camhub.studio.ui.camera.model.LensInfo
@@ -27,6 +29,7 @@ import com.camhub.studio.ui.camera.model.MicDirection
 import com.camhub.studio.ui.camera.model.ToolMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,8 +47,10 @@ class CameraHudViewModel @Inject constructor(
     private val connectionManager: PeerConnectionManager,
     private val deviceMonitor: DeviceMonitor,
     private val audioCaptureService: AudioCaptureService,
+    private val nsdDiscoveryManager: NsdDiscoveryManager,
     private val networkTransportManager: NetworkTransportManager,
-    private val streamingConfig: StreamingConfig
+    private val streamingConfig: StreamingConfig,
+    private val tlsHelper: TlsHelper
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -66,6 +71,17 @@ class CameraHudViewModel @Inject constructor(
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val fingerprint = runCatching { tlsHelper.localCertificateFingerprint() }
+                .getOrDefault("")
+                .take(16)
+                .chunked(4)
+                .joinToString(" ")
+            val pairingPin = runCatching { tlsHelper.localPairingPin() }.getOrDefault("")
+            _uiState.update {
+                it.copy(pairingFingerprint = fingerprint, pairingPin = pairingPin)
+            }
+        }
         viewModelScope.launch {
             networkTransportManager.state.collect { networkState ->
                 _uiState.update {
@@ -135,6 +151,7 @@ class CameraHudViewModel @Inject constructor(
                     val resolution = msg.value.toInt().coerceIn(360, 2160)
                     updateStreamResolution(resolution)
                 }
+                "request_key_frame" -> streamServer.requestKeyFrame()
             }
             _uiState.update { it.copy(isRemoteOverride = true) }
             delay(3000)
@@ -734,6 +751,9 @@ class CameraHudViewModel @Inject constructor(
         try { cleanupSurfacePipeline() } catch (_: Exception) {}
         try { cameraController.unbindCamera() } catch (_: Exception) {}
         try { deviceMonitor.stopMonitoring() } catch (_: Exception) {}
+        try { nsdDiscoveryManager.unregisterService() } catch (_: Exception) {}
+        try { connectionManager.stopServer() } catch (_: Exception) {}
+        try { streamServer.stop() } catch (_: Exception) {}
         try { audioCaptureService.stop() } catch (_: Exception) {}
     }
 }

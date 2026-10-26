@@ -56,6 +56,11 @@ fun DirectorScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val trustRequests by viewModel.peerTrustRequests.collectAsState()
+    com.camhub.studio.ui.connection.PeerTrustDialog(
+        request = trustRequests.firstOrNull(),
+        onResolve = viewModel::resolvePeerTrust
+    )
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -109,6 +114,9 @@ fun DirectorScreen(
                 ?: "CHECKING"
         )
         if (uiState.isAutomaticHubProfile) append(" · AUTO")
+        if (uiState.isStartingRecording) append(" · STARTING REC")
+        else if (uiState.isRecording) append(if (uiState.isRecordingAudio) " · REC A/V" else " · REC VIDEO")
+        if (uiState.recordingError != null) append(" · REC ERROR")
         if (uiState.isRecordingSpatialUpscaling) {
             append(" · REC↑${uiState.recordingOutputHeight}")
         } else if (uiState.isPgmSpatialUpscalingEnabled) {
@@ -135,6 +143,7 @@ fun DirectorScreen(
                     latencyMs = uiState.latencyP95Ms,
                     timecode = uiState.timecode,
                     isRecording = uiState.isRecording,
+                    isStartingRecording = uiState.isStartingRecording,
                     isPaused = uiState.isPaused,
                     wifiStrength = uiState.wifiStrength,
                     batteryPercent = uiState.batteryPercent,
@@ -171,8 +180,8 @@ fun DirectorScreen(
                         pgmBitmap = pgmCamera?.previewBitmap,
                         pgmSourceBitmap = pgmCamera?.previewSourceBitmap,
                         pvwBitmap = pvwCamera?.previewBitmap,
+                        pvwSourceBitmap = pvwCamera?.previewSourceBitmap,
                         enablePgmSpatialUpscaling = uiState.isPgmSpatialUpscalingEnabled,
-                        pgmSpatialUpscaleOutputHeight = uiState.pgmOutputHeight,
                         pgmFrameSequence = pgmCamera?.frameSequence ?: 0L,
                         pvwFrameSequence = pvwCamera?.frameSequence ?: 0L,
                         onFrameDrawn = { cameraName, frameSequence ->
@@ -180,7 +189,6 @@ fun DirectorScreen(
                         },
                         isVertical = true,
                         transitionProgress = uiState.transitionProgress,
-                        isTransitioning = uiState.isTransitioning,
                         selectedTransition = uiState.selectedTransition,
                         pgmPtzState = pgmCamera?.ptzState
                             ?: com.camhub.studio.data.ptz.HybridPtzState(),
@@ -230,6 +238,7 @@ fun DirectorScreen(
                     latencyMs = uiState.latencyP95Ms,
                     timecode = uiState.timecode,
                     isRecording = uiState.isRecording,
+                    isStartingRecording = uiState.isStartingRecording,
                     isPaused = uiState.isPaused,
                     wifiStrength = uiState.wifiStrength,
                     batteryPercent = uiState.batteryPercent,
@@ -250,8 +259,8 @@ fun DirectorScreen(
                     pgmBitmap = pgmCamera?.previewBitmap,
                     pgmSourceBitmap = pgmCamera?.previewSourceBitmap,
                     pvwBitmap = pvwCamera?.previewBitmap,
+                    pvwSourceBitmap = pvwCamera?.previewSourceBitmap,
                     enablePgmSpatialUpscaling = uiState.isPgmSpatialUpscalingEnabled,
-                    pgmSpatialUpscaleOutputHeight = uiState.pgmOutputHeight,
                     pgmFrameSequence = pgmCamera?.frameSequence ?: 0L,
                     pvwFrameSequence = pvwCamera?.frameSequence ?: 0L,
                     onFrameDrawn = { cameraName, frameSequence ->
@@ -259,7 +268,6 @@ fun DirectorScreen(
                     },
                     isVertical = false,
                     transitionProgress = uiState.transitionProgress,
-                    isTransitioning = uiState.isTransitioning,
                     selectedTransition = uiState.selectedTransition,
                     pgmPtzState = pgmCamera?.ptzState
                         ?: com.camhub.studio.data.ptz.HybridPtzState(),

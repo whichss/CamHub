@@ -10,9 +10,11 @@ import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.Display
+import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
+import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.SpatialUpscaleSurfaceView
 import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.HybridPtzController
@@ -82,6 +84,7 @@ class ExternalDisplayManager @Inject constructor(
         enableSpatialUpscaling: Boolean,
         spatialUpscaleOutputHeight: Int,
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+        transition: PgmTransitionFrame? = null,
         onFrameDrawn: (String, Long, Long) -> Unit
     ) {
         if (frameSequence <= 0L) return
@@ -93,6 +96,7 @@ class ExternalDisplayManager @Inject constructor(
                 enableSpatialUpscaling,
                 spatialUpscaleOutputHeight,
                 ptzTransform,
+                transition,
                 onFrameDrawn
             )
         )
@@ -112,6 +116,7 @@ private data class PgmOutputFrame(
     val enableSpatialUpscaling: Boolean,
     val spatialUpscaleOutputHeight: Int,
     val ptzTransform: HubPtzTransform,
+    val transition: PgmTransitionFrame?,
     val onFrameDrawn: (String, Long, Long) -> Unit
 )
 
@@ -124,6 +129,7 @@ private class PgmPresentation(
     private var imageView: MeasuredPgmImageView? = null
     private var upscaleView: SpatialUpscaleSurfaceView? = null
     private var container: FrameLayout? = null
+    private var upscaleViewBoundsKey: String? = null
     @Volatile private var latestFrame: PgmOutputFrame? = null
     private val framePostPending = AtomicBoolean(false)
 
@@ -159,16 +165,29 @@ private class PgmPresentation(
     private fun publishLatestFrame() {
         val displayed = latestFrame
         if (displayed != null) {
-            if (displayed.enableSpatialUpscaling) {
+            if (displayed.enableSpatialUpscaling || displayed.transition != null) {
                 imageView?.visibility = View.GONE
                 val glView = getOrCreateUpscaleView()
                 glView.visibility = View.VISIBLE
-                glView.setOutputHeight(displayed.spatialUpscaleOutputHeight)
+                glView.setOutputSize(
+                    shortEdge = displayed.spatialUpscaleOutputHeight,
+                    sourceWidth = displayed.bitmap.width,
+                    sourceHeight = displayed.bitmap.height,
+                    forceFixedBuffer = true
+                )
+                updateUpscaleViewBounds(
+                    glView,
+                    displayed.spatialUpscaleOutputHeight,
+                    displayed.bitmap.width,
+                    displayed.bitmap.height
+                )
                 glView.displayFrame(
                     bitmap = displayed.bitmap,
                     cameraName = displayed.cameraName,
                     frameSequence = displayed.frameSequence,
                     ptzTransform = displayed.ptzTransform,
+                    transition = displayed.transition,
+                    enableSpatialReconstruction = displayed.enableSpatialUpscaling,
                     onFrameSubmitted = displayed.onFrameDrawn
                 )
             } else {
@@ -200,6 +219,37 @@ private class PgmPresentation(
         )
         upscaleView = view
         return view
+    }
+
+    private fun updateUpscaleViewBounds(
+        view: SpatialUpscaleSurfaceView,
+        outputShortEdge: Int,
+        sourceWidth: Int,
+        sourceHeight: Int
+    ) {
+        val root = container ?: return
+        if (root.width <= 0 || root.height <= 0) {
+            root.post { updateUpscaleViewBounds(view, outputShortEdge, sourceWidth, sourceHeight) }
+            return
+        }
+        val key = "$outputShortEdge:$sourceWidth:$sourceHeight:${root.width}:${root.height}"
+        if (key == upscaleViewBoundsKey) return
+        upscaleViewBoundsKey = key
+
+        val targetShortEdge = outputShortEdge.coerceAtLeast(2) and 0x7FFFFFFE
+        val sourceShortEdge = minOf(sourceWidth, sourceHeight).coerceAtLeast(1)
+        val targetLongEdge = (
+            targetShortEdge.toLong() * maxOf(sourceWidth, sourceHeight) / sourceShortEdge
+        ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(2) and 0x7FFFFFFE
+        val targetWidth = if (sourceWidth >= sourceHeight) targetLongEdge else targetShortEdge
+        val targetHeight = if (sourceHeight > sourceWidth) targetLongEdge else targetShortEdge
+        val fitScale = minOf(
+            root.width.toFloat() / targetWidth,
+            root.height.toFloat() / targetHeight
+        )
+        val viewWidth = (targetWidth * fitScale).toInt().coerceAtLeast(1)
+        val viewHeight = (targetHeight * fitScale).toInt().coerceAtLeast(1)
+        view.layoutParams = FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER)
     }
 }
 

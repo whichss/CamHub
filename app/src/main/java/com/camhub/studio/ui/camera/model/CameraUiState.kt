@@ -61,7 +61,9 @@ data class CameraUiState(
     val streamFps: Int = 30,
     val streamMaxResolution: Int = 1080,
     val streamBitrateMbps: Int = 4,
-    val videoClientCount: Int = 0
+    val videoClientCount: Int = 0,
+    val pairingFingerprint: String = "",
+    val pairingPin: String = ""
 )
 
 data class LensInfo(

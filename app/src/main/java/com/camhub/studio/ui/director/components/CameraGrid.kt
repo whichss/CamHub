@@ -165,7 +165,11 @@ private fun CameraCard(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                    .aspectRatio(
+                        camera.previewSourceBitmap?.takeIf { it.width > 0 && it.height > 0 }
+                            ?.let { it.width.toFloat() / it.height }
+                            ?: 16f / 9f
+                    )
                     .background(BackgroundDarker)
                     .drawWithContent {
                         drawContent()

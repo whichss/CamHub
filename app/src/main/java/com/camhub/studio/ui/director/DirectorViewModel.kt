@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.camhub.studio.data.DeviceMonitor
 import com.camhub.studio.data.DirectorRecorder
 import com.camhub.studio.data.ExternalDisplayManager
+import com.camhub.studio.data.PgmRecordingFrameDispatcher
 import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.audio.AudioStreamClient
 import com.camhub.studio.data.camera.CameraValueMapper
@@ -18,6 +19,9 @@ import com.camhub.studio.data.capability.HubProfileApplicationPolicy
 import com.camhub.studio.data.capability.HubRuntimeRecommendation
 import com.camhub.studio.data.capability.HubStreamLimits
 import com.camhub.studio.data.capability.PgmRecordingPolicy
+import com.camhub.studio.data.capability.RuntimePressure
+import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.ptz.HybridPtzState
 import com.camhub.studio.data.ptz.HybridPtzController
 import com.camhub.studio.data.ptz.PtzMode
@@ -39,6 +43,7 @@ import android.os.SystemClock
 import android.util.Log
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -84,8 +89,12 @@ class DirectorViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(DirectorUiState())
     val uiState: StateFlow<DirectorUiState> = _uiState.asStateFlow()
+    val peerTrustRequests = connectionManager.peerTrustRequests
 
     private var lastPgmBitmap: Bitmap? = null
+    private var lastPgmCameraName: String? = null
+    private val pgmRecordingDispatcher = PgmRecordingFrameDispatcher(recorder)
+    private val hubTriggeredRecordingNames = mutableSetOf<String>()
     private var transitionJob: Job? = null
     private val imageBitmapCache = IdentityHashMap<Bitmap, ImageBitmap>()
     private var performanceGovernor: HubPerformanceGovernor? = null
@@ -96,6 +105,7 @@ class DirectorViewModel @Inject constructor(
     private val adaptiveBitrateControllers = mutableMapOf<String, AdaptiveBitrateController>()
     private val adaptiveCounterSnapshots = mutableMapOf<String, AdaptiveCounterSnapshot>()
     private var lastAutomaticPeerNames: Set<String> = emptySet()
+    private var lastPriorityLiveCameraCount = -1
     private val ptzCommandJobs = mutableMapOf<String, Job>()
     private val pendingRemotePtz = mutableMapOf<String, PendingRemotePtz>()
     private val ptzRequestSequence = AtomicLong(0L)
@@ -121,6 +131,7 @@ class DirectorViewModel @Inject constructor(
     init {
         deviceMonitor.startMonitoring()
         externalDisplayManager.startListening()
+        audioStreamClient.onMixedPcm = recorder::offerMixedAudio
 
         viewModelScope.launch {
             networkTransportManager.state.collect { transportState ->
@@ -287,9 +298,18 @@ class DirectorViewModel @Inject constructor(
                     )
                 }
 
+                val liveCameraCount = _uiState.value.cameras.count {
+                    it.status == ConnectionStatus.LIVE
+                }
+                if (liveCameraCount != lastPriorityLiveCameraCount) {
+                    lastPriorityLiveCameraCount = liveCameraCount
+                    refreshStreamRenderPriorities()
+                }
+
                 // Track PGM bitmap for recording + external display
-                val pgmIdx = _uiState.value.pgmCameraIndex
-                val pgmOutput = _uiState.value.cameras.getOrNull(pgmIdx)?.let { camera ->
+                val outputState = _uiState.value
+                val pgmIdx = outputState.pgmCameraIndex
+                val pgmOutput = outputState.cameras.getOrNull(pgmIdx)?.let { camera ->
                     streams[camera.name]?.let { stream ->
                         stream.bitmap?.let { bitmap -> Triple(camera, stream, bitmap) }
                     }
@@ -297,10 +317,40 @@ class DirectorViewModel @Inject constructor(
                 if (pgmOutput != null) {
                     val (pgmCam, pgmStream, pgmBitmap) = pgmOutput
                     lastPgmBitmap = pgmBitmap
+                    lastPgmCameraName = pgmCam.name
                     val ptzTransform = HybridPtzController.hubTransform(pgmCam.ptzState)
-                    if (recorder.recordingInfo.value.isRecording) {
-                        recorder.onFrame(pgmBitmap, ptzTransform)
+                    val transition = outputState.takeIf {
+                        it.transitionProgress > 0f && it.selectedTransition != TransitionType.CUT
+                    }?.let { state ->
+                        val incomingCamera = state.cameras.getOrNull(state.pvwCameraIndex)
+                            ?: return@let null
+                        val incomingStream = streams[incomingCamera.name] ?: return@let null
+                        val incomingBitmap = incomingStream.bitmap
+                            ?.takeIf { !it.isRecycled }
+                            ?: return@let null
+                        PgmTransitionFrame(
+                            bitmap = incomingBitmap,
+                            cameraName = incomingCamera.name,
+                            frameSequence = incomingStream.pipelineLatency?.frameSequence
+                                ?: incomingStream.frameSequence,
+                            ptzTransform = HybridPtzController.hubTransform(incomingCamera.ptzState),
+                            mode = when (state.selectedTransition) {
+                                TransitionType.MIX -> PgmTransitionMode.MIX
+                                TransitionType.DIP -> PgmTransitionMode.DIP
+                                TransitionType.WIPE -> PgmTransitionMode.WIPE
+                                TransitionType.CUT -> PgmTransitionMode.NONE
+                            },
+                            progress = state.transitionProgress
+                        )
                     }
+                    pgmRecordingDispatcher.dispatch(
+                        recording = recorder.recordingInfo.value.isRecording,
+                        camera = pgmCam.name,
+                        frameSequence = pgmStream.pipelineLatency?.frameSequence ?: pgmStream.frameSequence,
+                        bitmap = pgmBitmap,
+                        ptzTransform = ptzTransform,
+                        transition = transition
+                    )
                     if (externalDisplayManager.isOutputEnabled.value) {
                         val frameSequence = pgmStream.pipelineLatency?.frameSequence
                             ?: pgmStream.frameSequence
@@ -308,9 +358,10 @@ class DirectorViewModel @Inject constructor(
                             bitmap = pgmBitmap,
                             cameraName = pgmCam.name,
                             frameSequence = frameSequence,
-                            enableSpatialUpscaling = _uiState.value.isPgmSpatialUpscalingEnabled,
-                            spatialUpscaleOutputHeight = _uiState.value.pgmOutputHeight,
+                            enableSpatialUpscaling = outputState.isPgmSpatialUpscalingEnabled,
+                            spatialUpscaleOutputHeight = outputState.pgmOutputHeight,
                             ptzTransform = ptzTransform,
+                            transition = transition,
                             onFrameDrawn = streamClient::markExternalFrameDrawn
                         )
                     }
@@ -350,8 +401,11 @@ class DirectorViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isRecording = info.isRecording,
+                        isStartingRecording = info.isStarting || info.isStopping,
+                        isRecordingAudio = info.includesAudio,
                         isPaused = info.isPaused,
                         recordingPath = info.outputPath,
+                        recordingError = info.errorMessage,
                         isRecordingSpatialUpscaling = info.isSpatialUpscaling,
                         recordingOutputHeight = info.outputHeight
                     )
@@ -545,11 +599,25 @@ class DirectorViewModel @Inject constructor(
 
     private fun refreshStreamRenderPriorities() {
         val state = _uiState.value
+        val pressure = state.runtimeRecommendation?.pressure ?: RuntimePressure.NORMAL
+        val liveCameraCount = state.cameras.count { it.status == ConnectionStatus.LIVE }
+        val pvwFps = when (pressure) {
+            RuntimePressure.NORMAL -> 20
+            RuntimePressure.ELEVATED -> 15
+            RuntimePressure.SEVERE -> 12
+            RuntimePressure.CRITICAL -> 10
+        }
+        val multiviewFps = when (pressure) {
+            RuntimePressure.NORMAL -> if (liveCameraCount <= 2) 15 else 10
+            RuntimePressure.ELEVATED -> 8
+            RuntimePressure.SEVERE -> 6
+            RuntimePressure.CRITICAL -> 5
+        }
         state.cameras.forEachIndexed { index, camera ->
             val fps = when (index) {
                 state.pgmCameraIndex -> 30
-                state.pvwCameraIndex -> 20
-                else -> 10
+                state.pvwCameraIndex -> pvwFps
+                else -> multiviewFps
             }
             streamClient.setRenderFpsLimit(camera.name, fps)
         }
@@ -804,6 +872,7 @@ class DirectorViewModel @Inject constructor(
                     pgmOutputHeight = 0
                 )
             }
+            refreshStreamRenderPriorities()
             return
         }
 
@@ -831,6 +900,7 @@ class DirectorViewModel @Inject constructor(
                 pgmOutputHeight = recommendation.recommendedProfile.pgmHeight
             )
         }
+        refreshStreamRenderPriorities()
     }
 
     /** Connect to video and audio streams, passing session key for AES decryption */
@@ -932,6 +1002,8 @@ class DirectorViewModel @Inject constructor(
     }
 
     fun executeCut() {
+        transitionJob?.cancel()
+        transitionJob = null
         _uiState.update { state ->
             val oldPgm = state.pgmCameraIndex
             val oldPvw = state.pvwCameraIndex
@@ -947,7 +1019,10 @@ class DirectorViewModel @Inject constructor(
             state.copy(
                 pgmCameraIndex = oldPvw,
                 pvwCameraIndex = oldPgm,
-                cameras = updatedCameras
+                cameras = updatedCameras,
+                transitionProgress = 0f,
+                tBarPosition = 0f,
+                isTransitioning = false
             )
         }
         refreshStreamRenderPriorities()
@@ -980,13 +1055,6 @@ class DirectorViewModel @Inject constructor(
             }
 
             performSwap()
-            _uiState.update {
-                it.copy(
-                    transitionProgress = 0f,
-                    tBarPosition = 0f,
-                    isTransitioning = false
-                )
-            }
         }
     }
 
@@ -995,7 +1063,11 @@ class DirectorViewModel @Inject constructor(
             val oldPgm = state.pgmCameraIndex
             val oldPvw = state.pvwCameraIndex
             if (state.cameras.getOrNull(oldPvw)?.status != ConnectionStatus.LIVE) {
-                return@update state
+                return@update state.copy(
+                    transitionProgress = 0f,
+                    tBarPosition = 0f,
+                    isTransitioning = false
+                )
             }
             val updatedCameras = state.cameras.mapIndexed { i, cam ->
                 cam.copy(
@@ -1006,7 +1078,10 @@ class DirectorViewModel @Inject constructor(
             state.copy(
                 pgmCameraIndex = oldPvw,
                 pvwCameraIndex = oldPgm,
-                cameras = updatedCameras
+                cameras = updatedCameras,
+                transitionProgress = 0f,
+                tBarPosition = 0f,
+                isTransitioning = false
             )
         }
         refreshStreamRenderPriorities()
@@ -1015,12 +1090,11 @@ class DirectorViewModel @Inject constructor(
     fun updateTBar(position: Float) {
         if (_uiState.value.isTransitioning) return
         if (_uiState.value.cameras.getOrNull(_uiState.value.pvwCameraIndex)?.status != ConnectionStatus.LIVE) return
-        _uiState.update { it.copy(tBarPosition = position, transitionProgress = position) }
-
         // Auto-swap when T-Bar reaches the end
         if (position >= 1.0f) {
             performSwap()
-            _uiState.update { it.copy(tBarPosition = 0f, transitionProgress = 0f) }
+        } else {
+            _uiState.update { it.copy(tBarPosition = position, transitionProgress = position) }
         }
     }
 
@@ -1168,12 +1242,19 @@ class DirectorViewModel @Inject constructor(
     }
 
     fun toggleRecording() {
+        if (_uiState.value.isStartingRecording || recorder.recordingInfo.value.isStarting ||
+            recorder.recordingInfo.value.isStopping
+        ) return
         val wasRecording = recorder.recordingInfo.value.isRecording
         if (wasRecording) {
             recorder.stopRecording()
-            // Auto-stop camera recording if enabled
-            if (_uiState.value.autoRecordCameras) {
-                connectionManager.sendCommandToAll("stop_recording")
+            // Stop exactly the remote recordings started with this PGM session,
+            // even if the AUTO CAM REC toggle changed while recording.
+            if (hubTriggeredRecordingNames.isNotEmpty()) {
+                hubTriggeredRecordingNames.forEach { cameraName ->
+                    connectionManager.sendCommand(cameraName, "stop_recording")
+                }
+                hubTriggeredRecordingNames.clear()
                 _uiState.update { state ->
                     state.copy(cameras = state.cameras.map { it.copy(isRecording = false) })
                 }
@@ -1181,33 +1262,62 @@ class DirectorViewModel @Inject constructor(
         } else {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
-            // Use actual PGM frame dimensions if available
-            val pgmCam = _uiState.value.cameras.getOrNull(_uiState.value.pgmCameraIndex)
-            val sourceWidth = if (pgmCam != null && pgmCam.frameWidth > 0) pgmCam.frameWidth else 1920
-            val sourceHeight = if (pgmCam != null && pgmCam.frameHeight > 0) pgmCam.frameHeight else 1080
+            // Do not open an encoder or start remote camera recordings until a
+            // real LIVE PGM frame exists. This prevents empty files and keeps the
+            // distributed recording state consistent when a camera disconnects.
+            val state = _uiState.value
+            val pgmCam = state.cameras.getOrNull(state.pgmCameraIndex)
+                ?.takeIf { it.status == ConnectionStatus.LIVE }
+                ?: return
+            val pgmBitmap = lastPgmBitmap
+                ?.takeIf { !it.isRecycled && lastPgmCameraName == pgmCam.name }
+                ?: return
+            val sourceWidth = pgmCam.frameWidth.takeIf { it > 0 } ?: pgmBitmap.width
+            val sourceHeight = pgmCam.frameHeight.takeIf { it > 0 } ?: pgmBitmap.height
             val recordingPlan = PgmRecordingPolicy.plan(
                 sourceWidth = sourceWidth,
                 sourceHeight = sourceHeight,
-                spatialUpscalingEnabled = _uiState.value.isPgmSpatialUpscalingEnabled,
-                targetHeight = _uiState.value.pgmOutputHeight
+                spatialUpscalingEnabled = state.isPgmSpatialUpscalingEnabled,
+                targetHeight = state.pgmOutputHeight
             )
-            recorder.startRecording(
-                width = recordingPlan.width,
-                height = recordingPlan.height,
-                sessionTimestamp = timestamp,
-                useSpatialUpscaling = recordingPlan.useSpatialUpscaling
-            )
+            val includeAudio = audioStreamClient.channelStates.value.values.any { it.isConnected }
+            _uiState.update { it.copy(isStartingRecording = true) }
+            viewModelScope.launch {
+                val recordingPath = try {
+                    withContext(Dispatchers.IO) {
+                        recorder.startRecording(
+                            width = recordingPlan.width,
+                            height = recordingPlan.height,
+                            sessionTimestamp = timestamp,
+                            useSpatialUpscaling = recordingPlan.useSpatialUpscaling,
+                            includeAudio = includeAudio
+                        )
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Log.e(TAG, "Could not start PGM recording", error)
+                    null
+                } finally {
+                    _uiState.update { it.copy(isStartingRecording = false) }
+                }
+                if (recordingPath == null) return@launch
 
-            // Auto-start camera recording with per-camera numbered filenames
-            if (_uiState.value.autoRecordCameras) {
-                val cameras = _uiState.value.cameras
-                cameras.forEachIndexed { index, cam ->
-                    val filePrefix = "CamHub_$timestamp-CAM${index + 1}"
-                    connectionManager.sendCommand(cam.name, "start_recording", stringValue = filePrefix)
+                // Auto-start camera recording with per-camera numbered filenames.
+                if (state.autoRecordCameras) {
+                    state.cameras.forEachIndexed { index, cam ->
+                        if (cam.status != ConnectionStatus.LIVE) return@forEachIndexed
+                        val filePrefix = "CamHub_$timestamp-CAM${index + 1}"
+                        connectionManager.sendCommand(cam.name, "start_recording", stringValue = filePrefix)
+                        hubTriggeredRecordingNames.add(cam.name)
+                    }
+                    _uiState.update { current ->
+                        current.copy(cameras = current.cameras.map {
+                            it.copy(isRecording = it.status == ConnectionStatus.LIVE)
+                        })
+                    }
                 }
-                _uiState.update { state ->
-                    state.copy(cameras = state.cameras.map { it.copy(isRecording = true) })
-                }
+                Log.d(TAG, "PGM recording started: $recordingPath (audio=$includeAudio)")
             }
         }
     }
@@ -1227,6 +1337,10 @@ class DirectorViewModel @Inject constructor(
     fun connectToPeer(peer: DiscoveredPeer) {
         desiredCameraIps.add(peer.ip)
         connectionManager.connectToCamera(peer, directorName)
+    }
+
+    fun resolvePeerTrust(requestId: Long, trust: Boolean, pairingPin: String) {
+        connectionManager.resolvePeerTrustRequest(requestId, trust, pairingPin)
     }
 
     fun disconnectPeer(name: String) {
@@ -1325,7 +1439,7 @@ class DirectorViewModel @Inject constructor(
         try { deviceMonitor.stopMonitoring() } catch (_: Exception) {}
         try { externalDisplayManager.stopListening() } catch (_: Exception) {}
         try { externalDisplayManager.disableOutput() } catch (_: Exception) {}
-        if (recorder.recordingInfo.value.isRecording) {
+        if (recorder.recordingInfo.value.isRecording || recorder.recordingInfo.value.isStarting) {
             try { recorder.stopRecording() } catch (_: Exception) {}
         }
         connectedStreamNames.clear()
@@ -1336,6 +1450,7 @@ class DirectorViewModel @Inject constructor(
         adaptiveCounterSnapshots.clear()
         streamClient.disconnectAll()
         audioStreamClient.disconnectAll()
+        audioStreamClient.onMixedPcm = null
         imageBitmapCache.clear()
     }
 

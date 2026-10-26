@@ -44,6 +44,7 @@ class ConnectionViewModel @Inject constructor(
 
     private val roleArg: String = savedStateHandle["role"] ?: "camera"
     private val role = if (roleArg == "director") AppRole.DIRECTOR else AppRole.CAMERA
+    @Volatile private var cameraSessionHandedOff = false
 
     private val _uiState = MutableStateFlow(
         ConnectionUiState(
@@ -56,6 +57,7 @@ class ConnectionViewModel @Inject constructor(
         )
     )
     val uiState: StateFlow<ConnectionUiState> = _uiState.asStateFlow()
+    val peerTrustRequests = connectionManager.peerTrustRequests
 
     init {
         when (role) {
@@ -181,9 +183,13 @@ class ConnectionViewModel @Inject constructor(
         }
     }
 
-    /** Director: connect to a discovered peer directly (no PIN) */
+    /** Director: initiate verified camera pairing from the discovered list. */
     fun connectToPeer(peer: DiscoveredPeer) {
         connectionManager.connectToCamera(peer, _uiState.value.deviceName)
+    }
+
+    fun resolvePeerTrust(requestId: Long, trust: Boolean, pairingPin: String) {
+        connectionManager.resolvePeerTrustRequest(requestId, trust, pairingPin)
     }
 
     fun connectToAll() {
@@ -229,16 +235,21 @@ class ConnectionViewModel @Inject constructor(
         hotspotManager.stopHotspot()
     }
 
+    /** Keep camera discovery and servers alive while navigation replaces this screen. */
+    fun handoffCameraSession() {
+        if (role == AppRole.CAMERA) cameraSessionHandedOff = true
+    }
+
     override fun onCleared() {
         super.onCleared()
         if (role == AppRole.DIRECTOR) {
             nsdManager.stopDiscovery()
             hotspotManager.stopHotspot()
-        } else {
+        } else if (!cameraSessionHandedOff) {
             nsdManager.unregisterService()
-            // Don't stop audioCaptureService here — it's a singleton that must
-            // survive navigation to CameraHudScreen. Cleanup happens in
-            // CameraHudViewModel.onCleared() instead.
+            connectionManager.stopServer()
+            streamServer.stop()
+            audioCaptureService.stop()
         }
     }
 }

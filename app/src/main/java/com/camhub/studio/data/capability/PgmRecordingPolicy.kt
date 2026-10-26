@@ -16,7 +16,11 @@ object PgmRecordingPolicy {
         val sourceShortEdge = minOf(sourceWidth, sourceHeight)
         if (spatialUpscalingEnabled && targetHeight > sourceShortEdge) {
             val evenShortEdge = targetHeight.coerceAtLeast(2) and 0x7FFFFFFE
-            val evenLongEdge = (evenShortEdge * 16 / 9) and 0x7FFFFFFE
+            val sourceLongEdge = maxOf(sourceWidth, sourceHeight).coerceAtLeast(2)
+            val sourceShortEdgeSafe = sourceShortEdge.coerceAtLeast(2)
+            val evenLongEdge = (
+                evenShortEdge.toLong() * sourceLongEdge / sourceShortEdgeSafe
+            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() and 0x7FFFFFFE
             val isPortrait = sourceHeight > sourceWidth
             return if (isPortrait) {
                 PgmRecordingPlan(evenShortEdge, evenLongEdge, true)

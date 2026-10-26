@@ -97,6 +97,11 @@ fun ConnectionSetupScreen(
     onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val trustRequests by viewModel.peerTrustRequests.collectAsState()
+    PeerTrustDialog(
+        request = trustRequests.firstOrNull(),
+        onResolve = viewModel::resolvePeerTrust
+    )
 
     CamHubScreenBackground {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -209,7 +214,10 @@ fun ConnectionSetupScreen(
                     role = uiState.role,
                     onClick = {
                         when (uiState.role) {
-                            AppRole.CAMERA -> onNavigateToCameraHud()
+                            AppRole.CAMERA -> {
+                                viewModel.handoffCameraSession()
+                                onNavigateToCameraHud()
+                            }
                             AppRole.DIRECTOR -> onNavigateToDirector()
                         }
                     }

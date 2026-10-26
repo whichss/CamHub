@@ -32,6 +32,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.viewinterop.AndroidView
 import com.camhub.studio.data.gl.SpatialUpscaleSurfaceView
+import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.HybridPtzController
 import com.camhub.studio.data.ptz.HybridPtzState
@@ -100,6 +102,7 @@ fun ViewportCard(
     isPvw: Boolean,
     modifier: Modifier = Modifier,
     transitionBitmap: ImageBitmap? = null,
+    transitionSourceBitmap: Bitmap? = null,
     transitionProgress: Float = 0f,
     transitionType: TransitionType = TransitionType.CUT,
     frameSequence: Long = 0L,
@@ -107,7 +110,6 @@ fun ViewportCard(
     transitionFrameSequence: Long = 0L,
     onFrameDrawn: (String, Long) -> Unit = { _, _ -> },
     enableSpatialUpscaling: Boolean = false,
-    spatialUpscaleOutputHeight: Int = 1080,
     ptzState: HybridPtzState = HybridPtzState(),
     transitionPtzState: HybridPtzState = HybridPtzState(),
     maxPtzZoom: Float = 4f,
@@ -116,10 +118,14 @@ fun ViewportCard(
     onPtzGesture: (String, Float, Float, Float) -> Unit = { _, _, _, _ -> },
     onPtzDoubleTap: (String, Float, Float) -> Unit = { _, _, _ -> }
 ) {
-    val useSpatialUpscaling = enableSpatialUpscaling &&
+    val enableSpatialReconstruction = enableSpatialUpscaling &&
         isPgm &&
-        transitionProgress <= 0f &&
         previewSourceBitmap != null
+    val useSpatialUpscaling = enableSpatialReconstruction &&
+        transitionProgress <= 0f
+    val isTransitioning = transitionProgress > 0f && transitionBitmap != null
+    val useGpuPgmRenderer = isPgm && previewSourceBitmap != null &&
+        (useSpatialUpscaling || (isTransitioning && transitionSourceBitmap != null))
     val ptzTransform = HybridPtzController.hubTransform(ptzState)
     val transitionPtzTransform = HybridPtzController.hubTransform(transitionPtzState)
     val ptzEnabled = cameraName != "---" &&
@@ -169,11 +175,15 @@ fun ViewportCard(
                 }
             }
 
-            // Preview area with fixed 16:9 aspect ratio
+            // Keep each live source's native landscape or portrait aspect ratio.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                    .aspectRatio(
+                        previewSourceBitmap?.takeIf { it.width > 0 && it.height > 0 }
+                            ?.let { it.width.toFloat() / it.height }
+                            ?: 16f / 9f
+                    )
                     .background(BackgroundDarker)
                     .clipToBounds()
                     .pointerInput(cameraName, ptzEnabled, maxPtzZoom) {
@@ -207,29 +217,44 @@ fun ViewportCard(
                     }
                     .drawWithContent {
                         drawContent()
-                        if (!useSpatialUpscaling && frameSequence > 0L) {
+                        if (!useGpuPgmRenderer && frameSequence > 0L) {
                             onFrameDrawn(cameraName, frameSequence)
                         }
-                        if (transitionProgress > 0f && transitionFrameSequence > 0L) {
+                        if (!useGpuPgmRenderer && transitionProgress > 0f && transitionFrameSequence > 0L) {
                             onFrameDrawn(transitionCameraName, transitionFrameSequence)
                         }
                     },
                 contentAlignment = Alignment.Center
             ) {
-                val isTransitioning = transitionProgress > 0f && transitionBitmap != null
-
                 when {
-                    useSpatialUpscaling -> {
+                    useGpuPgmRenderer -> {
                         AndroidView(
                             factory = { context -> SpatialUpscaleSurfaceView(context) },
                             update = { view ->
-                                view.setOutputHeight(spatialUpscaleOutputHeight)
                                 previewSourceBitmap?.let { bitmap ->
                                     view.displayFrame(
                                         bitmap = bitmap,
                                         cameraName = cameraName,
                                         frameSequence = frameSequence,
                                         ptzTransform = ptzTransform,
+                                        transition = transitionSourceBitmap?.takeIf {
+                                            isTransitioning
+                                        }?.let { incomingBitmap ->
+                                            PgmTransitionFrame(
+                                                bitmap = incomingBitmap,
+                                                cameraName = transitionCameraName,
+                                                frameSequence = transitionFrameSequence,
+                                                ptzTransform = transitionPtzTransform,
+                                                mode = when (transitionType) {
+                                                    TransitionType.MIX -> PgmTransitionMode.MIX
+                                                    TransitionType.DIP -> PgmTransitionMode.DIP
+                                                    TransitionType.WIPE -> PgmTransitionMode.WIPE
+                                                    TransitionType.CUT -> PgmTransitionMode.NONE
+                                                },
+                                                progress = transitionProgress
+                                            )
+                                        },
+                                        enableSpatialReconstruction = enableSpatialReconstruction,
                                         onFrameSubmitted = { name, sequence, _ ->
                                             onFrameDrawn(name, sequence)
                                         }
@@ -394,15 +419,14 @@ fun ViewportPanel(
     pvwFps: Int,
     pgmBitmap: ImageBitmap?,
     pgmSourceBitmap: Bitmap? = null,
+    pvwSourceBitmap: Bitmap? = null,
     pvwBitmap: ImageBitmap?,
     enablePgmSpatialUpscaling: Boolean = false,
-    pgmSpatialUpscaleOutputHeight: Int = 1080,
     pgmFrameSequence: Long = 0L,
     pvwFrameSequence: Long = 0L,
     onFrameDrawn: (String, Long) -> Unit = { _, _ -> },
     isVertical: Boolean = false,
     transitionProgress: Float = 0f,
-    isTransitioning: Boolean = false,
     selectedTransition: TransitionType = TransitionType.CUT,
     pgmPtzState: HybridPtzState = HybridPtzState(),
     pvwPtzState: HybridPtzState = HybridPtzState(),
@@ -429,15 +453,15 @@ fun ViewportPanel(
                 isPgm = true,
                 isPvw = false,
                 modifier = Modifier.fillMaxWidth(),
-                transitionBitmap = if (isTransitioning) pvwBitmap else null,
-                transitionProgress = if (isTransitioning) transitionProgress else 0f,
+                transitionBitmap = if (transitionProgress > 0f) pvwBitmap else null,
+                transitionSourceBitmap = if (transitionProgress > 0f) pvwSourceBitmap else null,
+                transitionProgress = transitionProgress,
                 transitionType = selectedTransition,
                 frameSequence = pgmFrameSequence,
                 transitionCameraName = pvwCameraName,
                 transitionFrameSequence = pvwFrameSequence,
                 onFrameDrawn = onFrameDrawn,
                 enableSpatialUpscaling = enablePgmSpatialUpscaling,
-                spatialUpscaleOutputHeight = pgmSpatialUpscaleOutputHeight,
                 ptzState = pgmPtzState,
                 transitionPtzState = pvwPtzState,
                 maxPtzZoom = pgmMaxPtzZoom,
@@ -478,15 +502,15 @@ fun ViewportPanel(
                 isPgm = true,
                 isPvw = false,
                 modifier = Modifier.weight(1f),
-                transitionBitmap = if (isTransitioning) pvwBitmap else null,
-                transitionProgress = if (isTransitioning) transitionProgress else 0f,
+                transitionBitmap = if (transitionProgress > 0f) pvwBitmap else null,
+                transitionSourceBitmap = if (transitionProgress > 0f) pvwSourceBitmap else null,
+                transitionProgress = transitionProgress,
                 transitionType = selectedTransition,
                 frameSequence = pgmFrameSequence,
                 transitionCameraName = pvwCameraName,
                 transitionFrameSequence = pvwFrameSequence,
                 onFrameDrawn = onFrameDrawn,
                 enableSpatialUpscaling = enablePgmSpatialUpscaling,
-                spatialUpscaleOutputHeight = pgmSpatialUpscaleOutputHeight,
                 ptzState = pgmPtzState,
                 transitionPtzState = pvwPtzState,
                 maxPtzZoom = pgmMaxPtzZoom,

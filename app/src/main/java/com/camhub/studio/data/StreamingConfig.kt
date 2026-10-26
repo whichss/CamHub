@@ -19,13 +19,14 @@ class StreamingConfig @Inject constructor(
             prefs.edit().putInt("stream_fps", value).apply()
         }
 
-    var maxResolution: Int = prefs.getInt("stream_max_resolution", 1080)
+    // Camera links default to 720p; the hub upscales only the selected PGM.
+    var maxResolution: Int = prefs.getInt("stream_max_resolution", 720)
         set(value) {
             field = value
             prefs.edit().putInt("stream_max_resolution", value).apply()
         }
 
-    var bitrateMbps: Int = prefs.getInt("stream_bitrate", 6)
+    var bitrateMbps: Int = prefs.getInt("stream_bitrate", 4)
         set(value) {
             field = value
             prefs.edit().putInt("stream_bitrate", value).apply()

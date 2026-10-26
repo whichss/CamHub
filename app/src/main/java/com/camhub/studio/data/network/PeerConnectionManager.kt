@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.serialization.Serializable
@@ -106,6 +107,14 @@ data class ConnectedPeer(
     }
 }
 
+data class PeerTrustRequest(
+    val id: Long,
+    val peer: DiscoveredPeer,
+    val directorName: String,
+    val fingerprint: String,
+    val requiresFingerprintConfirmation: Boolean
+)
+
 @Singleton
 class PeerConnectionManager @Inject constructor(
     private val tlsHelper: TlsHelper,
@@ -120,6 +129,8 @@ class PeerConnectionManager @Inject constructor(
         private const val MAX_LINE_LENGTH = 4096
         private const val AES_KEY_SIZE = 32 // AES-256
         private const val MAX_PARSE_ERRORS = 5 // Disconnect after repeated parse failures
+        private const val MAX_PAIRING_FAILURES = 5
+        private const val PAIRING_FAILURE_WINDOW_MS = 60_000L
     }
 
     /** Read a line with maximum length to prevent memory exhaustion attacks */
@@ -138,6 +149,8 @@ class PeerConnectionManager @Inject constructor(
     private val json = Json { ignoreUnknownKeys = true }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val secureRandom = SecureRandom()
+    private data class PairingFailureWindow(val firstAttemptAtMs: Long, val attempts: Int)
+    private val pairingFailuresByIp = ConcurrentHashMap<String, PairingFailureWindow>()
 
     private val _connectionState = MutableStateFlow(PeerConnectionState.DISCONNECTED)
     val connectionState: StateFlow<PeerConnectionState> = _connectionState.asStateFlow()
@@ -150,6 +163,10 @@ class PeerConnectionManager @Inject constructor(
 
     private val _ptzAppliedEvents = MutableSharedFlow<PtzAppliedEvent>(extraBufferCapacity = 16)
     val ptzAppliedEvents: SharedFlow<PtzAppliedEvent> = _ptzAppliedEvents.asSharedFlow()
+
+    private val _peerTrustRequests = MutableStateFlow<List<PeerTrustRequest>>(emptyList())
+    val peerTrustRequests: StateFlow<List<PeerTrustRequest>> = _peerTrustRequests.asStateFlow()
+    private val trustRequestSequence = AtomicLong(0L)
 
     private var serverSocket: SSLServerSocket? = null
     private var serverJob: Job? = null
@@ -323,7 +340,28 @@ class PeerConnectionManager @Inject constructor(
             }
             if (hello.type != "hello") return
 
-            // Auto-accept — use shared session key
+            val nowMs = System.currentTimeMillis()
+            val failureWindow = pairingFailuresByIp[clientIp]
+            if (failureWindow != null && nowMs - failureWindow.firstAttemptAtMs < PAIRING_FAILURE_WINDOW_MS &&
+                failureWindow.attempts >= MAX_PAIRING_FAILURES
+            ) {
+                writer.println(json.encodeToString(HandshakeMessage(type = "error")))
+                return
+            }
+            if (!tlsHelper.isLocalPairingPinValid(hello.pin)) {
+                pairingFailuresByIp.compute(clientIp) { _, previous ->
+                    if (previous == null || nowMs - previous.firstAttemptAtMs >= PAIRING_FAILURE_WINDOW_MS) {
+                        PairingFailureWindow(nowMs, 1)
+                    } else {
+                        previous.copy(attempts = previous.attempts + 1)
+                    }
+                }
+                writer.println(json.encodeToString(HandshakeMessage(type = "error")))
+                return
+            }
+            pairingFailuresByIp.remove(clientIp)
+
+            // The shared session key is released only after the camera's pairing PIN is verified.
             val sessionKey = serverSessionKey ?: run {
                 Log.e(TAG, "Server session key not available")
                 return
@@ -380,7 +418,7 @@ class PeerConnectionManager @Inject constructor(
 
     // --- Director side: connect to a discovered camera ---
 
-    fun connectToCamera(peer: DiscoveredPeer, directorName: String) {
+    fun connectToCamera(peer: DiscoveredPeer, directorName: String, pairingPin: String? = null) {
         scope.launch {
             localDeviceName = directorName
             _connectionState.value = PeerConnectionState.CONNECTING
@@ -407,6 +445,23 @@ class PeerConnectionManager @Inject constructor(
                     }
                 }
                 if (socket == null) throw lastError ?: IOException("No reachable local route")
+                val fingerprint = tlsHelper.certificateFingerprint(socket)
+                val trustedFingerprint = tlsHelper.isPeerFingerprintTrusted(peer.ip, fingerprint)
+                val resolvedPin = pairingPin ?: tlsHelper.pairingPinForPeer(peer.ip)
+                if (!trustedFingerprint || resolvedPin == null) {
+                    val request = PeerTrustRequest(
+                        id = trustRequestSequence.incrementAndGet(),
+                        peer = peer,
+                        directorName = directorName,
+                        fingerprint = fingerprint,
+                        requiresFingerprintConfirmation = !trustedFingerprint
+                    )
+                    _peerTrustRequests.update { requests ->
+                        requests.filterNot { it.peer.ip == peer.ip } + request
+                    }
+                    _connectionState.value = PeerConnectionState.DISCONNECTED
+                    return@launch
+                }
                 socket.soTimeout = 10_000 // 10s timeout for handshake reads
                 socket.tcpNoDelay = true
 
@@ -416,7 +471,8 @@ class PeerConnectionManager @Inject constructor(
                 // Send hello
                 val hello = HandshakeMessage(
                     type = "hello",
-                    deviceName = directorName
+                    deviceName = directorName,
+                    pin = resolvedPin
                 )
                 writer.println(json.encodeToString(hello))
 
@@ -432,6 +488,21 @@ class PeerConnectionManager @Inject constructor(
                 } else null
 
                 if (ack == null || ack.type == "error") {
+                    if (ack?.type == "error" && resolvedPin != null) {
+                        tlsHelper.removePeerPairingPin(peer.ip)
+                        val request = PeerTrustRequest(
+                            id = trustRequestSequence.incrementAndGet(),
+                            peer = peer,
+                            directorName = directorName,
+                            fingerprint = fingerprint,
+                            requiresFingerprintConfirmation = false
+                        )
+                        _peerTrustRequests.update { requests ->
+                            requests.filterNot { it.peer.ip == peer.ip } + request
+                        }
+                        _connectionState.value = PeerConnectionState.DISCONNECTED
+                        return@launch
+                    }
                     _connectionState.value = PeerConnectionState.ERROR
                     return@launch
                 }
@@ -475,6 +546,7 @@ class PeerConnectionManager @Inject constructor(
                     streamKey = sessionKey
                 )
                 addPeer(connectedPeer)
+                tlsHelper.savePeerPairingPin(peer.ip, resolvedPin)
                 networkTransportManager.markInUse(selectedNetwork)
                 _connectionState.value = PeerConnectionState.CONNECTED
                 accepted = true
@@ -489,6 +561,22 @@ class PeerConnectionManager @Inject constructor(
                     try { socket?.close() } catch (_: Exception) {}
                 }
             }
+        }
+    }
+
+    /** Confirm only after comparing this value with the camera's on-device identity display. */
+    fun resolvePeerTrustRequest(requestId: Long, trust: Boolean, pairingPin: String) {
+        val request = _peerTrustRequests.value.firstOrNull { it.id == requestId } ?: return
+        if (trust && !pairingPin.matches(Regex("[0-9]{8}"))) return
+        _peerTrustRequests.update { requests -> requests.filterNot { it.id == requestId } }
+        if (!trust) return
+        try {
+            if (request.requiresFingerprintConfirmation) {
+                tlsHelper.trustPeerFingerprint(request.peer.ip, request.fingerprint)
+            }
+            connectToCamera(request.peer, request.directorName, pairingPin)
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not save trusted camera identity", error)
         }
     }
 

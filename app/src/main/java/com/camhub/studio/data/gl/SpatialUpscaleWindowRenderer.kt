@@ -12,17 +12,19 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
-/** Renders spatially upscaled frames directly into a MediaCodec input Surface. */
+/** Composites and optionally spatially reconstructs PGM frames into a MediaCodec input Surface. */
 class SpatialUpscaleWindowRenderer(
     private val surface: Surface,
     private val outputWidth: Int,
     private val outputHeight: Int,
+    private val enableSpatialReconstruction: Boolean = true,
     private val onFrameRendered: (Boolean) -> Unit
 ) {
     private data class PendingFrame(
         val bitmap: Bitmap,
         val presentationTimeNs: Long,
-        val ptzTransform: HubPtzTransform
+        val ptzTransform: HubPtzTransform,
+        val transition: PgmTransitionFrame?
     )
 
     private val latestFrame = AtomicReference<PendingFrame?>()
@@ -70,10 +72,11 @@ class SpatialUpscaleWindowRenderer(
     fun render(
         bitmap: Bitmap,
         presentationTimeNs: Long,
-        ptzTransform: HubPtzTransform
+        ptzTransform: HubPtzTransform,
+        transition: PgmTransitionFrame? = null
     ): Boolean {
         if (!acceptingFrames.get() || bitmap.isRecycled) return false
-        latestFrame.set(PendingFrame(bitmap, presentationTimeNs, ptzTransform))
+        latestFrame.set(PendingFrame(bitmap, presentationTimeNs, ptzTransform, transition))
         if (renderQueued.compareAndSet(false, true)) {
             handler?.post { drainLatestFrame() }
         }
@@ -113,7 +116,9 @@ class SpatialUpscaleWindowRenderer(
                             frame.bitmap,
                             outputWidth,
                             outputHeight,
-                            frame.ptzTransform
+                            frame.ptzTransform,
+                            frame.transition,
+                            enableSpatialReconstruction
                         )
                     ) {
                         egl.setPresentationTime(target, frame.presentationTimeNs)

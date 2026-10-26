@@ -21,6 +21,17 @@ class SpatialUpscaleGlProgram {
     private var scaleLocation = -1
     private var ptzScaleLocation = -1
     private var ptzCenterLocation = -1
+    private var secondTexture = 0
+    private var secondWidth = 0
+    private var secondHeight = 0
+    private var secondTextureLocation = -1
+    private var secondTexelSizeLocation = -1
+    private var secondScaleLocation = -1
+    private var secondPtzScaleLocation = -1
+    private var secondPtzCenterLocation = -1
+    private var transitionModeLocation = -1
+    private var transitionProgressLocation = -1
+    private var reconstructionEnabledLocation = -1
 
     private val vertices: FloatBuffer = ByteBuffer
         .allocateDirect(QUAD.size * Float.SIZE_BYTES)
@@ -34,24 +45,36 @@ class SpatialUpscaleGlProgram {
         program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         if (program == 0) return false
         texture = createTexture()
+        secondTexture = createTexture()
         textureLocation = GLES30.glGetUniformLocation(program, "uTexture")
         texelSizeLocation = GLES30.glGetUniformLocation(program, "uTexelSize")
         scaleLocation = GLES30.glGetUniformLocation(program, "uScale")
         ptzScaleLocation = GLES30.glGetUniformLocation(program, "uPtzScale")
         ptzCenterLocation = GLES30.glGetUniformLocation(program, "uPtzCenter")
-        return texture != 0
+        secondTextureLocation = GLES30.glGetUniformLocation(program, "uSecondTexture")
+        secondTexelSizeLocation = GLES30.glGetUniformLocation(program, "uSecondTexelSize")
+        secondScaleLocation = GLES30.glGetUniformLocation(program, "uSecondScale")
+        secondPtzScaleLocation = GLES30.glGetUniformLocation(program, "uSecondPtzScale")
+        secondPtzCenterLocation = GLES30.glGetUniformLocation(program, "uSecondPtzCenter")
+        transitionModeLocation = GLES30.glGetUniformLocation(program, "uTransitionMode")
+        transitionProgressLocation = GLES30.glGetUniformLocation(program, "uTransitionProgress")
+        reconstructionEnabledLocation = GLES30.glGetUniformLocation(program, "uReconstructionEnabled")
+        return texture != 0 && secondTexture != 0
     }
 
     fun render(
         bitmap: Bitmap,
         outputWidth: Int,
         outputHeight: Int,
-        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM
+        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+        transition: PgmTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean = true
     ): Boolean {
         if (bitmap.isRecycled || program == 0 || texture == 0) return false
         while (GLES30.glGetError() != GLES30.GL_NO_ERROR) {
             // Clear a stale error from earlier work in this context before measuring this draw.
         }
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         uploadBitmap(bitmap)
 
         GLES30.glViewport(0, 0, outputWidth.coerceAtLeast(1), outputHeight.coerceAtLeast(1))
@@ -70,6 +93,43 @@ class SpatialUpscaleGlProgram {
         GLES30.glUniform2f(scaleLocation, scale.first, scale.second)
         GLES30.glUniform1f(ptzScaleLocation, ptzTransform.scale)
         GLES30.glUniform2f(ptzCenterLocation, ptzTransform.centerX, ptzTransform.centerY)
+        GLES30.glUniform1i(reconstructionEnabledLocation, if (enableSpatialReconstruction) 1 else 0)
+        val activeTransition = transition?.takeIf {
+            !it.bitmap.isRecycled && it.mode != PgmTransitionMode.NONE
+        }
+        if (activeTransition != null) {
+            uploadSecondBitmap(activeTransition.bitmap)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, secondTexture)
+            GLES30.glUniform1i(secondTextureLocation, 1)
+            GLES30.glUniform2f(
+                secondTexelSizeLocation,
+                1f / secondWidth.coerceAtLeast(1),
+                1f / secondHeight.coerceAtLeast(1)
+            )
+            val secondScale = fitScale(
+                secondWidth,
+                secondHeight,
+                outputWidth,
+                outputHeight
+            )
+            GLES30.glUniform2f(secondScaleLocation, secondScale.first, secondScale.second)
+            GLES30.glUniform1f(secondPtzScaleLocation, activeTransition.ptzTransform.scale)
+            GLES30.glUniform2f(
+                secondPtzCenterLocation,
+                activeTransition.ptzTransform.centerX,
+                activeTransition.ptzTransform.centerY
+            )
+            GLES30.glUniform1i(transitionModeLocation, activeTransition.mode.shaderValue)
+            GLES30.glUniform1f(
+                transitionProgressLocation,
+                activeTransition.progress.coerceIn(0f, 1f)
+            )
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        } else {
+            GLES30.glUniform1i(transitionModeLocation, PgmTransitionMode.NONE.shaderValue)
+            GLES30.glUniform1f(transitionProgressLocation, 0f)
+        }
 
         val stride = 4 * Float.SIZE_BYTES
         vertices.position(0)
@@ -91,12 +151,18 @@ class SpatialUpscaleGlProgram {
             GLES30.glDeleteTextures(1, intArrayOf(texture), 0)
             texture = 0
         }
+        if (secondTexture != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(secondTexture), 0)
+            secondTexture = 0
+        }
         if (program != 0) {
             GLES30.glDeleteProgram(program)
             program = 0
         }
         inputWidth = 0
         inputHeight = 0
+        secondWidth = 0
+        secondHeight = 0
     }
 
     private fun uploadBitmap(bitmap: Bitmap) {
@@ -104,6 +170,18 @@ class SpatialUpscaleGlProgram {
         if (bitmap.width != inputWidth || bitmap.height != inputHeight) {
             inputWidth = bitmap.width
             inputHeight = bitmap.height
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
+        } else {
+            GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, bitmap)
+        }
+    }
+
+    private fun uploadSecondBitmap(bitmap: Bitmap) {
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, secondTexture)
+        if (bitmap.width != secondWidth || bitmap.height != secondHeight) {
+            secondWidth = bitmap.width
+            secondHeight = bitmap.height
             GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
         } else {
             GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, bitmap)
@@ -184,10 +262,9 @@ class SpatialUpscaleGlProgram {
         private const val VERTEX_SHADER = """#version 300 es
             layout(location = 0) in vec2 aPosition;
             layout(location = 1) in vec2 aTexCoord;
-            uniform vec2 uScale;
             out vec2 vTexCoord;
             void main() {
-                gl_Position = vec4(aPosition * uScale, 0.0, 1.0);
+                gl_Position = vec4(aPosition, 0.0, 1.0);
                 vTexCoord = aTexCoord;
             }
         """
@@ -198,6 +275,14 @@ class SpatialUpscaleGlProgram {
             uniform vec2 uTexelSize;
             uniform float uPtzScale;
             uniform vec2 uPtzCenter;
+            uniform sampler2D uSecondTexture;
+            uniform vec2 uSecondTexelSize;
+            uniform vec2 uSecondScale;
+            uniform float uSecondPtzScale;
+            uniform vec2 uSecondPtzCenter;
+            uniform int uTransitionMode;
+            uniform float uTransitionProgress;
+            uniform int uReconstructionEnabled;
             in vec2 vTexCoord;
             out vec4 outColor;
 
@@ -205,29 +290,65 @@ class SpatialUpscaleGlProgram {
                 return dot(color, vec3(0.299, 0.587, 0.114));
             }
 
-            void main() {
-                vec2 uv = (vTexCoord - vec2(0.5)) / max(uPtzScale, 1.0) + uPtzCenter;
-                vec3 c = texture(uTexture, uv).rgb;
-                vec3 n = texture(uTexture, uv + vec2(0.0, -uTexelSize.y)).rgb;
-                vec3 s = texture(uTexture, uv + vec2(0.0,  uTexelSize.y)).rgb;
-                vec3 w = texture(uTexture, uv + vec2(-uTexelSize.x, 0.0)).rgb;
-                vec3 e = texture(uTexture, uv + vec2( uTexelSize.x, 0.0)).rgb;
-
+            vec3 reconstruct(sampler2D source, vec2 uv, vec2 texelSize) {
+                vec3 c = texture(source, uv).rgb;
+                vec3 n = texture(source, uv + vec2(0.0, -texelSize.y)).rgb;
+                vec3 s = texture(source, uv + vec2(0.0,  texelSize.y)).rgb;
+                vec3 w = texture(source, uv + vec2(-texelSize.x, 0.0)).rgb;
+                vec3 e = texture(source, uv + vec2( texelSize.x, 0.0)).rgb;
                 vec2 gradient = vec2(luma(e) - luma(w), luma(s) - luma(n));
                 float edge = clamp(length(gradient) * 3.0, 0.0, 1.0);
                 vec2 tangent = normalize(vec2(-gradient.y, gradient.x) + vec2(0.0001));
-                vec2 adaptiveOffset = tangent * uTexelSize * 0.55;
+                vec2 adaptiveOffset = tangent * texelSize * 0.55;
                 vec3 alongEdge = 0.5 * (
-                    texture(uTexture, uv + adaptiveOffset).rgb +
-                    texture(uTexture, uv - adaptiveOffset).rgb
+                    texture(source, uv + adaptiveOffset).rgb +
+                    texture(source, uv - adaptiveOffset).rgb
                 );
-
                 vec3 reconstructed = mix(c, alongEdge, edge * 0.35);
                 vec3 neighborhood = (n + s + w + e) * 0.25;
                 vec3 sharpened = reconstructed + (reconstructed - neighborhood) * (0.12 + edge * 0.10);
                 vec3 localMin = min(c, min(min(n, s), min(w, e)));
                 vec3 localMax = max(c, max(max(n, s), max(w, e)));
-                outColor = vec4(clamp(sharpened, localMin, localMax), 1.0);
+                return clamp(sharpened, localMin, localMax);
+            }
+
+            void main() {
+                vec2 primaryCoord = (vTexCoord - vec2(0.5)) / uScale + vec2(0.5);
+                bool primaryOutside = any(lessThan(primaryCoord, vec2(0.0))) ||
+                    any(greaterThan(primaryCoord, vec2(1.0)));
+                vec2 uv = (primaryCoord - vec2(0.5)) /
+                    max(uPtzScale, 1.0) + uPtzCenter;
+                vec3 primary = primaryOutside
+                    ? vec3(0.0)
+                    : (uReconstructionEnabled == 1
+                        ? reconstruct(uTexture, uv, uTexelSize)
+                        : texture(uTexture, uv).rgb);
+                if (uTransitionMode == 0) {
+                    outColor = vec4(primary, 1.0);
+                    return;
+                }
+                vec2 secondCoord = (vTexCoord - vec2(0.5)) /
+                    uSecondScale + vec2(0.5);
+                bool secondOutside = any(lessThan(secondCoord, vec2(0.0))) ||
+                    any(greaterThan(secondCoord, vec2(1.0)));
+                vec2 secondUv = (secondCoord - vec2(0.5)) /
+                    max(uSecondPtzScale, 1.0) + uSecondPtzCenter;
+                vec3 incoming = secondOutside
+                    ? vec3(0.0)
+                    : (uReconstructionEnabled == 1
+                        ? reconstruct(uSecondTexture, secondUv, uSecondTexelSize)
+                        : texture(uSecondTexture, secondUv).rgb);
+                vec3 result = primary;
+                if (uTransitionMode == 1) {
+                    result = mix(primary, incoming, uTransitionProgress);
+                } else if (uTransitionMode == 2) {
+                    result = uTransitionProgress <= 0.5
+                        ? mix(primary, vec3(0.0), uTransitionProgress * 2.0)
+                        : mix(vec3(0.0), incoming, (uTransitionProgress - 0.5) * 2.0);
+                } else if (uTransitionMode == 3) {
+                    result = mix(primary, incoming, step(vTexCoord.x, uTransitionProgress));
+                }
+                outColor = vec4(result, 1.0);
             }
         """
     }
