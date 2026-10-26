@@ -326,11 +326,13 @@ class DirectorRecorder @Inject constructor(
             val index = runCatching { codec.dequeueInputBuffer(10_000) }.getOrDefault(-1)
             if (index >= 0) {
                 runCatching {
+                    val endPresentationTimeUs =
+                        recordingPresentationTimeUs(System.nanoTime()) ?: 0L
                     codec.queueInputBuffer(
                         index,
                         0,
                         0,
-                        System.nanoTime() / 1_000L,
+                        endPresentationTimeUs,
                         MediaCodec.BUFFER_FLAG_END_OF_STREAM
                     )
                 }
