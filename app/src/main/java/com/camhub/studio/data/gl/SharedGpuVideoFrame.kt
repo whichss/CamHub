@@ -10,12 +10,15 @@ class SharedGpuVideoFrame internal constructor(
     val frameSequence: Long,
     val presentationTimeUs: Long,
     val decodedAtElapsedMs: Long,
+    rotationDegrees: Int = 0,
     private val waitForProducer: () -> Unit,
     private val retainSlot: () -> Unit,
     private val releaseSlot: (Long) -> Unit
 ) : AutoCloseable {
     private val lock = Any()
     private var references = 1
+    @Volatile var rotationDegrees: Int = rotationDegrees.normalizedRotation()
+        internal set
 
     /** Adds one consumer reference. The caller must release exactly that reference. */
     fun retain(): SharedGpuVideoFrame = synchronized(lock) {
@@ -46,6 +49,8 @@ class SharedGpuVideoFrame internal constructor(
         releaseSlot(fence)
     }
 }
+
+private fun Int.normalizedRotation(): Int = ((this % 360) + 360) % 360
 
 /** Decoder-thread-owned ring. A slot is not overwritten while any output holds a lease. */
 internal class SharedGpuTexturePool(private val textureIds: IntArray) {

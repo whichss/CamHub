@@ -23,8 +23,10 @@ import com.camhub.studio.data.capability.RuntimePressure
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
+import com.camhub.studio.data.gl.SharedGpuVideoSurfaceView
 import com.camhub.studio.data.ptz.HybridPtzState
 import com.camhub.studio.data.ptz.HybridPtzController
+import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.PtzMode
 import com.camhub.studio.data.network.ConnectedPeer
 import com.camhub.studio.data.network.AdaptiveBitrateController
@@ -51,6 +53,8 @@ import java.util.Date
 import java.util.IdentityHashMap
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -98,6 +102,8 @@ class DirectorViewModel @Inject constructor(
     private val sharedGpuFrameListener: (String, SharedGpuVideoFrame) -> Unit = { cameraName, frame ->
         handleSharedGpuFrame(cameraName, frame)
     }
+    private val gpuPreviewTargets = ConcurrentHashMap<String, CopyOnWriteArraySet<SharedGpuVideoSurfaceView>>()
+    private val gpuPreviewCameraByView = ConcurrentHashMap<SharedGpuVideoSurfaceView, String>()
     private val hubTriggeredRecordingNames = mutableSetOf<String>()
     private var transitionJob: Job? = null
     private val imageBitmapCache = IdentityHashMap<Bitmap, ImageBitmap>()
@@ -1254,6 +1260,7 @@ class DirectorViewModel @Inject constructor(
         val wasRecording = recorder.recordingInfo.value.isRecording
         if (wasRecording) {
             recorder.stopRecording()
+            refreshSharedGpuFrameTargets()
             // Stop exactly the remote recordings started with this PGM session,
             // even if the AUTO CAM REC toggle changed while recording.
             if (hubTriggeredRecordingNames.isNotEmpty()) {
@@ -1308,6 +1315,7 @@ class DirectorViewModel @Inject constructor(
                     _uiState.update { it.copy(isStartingRecording = false) }
                 }
                 if (recordingPath == null) return@launch
+                refreshSharedGpuFrameTargets()
 
                 // Auto-start camera recording with per-camera numbered filenames.
                 if (state.autoRecordCameras) {
@@ -1430,11 +1438,55 @@ class DirectorViewModel @Inject constructor(
         nsdManager.startDiscovery()
     }
 
+    fun registerGpuPreview(
+        cameraName: String,
+        view: SharedGpuVideoSurfaceView,
+        ptzTransform: HubPtzTransform,
+        enableSpatialReconstruction: Boolean
+    ) {
+        view.updateDisplayConfig(
+            cameraName,
+            ptzTransform,
+            enableSpatialReconstruction,
+            streamClient::markFrameDrawn
+        )
+        val previousCamera = gpuPreviewCameraByView.put(view, cameraName)
+        if (previousCamera != null && previousCamera != cameraName) {
+            gpuPreviewTargets[previousCamera]?.let { targets ->
+                targets.remove(view)
+                if (targets.isEmpty()) gpuPreviewTargets.remove(previousCamera, targets)
+            }
+        }
+        gpuPreviewTargets.computeIfAbsent(cameraName) { CopyOnWriteArraySet() }.add(view)
+        refreshSharedGpuFrameTargets()
+    }
+
+    fun unregisterGpuPreview(view: SharedGpuVideoSurfaceView) {
+        val cameraName = gpuPreviewCameraByView.remove(view) ?: return
+        gpuPreviewTargets[cameraName]?.let { targets ->
+            targets.remove(view)
+            if (targets.isEmpty()) gpuPreviewTargets.remove(cameraName, targets)
+        }
+        refreshSharedGpuFrameTargets()
+    }
+
+    private fun refreshSharedGpuFrameTargets() {
+        val targets = gpuPreviewTargets.keys.toMutableSet()
+        val currentState = _uiState.value
+        if (recorder.recordingInfo.value.isRecording) {
+            currentState.cameras.getOrNull(currentState.pgmCameraIndex)?.name?.let(targets::add)
+        }
+        streamClient.setSharedGpuFrameTargets(targets)
+    }
+
     override fun onCleared() {
         super.onCleared()
         if (streamClient.onSharedGpuFrame === sharedGpuFrameListener) {
             streamClient.onSharedGpuFrame = null
         }
+        gpuPreviewTargets.clear()
+        gpuPreviewCameraByView.clear()
+        streamClient.setSharedGpuFrameTargets(emptySet())
         transitionJob?.cancel()
         ptzCommandJobs.values.forEach { it.cancel() }
         ptzCommandJobs.clear()
@@ -1464,6 +1516,10 @@ class DirectorViewModel @Inject constructor(
     }
 
     private fun handleSharedGpuFrame(cameraName: String, frame: SharedGpuVideoFrame) {
+        gpuPreviewTargets[cameraName]?.forEach { target ->
+            val previewLease = runCatching { frame.retain() }.getOrNull() ?: return@forEach
+            if (!target.displayFrame(previewLease)) previewLease.close()
+        }
         val state = _uiState.value
         val pgmCamera = state.cameras.getOrNull(state.pgmCameraIndex)
         val transitionActive = state.transitionProgress > 0f &&

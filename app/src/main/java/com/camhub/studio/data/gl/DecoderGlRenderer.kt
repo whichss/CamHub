@@ -95,6 +95,7 @@ class DecoderGlRenderer(
     private val renderQueued = AtomicBoolean(false)
     private val renderAgain = AtomicBoolean(false)
     @Volatile private var outputFpsLimit = 30
+    @Volatile private var sharedGpuOutputEnabled = false
     private var lastReadbackAtElapsedMs = 0L
 
     var surface: Surface? = null
@@ -107,6 +108,19 @@ class DecoderGlRenderer(
     /** Limits costly GPU-to-CPU Bitmap readback without slowing MediaCodec decode. */
     fun setOutputFpsLimit(fps: Int) {
         outputFpsLimit = fps.coerceIn(1, 60)
+    }
+
+    /** Enables the shared texture ring only for current PGM/PVW/recording consumers. */
+    fun setSharedGpuOutputEnabled(enabled: Boolean) {
+        sharedGpuOutputEnabled = enabled
+        glHandler?.post {
+            if (enabled && sharedTexturePool == null && glThread != null) {
+                sharedTexturePool = createSharedTexturePool()
+            } else if (!enabled) {
+                sharedTexturePool?.close()
+                sharedTexturePool = null
+            }
+        }
     }
 
     fun start() {
@@ -143,10 +157,7 @@ class DecoderGlRenderer(
                 GLES20.glGenFramebuffers(1, fbos, 0)
                 fbo = fbos[0]
 
-                val sharedTextures = IntArray(SHARED_TEXTURE_POOL_SIZE)
-                GLES20.glGenTextures(sharedTextures.size, sharedTextures, 0)
-                sharedTextures.forEach { configureRgbaTexture(it) }
-                sharedTexturePool = SharedGpuTexturePool(sharedTextures)
+                if (sharedGpuOutputEnabled) sharedTexturePool = createSharedTexturePool()
                 scratchTexture = createRgbaTexture()
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
                 GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
@@ -236,7 +247,7 @@ class DecoderGlRenderer(
             }
             lastReadbackAtElapsedMs = decodedAtElapsedMs
             val nextSequence = ++frameSequence
-            acquiredSlot = sharedTexturePool?.acquireForWrite()
+            acquiredSlot = if (sharedGpuOutputEnabled) sharedTexturePool?.acquireForWrite() else null
             val renderTexture = acquiredSlot?.textureId ?: scratchTexture
 
             egl.makeCurrent(pbuf)
@@ -345,6 +356,13 @@ class DecoderGlRenderer(
         GLES20.glGenTextures(1, textures, 0)
         configureRgbaTexture(textures[0])
         return textures[0]
+    }
+
+    private fun createSharedTexturePool(): SharedGpuTexturePool {
+        val sharedTextures = IntArray(SHARED_TEXTURE_POOL_SIZE)
+        GLES20.glGenTextures(sharedTextures.size, sharedTextures, 0)
+        sharedTextures.forEach(::configureRgbaTexture)
+        return SharedGpuTexturePool(sharedTextures)
     }
 
     private fun configureRgbaTexture(textureId: Int) {

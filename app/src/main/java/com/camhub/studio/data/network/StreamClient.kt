@@ -166,6 +166,7 @@ class StreamClient @Inject constructor(
     private val lastLatencySnapshotTimeMap = ConcurrentHashMap<String, AtomicLong>()
     private val decoders = ConcurrentHashMap<String, H264Decoder>()
     private val glRenderers = ConcurrentHashMap<String, DecoderGlRenderer>()
+    private val sharedGpuFrameTargets = ConcurrentHashMap.newKeySet<String>()
     private val renderFpsLimits = ConcurrentHashMap<String, Int>()
     private val decoderDispatchers = ConcurrentHashMap<String, ExecutorCoroutineDispatcher>()
     private val wifiLock = LowLatencyWifiLock(context, "CamHubDirectorStream")
@@ -981,8 +982,9 @@ class StreamClient @Inject constructor(
                         val rotationDegrees = frameTiming?.meta?.rotationDegrees
                             ?: latestFrameRotationMap[cameraName]?.get()?.toInt()
                             ?: 0
+                        gpuFrame.rotationDegrees = rotationDegrees
                         val listener = onSharedGpuFrame
-                        if (listener == null || rotationDegrees != 0) {
+                        if (listener == null) {
                             gpuFrame.close()
                         } else {
                             try {
@@ -1060,6 +1062,7 @@ class StreamClient @Inject constructor(
                         )
                     }
                     glRenderers[cameraName] = glRenderer
+                    glRenderer.setSharedGpuOutputEnabled(cameraName in sharedGpuFrameTargets)
                     decoders[cameraName] = decoder
                     surfaceConfigured = true
                     Log.d(TAG, "H.264 decoder configured (GPU surface) for $cameraName: ${meta.width}x${meta.height}")
@@ -1503,6 +1506,14 @@ class StreamClient @Inject constructor(
         val previous = renderFpsLimits.put(cameraName, clamped)
         if (previous == clamped) return
         glRenderers[cameraName]?.setOutputFpsLimit(clamped)
+    }
+
+    fun setSharedGpuFrameTargets(cameraNames: Set<String>) {
+        sharedGpuFrameTargets.clear()
+        sharedGpuFrameTargets.addAll(cameraNames)
+        glRenderers.forEach { (cameraName, renderer) ->
+            renderer.setSharedGpuOutputEnabled(cameraName in sharedGpuFrameTargets)
+        }
     }
 
     fun disconnectStream(cameraName: String) {

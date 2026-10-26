@@ -32,6 +32,7 @@ class SpatialUpscaleGlProgram {
     private var transitionModeLocation = -1
     private var transitionProgressLocation = -1
     private var reconstructionEnabledLocation = -1
+    private var sourceRotationLocation = -1
 
     private val vertices: FloatBuffer = ByteBuffer
         .allocateDirect(QUAD.size * Float.SIZE_BYTES)
@@ -59,6 +60,7 @@ class SpatialUpscaleGlProgram {
         transitionModeLocation = GLES30.glGetUniformLocation(program, "uTransitionMode")
         transitionProgressLocation = GLES30.glGetUniformLocation(program, "uTransitionProgress")
         reconstructionEnabledLocation = GLES30.glGetUniformLocation(program, "uReconstructionEnabled")
+        sourceRotationLocation = GLES30.glGetUniformLocation(program, "uSourceRotation")
         return texture != 0 && secondTexture != 0
     }
 
@@ -68,7 +70,8 @@ class SpatialUpscaleGlProgram {
         outputHeight: Int,
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
         transition: PgmTransitionFrame? = null,
-        enableSpatialReconstruction: Boolean = true
+        enableSpatialReconstruction: Boolean = true,
+        sourceRotationDegrees: Int = 0
     ): Boolean {
         if (bitmap.isRecycled || program == 0 || texture == 0) return false
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
@@ -81,7 +84,8 @@ class SpatialUpscaleGlProgram {
             outputHeight = outputHeight,
             ptzTransform = ptzTransform,
             transition = transition,
-            enableSpatialReconstruction = enableSpatialReconstruction
+            enableSpatialReconstruction = enableSpatialReconstruction,
+            sourceRotationDegrees = sourceRotationDegrees
         )
     }
 
@@ -98,7 +102,8 @@ class SpatialUpscaleGlProgram {
         outputHeight: Int,
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
         transition: PgmTransitionFrame? = null,
-        enableSpatialReconstruction: Boolean = true
+        enableSpatialReconstruction: Boolean = true,
+        sourceRotationDegrees: Int = 0
     ): Boolean {
         if (sourceTextureId == 0 || sourceWidth <= 0 || sourceHeight <= 0 || program == 0) return false
         while (GLES30.glGetError() != GLES30.GL_NO_ERROR) {
@@ -117,11 +122,19 @@ class SpatialUpscaleGlProgram {
             1f / sourceWidth,
             1f / sourceHeight
         )
-        val scale = fitScale(sourceWidth, sourceHeight, outputWidth, outputHeight)
+        val normalizedRotation = ((sourceRotationDegrees % 360) + 360) % 360
+        val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
+        val scale = fitScale(
+            if (isQuarterTurn) sourceHeight else sourceWidth,
+            if (isQuarterTurn) sourceWidth else sourceHeight,
+            outputWidth,
+            outputHeight
+        )
         GLES30.glUniform2f(scaleLocation, scale.first, scale.second)
         GLES30.glUniform1f(ptzScaleLocation, ptzTransform.scale)
         GLES30.glUniform2f(ptzCenterLocation, ptzTransform.centerX, ptzTransform.centerY)
         GLES30.glUniform1i(reconstructionEnabledLocation, if (enableSpatialReconstruction) 1 else 0)
+        GLES30.glUniform1i(sourceRotationLocation, normalizedRotation)
         val activeTransition = transition?.takeIf {
             !it.bitmap.isRecycled && it.mode != PgmTransitionMode.NONE
         }
@@ -311,6 +324,7 @@ class SpatialUpscaleGlProgram {
             uniform int uTransitionMode;
             uniform float uTransitionProgress;
             uniform int uReconstructionEnabled;
+            uniform int uSourceRotation;
             in vec2 vTexCoord;
             out vec4 outColor;
 
@@ -346,6 +360,9 @@ class SpatialUpscaleGlProgram {
                     any(greaterThan(primaryCoord, vec2(1.0)));
                 vec2 uv = (primaryCoord - vec2(0.5)) /
                     max(uPtzScale, 1.0) + uPtzCenter;
+                if (uSourceRotation == 90) uv = vec2(uv.y, 1.0 - uv.x);
+                else if (uSourceRotation == 180) uv = vec2(1.0 - uv.x, 1.0 - uv.y);
+                else if (uSourceRotation == 270) uv = vec2(1.0 - uv.y, uv.x);
                 vec3 primary = primaryOutside
                     ? vec3(0.0)
                     : (uReconstructionEnabled == 1

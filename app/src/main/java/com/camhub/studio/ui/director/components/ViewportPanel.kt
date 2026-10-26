@@ -19,6 +19,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -32,6 +35,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.viewinterop.AndroidView
 import com.camhub.studio.data.gl.SpatialUpscaleSurfaceView
+import com.camhub.studio.data.gl.SharedGpuVideoSurfaceView
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.ptz.HubPtzTransform
@@ -43,6 +47,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 import com.camhub.studio.ui.director.model.TransitionType
 import com.camhub.studio.ui.theme.BackgroundDarker
 import com.camhub.studio.ui.theme.AmberYellow
@@ -116,7 +121,8 @@ fun ViewportCard(
     isLivePtzUnlocked: Boolean = false,
     onToggleLivePtzLock: () -> Unit = {},
     onPtzGesture: (String, Float, Float, Float) -> Unit = { _, _, _, _ -> },
-    onPtzDoubleTap: (String, Float, Float) -> Unit = { _, _, _ -> }
+    onPtzDoubleTap: (String, Float, Float) -> Unit = { _, _, _ -> },
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit = { _, _, _, _, _ -> }
 ) {
     val enableSpatialReconstruction = enableSpatialUpscaling &&
         isPgm &&
@@ -126,8 +132,19 @@ fun ViewportCard(
     val isTransitioning = transitionProgress > 0f && transitionBitmap != null
     val useGpuPgmRenderer = isPgm && previewSourceBitmap != null &&
         (useSpatialUpscaling || (isTransitioning && transitionSourceBitmap != null))
+    val useSharedGpuPreview = (isPgm || isPvw) && !isTransitioning &&
+        cameraName != "---" && previewSourceBitmap != null
     val ptzTransform = HybridPtzController.hubTransform(ptzState)
     val transitionPtzTransform = HybridPtzController.hubTransform(transitionPtzState)
+    val latestGpuTargetCallback = rememberUpdatedState(onGpuPreviewTargetChanged)
+    val gpuPreviewViewRef = remember { AtomicReference<SharedGpuVideoSurfaceView?>(null) }
+    DisposableEffect(Unit) {
+        onDispose {
+            gpuPreviewViewRef.getAndSet(null)?.let { view ->
+                latestGpuTargetCallback.value("", view, false, ptzTransform, false)
+            }
+        }
+    }
     val ptzEnabled = cameraName != "---" &&
         (isPvw || (isPgm && isLivePtzUnlocked)) &&
         transitionProgress <= 0f
@@ -217,16 +234,42 @@ fun ViewportCard(
                     }
                     .drawWithContent {
                         drawContent()
-                        if (!useGpuPgmRenderer && frameSequence > 0L) {
+                        if (!useSharedGpuPreview && !useGpuPgmRenderer && frameSequence > 0L) {
                             onFrameDrawn(cameraName, frameSequence)
                         }
-                        if (!useGpuPgmRenderer && transitionProgress > 0f && transitionFrameSequence > 0L) {
+                        if (!useSharedGpuPreview && !useGpuPgmRenderer && transitionProgress > 0f && transitionFrameSequence > 0L) {
                             onFrameDrawn(transitionCameraName, transitionFrameSequence)
                         }
                     },
                 contentAlignment = Alignment.Center
             ) {
                 when {
+                    useSharedGpuPreview -> {
+                        AndroidView(
+                            factory = { context ->
+                                SharedGpuVideoSurfaceView(context).also { view ->
+                                    gpuPreviewViewRef.set(view)
+                                    val enableReconstruction = isPgm && enableSpatialUpscaling
+                                    view.updateDisplayConfig(cameraName, ptzTransform, enableReconstruction) { name, sequence, _ ->
+                                        onFrameDrawn(name, sequence)
+                                    }
+                                    onGpuPreviewTargetChanged(cameraName, view, true, ptzTransform, enableReconstruction)
+                                }
+                            },
+                            update = { view ->
+                                val enableReconstruction = isPgm && enableSpatialUpscaling
+                                view.updateDisplayConfig(cameraName, ptzTransform, enableReconstruction) { name, sequence, _ ->
+                                    onFrameDrawn(name, sequence)
+                                }
+                                onGpuPreviewTargetChanged(cameraName, view, true, ptzTransform, enableReconstruction)
+                            },
+                            onRelease = { view ->
+                                latestGpuTargetCallback.value("", view, false, ptzTransform, false)
+                                gpuPreviewViewRef.compareAndSet(view, null)
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     useGpuPgmRenderer -> {
                         AndroidView(
                             factory = { context -> SpatialUpscaleSurfaceView(context) },
@@ -436,6 +479,7 @@ fun ViewportPanel(
     onToggleLivePtzLock: () -> Unit = {},
     onPtzGesture: (String, Float, Float, Float) -> Unit = { _, _, _, _ -> },
     onPtzDoubleTap: (String, Float, Float) -> Unit = { _, _, _ -> },
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit = { _, _, _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     if (isVertical) {
@@ -468,7 +512,8 @@ fun ViewportPanel(
                 isLivePtzUnlocked = isLivePtzUnlocked,
                 onToggleLivePtzLock = onToggleLivePtzLock,
                 onPtzGesture = onPtzGesture,
-                onPtzDoubleTap = onPtzDoubleTap
+                onPtzDoubleTap = onPtzDoubleTap,
+                onGpuPreviewTargetChanged = onGpuPreviewTargetChanged
             )
             ViewportCard(
                 label = "PVW",
@@ -476,6 +521,7 @@ fun ViewportPanel(
                 cameraName = pvwCameraName,
                 fps = pvwFps,
                 previewBitmap = pvwBitmap,
+                previewSourceBitmap = pvwSourceBitmap,
                 isPgm = false,
                 isPvw = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -484,7 +530,8 @@ fun ViewportPanel(
                 ptzState = pvwPtzState,
                 maxPtzZoom = pvwMaxPtzZoom,
                 onPtzGesture = onPtzGesture,
-                onPtzDoubleTap = onPtzDoubleTap
+                onPtzDoubleTap = onPtzDoubleTap,
+                onGpuPreviewTargetChanged = onGpuPreviewTargetChanged
             )
         }
     } else {
@@ -517,7 +564,8 @@ fun ViewportPanel(
                 isLivePtzUnlocked = isLivePtzUnlocked,
                 onToggleLivePtzLock = onToggleLivePtzLock,
                 onPtzGesture = onPtzGesture,
-                onPtzDoubleTap = onPtzDoubleTap
+                onPtzDoubleTap = onPtzDoubleTap,
+                onGpuPreviewTargetChanged = onGpuPreviewTargetChanged
             )
             ViewportCard(
                 label = "PVW",
@@ -525,6 +573,7 @@ fun ViewportPanel(
                 cameraName = pvwCameraName,
                 fps = pvwFps,
                 previewBitmap = pvwBitmap,
+                previewSourceBitmap = pvwSourceBitmap,
                 isPgm = false,
                 isPvw = true,
                 modifier = Modifier.weight(1f),
@@ -533,7 +582,8 @@ fun ViewportPanel(
                 ptzState = pvwPtzState,
                 maxPtzZoom = pvwMaxPtzZoom,
                 onPtzGesture = onPtzGesture,
-                onPtzDoubleTap = onPtzDoubleTap
+                onPtzDoubleTap = onPtzDoubleTap,
+                onGpuPreviewTargetChanged = onGpuPreviewTargetChanged
             )
         }
     }

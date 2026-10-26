@@ -203,6 +203,10 @@ fun DirectorScreen(
                         onToggleLivePtzLock = viewModel::toggleLivePtzLock,
                         onPtzGesture = viewModel::applyPtzGesture,
                         onPtzDoubleTap = viewModel::doubleTapPtz,
+                        onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction ->
+                            if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction)
+                            else viewModel.unregisterGpuPreview(view)
+                        },
                         modifier = Modifier
                             .weight(1.4f)
                             .fillMaxHeight()
@@ -281,6 +285,10 @@ fun DirectorScreen(
                     onToggleLivePtzLock = viewModel::toggleLivePtzLock,
                     onPtzGesture = viewModel::applyPtzGesture,
                     onPtzDoubleTap = viewModel::doubleTapPtz,
+                    onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction ->
+                        if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction)
+                        else viewModel.unregisterGpuPreview(view)
+                    },
                     modifier = Modifier.fillMaxWidth()
                 )
 
