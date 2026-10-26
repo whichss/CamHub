@@ -2,6 +2,7 @@ package com.camhub.studio.data
 
 import android.graphics.Bitmap
 import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmGpuTransitionFrame
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.ptz.HubPtzTransform
 
@@ -38,12 +39,13 @@ class PgmRecordingFrameDispatcher(
         camera: String,
         frameSequence: Long,
         frame: SharedGpuVideoFrame,
-        ptzTransform: HubPtzTransform
+        ptzTransform: HubPtzTransform,
+        gpuTransition: PgmGpuTransitionFrame? = null
     ): Boolean {
         if (!recording || frameSequence <= 0L || frameSequence <= lastSequence && cameraName == camera) {
             return false
         }
-        if (!recorder.onSharedGpuFrame(frame, ptzTransform)) return false
+        if (!recorder.onSharedGpuFrame(frame, ptzTransform, gpuTransition)) return false
         if (cameraName != camera) {
             cameraName = camera
         }

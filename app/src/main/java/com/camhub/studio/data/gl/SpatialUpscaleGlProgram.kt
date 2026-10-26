@@ -33,6 +33,7 @@ class SpatialUpscaleGlProgram {
     private var transitionProgressLocation = -1
     private var reconstructionEnabledLocation = -1
     private var sourceRotationLocation = -1
+    private var secondRotationLocation = -1
 
     private val vertices: FloatBuffer = ByteBuffer
         .allocateDirect(QUAD.size * Float.SIZE_BYTES)
@@ -61,6 +62,7 @@ class SpatialUpscaleGlProgram {
         transitionProgressLocation = GLES30.glGetUniformLocation(program, "uTransitionProgress")
         reconstructionEnabledLocation = GLES30.glGetUniformLocation(program, "uReconstructionEnabled")
         sourceRotationLocation = GLES30.glGetUniformLocation(program, "uSourceRotation")
+        secondRotationLocation = GLES30.glGetUniformLocation(program, "uSecondRotation")
         return texture != 0 && secondTexture != 0
     }
 
@@ -71,7 +73,8 @@ class SpatialUpscaleGlProgram {
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
         transition: PgmTransitionFrame? = null,
         enableSpatialReconstruction: Boolean = true,
-        sourceRotationDegrees: Int = 0
+        sourceRotationDegrees: Int = 0,
+        gpuTransition: PgmGpuTransitionFrame? = null
     ): Boolean {
         if (bitmap.isRecycled || program == 0 || texture == 0) return false
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
@@ -85,7 +88,8 @@ class SpatialUpscaleGlProgram {
             ptzTransform = ptzTransform,
             transition = transition,
             enableSpatialReconstruction = enableSpatialReconstruction,
-            sourceRotationDegrees = sourceRotationDegrees
+            sourceRotationDegrees = sourceRotationDegrees,
+            gpuTransition = gpuTransition
         )
     }
 
@@ -103,7 +107,8 @@ class SpatialUpscaleGlProgram {
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
         transition: PgmTransitionFrame? = null,
         enableSpatialReconstruction: Boolean = true,
-        sourceRotationDegrees: Int = 0
+        sourceRotationDegrees: Int = 0,
+        gpuTransition: PgmGpuTransitionFrame? = null
     ): Boolean {
         if (sourceTextureId == 0 || sourceWidth <= 0 || sourceHeight <= 0 || program == 0) return false
         while (GLES30.glGetError() != GLES30.GL_NO_ERROR) {
@@ -138,38 +143,64 @@ class SpatialUpscaleGlProgram {
         val activeTransition = transition?.takeIf {
             !it.bitmap.isRecycled && it.mode != PgmTransitionMode.NONE
         }
-        if (activeTransition != null) {
-            uploadSecondBitmap(activeTransition.bitmap)
+        val activeGpuTransition = gpuTransition?.takeIf { it.mode != PgmTransitionMode.NONE }
+        if (activeGpuTransition != null || activeTransition != null) {
+            val transitionWidth: Int
+            val transitionHeight: Int
+            val transitionTransform: HubPtzTransform
+            val transitionMode: PgmTransitionMode
+            val transitionProgress: Float
+            val transitionRotation: Int
+            if (activeGpuTransition != null) {
+                transitionWidth = activeGpuTransition.frame.width
+                transitionHeight = activeGpuTransition.frame.height
+                transitionTransform = activeGpuTransition.ptzTransform
+                transitionMode = activeGpuTransition.mode
+                transitionProgress = activeGpuTransition.progress
+                transitionRotation = activeGpuTransition.frame.rotationDegrees
+            } else {
+                val bitmapTransition = checkNotNull(activeTransition)
+                uploadSecondBitmap(bitmapTransition.bitmap)
+                transitionWidth = secondWidth
+                transitionHeight = secondHeight
+                transitionTransform = bitmapTransition.ptzTransform
+                transitionMode = bitmapTransition.mode
+                transitionProgress = bitmapTransition.progress
+                transitionRotation = 0
+            }
             GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, secondTexture)
+            GLES30.glBindTexture(
+                GLES30.GL_TEXTURE_2D,
+                activeGpuTransition?.frame?.textureId ?: secondTexture
+            )
             GLES30.glUniform1i(secondTextureLocation, 1)
             GLES30.glUniform2f(
                 secondTexelSizeLocation,
-                1f / secondWidth.coerceAtLeast(1),
-                1f / secondHeight.coerceAtLeast(1)
+                1f / transitionWidth.coerceAtLeast(1),
+                1f / transitionHeight.coerceAtLeast(1)
             )
+            val isSecondQuarterTurn = transitionRotation == 90 || transitionRotation == 270
             val secondScale = fitScale(
-                secondWidth,
-                secondHeight,
+                if (isSecondQuarterTurn) transitionHeight else transitionWidth,
+                if (isSecondQuarterTurn) transitionWidth else transitionHeight,
                 outputWidth,
                 outputHeight
             )
             GLES30.glUniform2f(secondScaleLocation, secondScale.first, secondScale.second)
-            GLES30.glUniform1f(secondPtzScaleLocation, activeTransition.ptzTransform.scale)
+            GLES30.glUniform1f(secondPtzScaleLocation, transitionTransform.scale)
             GLES30.glUniform2f(
                 secondPtzCenterLocation,
-                activeTransition.ptzTransform.centerX,
-                activeTransition.ptzTransform.centerY
+                transitionTransform.centerX,
+                transitionTransform.centerY
             )
-            GLES30.glUniform1i(transitionModeLocation, activeTransition.mode.shaderValue)
-            GLES30.glUniform1f(
-                transitionProgressLocation,
-                activeTransition.progress.coerceIn(0f, 1f)
-            )
+            GLES30.glUniform1i(secondRotationLocation, transitionRotation)
+            GLES30.glUniform1i(transitionModeLocation, transitionMode.shaderValue)
+            GLES30.glUniform1f(transitionProgressLocation, transitionProgress.coerceIn(0f, 1f))
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         } else {
             GLES30.glUniform1i(transitionModeLocation, PgmTransitionMode.NONE.shaderValue)
             GLES30.glUniform1f(transitionProgressLocation, 0f)
+            GLES30.glUniform1i(secondRotationLocation, 0)
         }
 
         val stride = 4 * Float.SIZE_BYTES
@@ -183,6 +214,9 @@ class SpatialUpscaleGlProgram {
         GLES30.glDisableVertexAttribArray(0)
         GLES30.glDisableVertexAttribArray(1)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glFlush()
         return GLES30.glGetError() == GLES30.GL_NO_ERROR
     }
@@ -325,6 +359,7 @@ class SpatialUpscaleGlProgram {
             uniform float uTransitionProgress;
             uniform int uReconstructionEnabled;
             uniform int uSourceRotation;
+            uniform int uSecondRotation;
             in vec2 vTexCoord;
             out vec4 outColor;
 
@@ -378,6 +413,9 @@ class SpatialUpscaleGlProgram {
                     any(greaterThan(secondCoord, vec2(1.0)));
                 vec2 secondUv = (secondCoord - vec2(0.5)) /
                     max(uSecondPtzScale, 1.0) + uSecondPtzCenter;
+                if (uSecondRotation == 90) secondUv = vec2(secondUv.y, 1.0 - secondUv.x);
+                else if (uSecondRotation == 180) secondUv = vec2(1.0 - secondUv.x, 1.0 - secondUv.y);
+                else if (uSecondRotation == 270) secondUv = vec2(1.0 - secondUv.y, secondUv.x);
                 vec3 incoming = secondOutside
                     ? vec3(0.0)
                     : (uReconstructionEnabled == 1

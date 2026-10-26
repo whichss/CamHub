@@ -18,3 +18,13 @@ data class PgmTransitionFrame(
     val mode: PgmTransitionMode,
     val progress: Float
 )
+
+/** GPU-backed transition source; its texture lease transfers with the output frame. */
+data class PgmGpuTransitionFrame(
+    val frame: SharedGpuVideoFrame,
+    val cameraName: String,
+    val frameSequence: Long,
+    val ptzTransform: HubPtzTransform,
+    val mode: PgmTransitionMode,
+    val progress: Float
+)

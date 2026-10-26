@@ -17,6 +17,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmGpuTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.gl.SpatialUpscaleWindowRenderer
@@ -500,7 +501,8 @@ class DirectorRecorder @Inject constructor(
      */
     fun onSharedGpuFrame(
         frame: SharedGpuVideoFrame,
-        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM
+        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+        gpuTransition: PgmGpuTransitionFrame? = null
     ): Boolean {
         if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused || stopRequested) return false
         if (!frameWriteInFlight.compareAndSet(false, true)) {
@@ -513,7 +515,12 @@ class DirectorRecorder @Inject constructor(
             frameWriteInFlight.set(false)
             return false
         }
-        val accepted = glRenderer.renderTexture(frame, presentationTimeNs, ptzTransform)
+        val accepted = glRenderer.renderTexture(
+            frame,
+            presentationTimeNs,
+            ptzTransform,
+            gpuTransition = gpuTransition
+        )
         if (!accepted) {
             frameWriteInFlight.set(false)
             noteDroppedRecordFrame()

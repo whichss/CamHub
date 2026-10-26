@@ -132,8 +132,8 @@ fun ViewportCard(
     val isTransitioning = transitionProgress > 0f && transitionBitmap != null
     val useGpuPgmRenderer = isPgm && previewSourceBitmap != null &&
         (useSpatialUpscaling || (isTransitioning && transitionSourceBitmap != null))
-    val useSharedGpuPreview = (isPgm || isPvw) && !isTransitioning &&
-        cameraName != "---" && previewSourceBitmap != null
+    val useSharedGpuPreview = (isPgm || isPvw) && cameraName != "---" &&
+        previewSourceBitmap != null
     val ptzTransform = HybridPtzController.hubTransform(ptzState)
     val transitionPtzTransform = HybridPtzController.hubTransform(transitionPtzState)
     val latestGpuTargetCallback = rememberUpdatedState(onGpuPreviewTargetChanged)

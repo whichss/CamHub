@@ -8,7 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.camhub.studio.data.DeviceMonitor
 import com.camhub.studio.data.DirectorRecorder
 import com.camhub.studio.data.ExternalDisplayManager
-import com.camhub.studio.data.PgmRecordingFrameDispatcher
+import com.camhub.studio.data.PgmOutputManager
 import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.audio.AudioStreamClient
 import com.camhub.studio.data.camera.CameraValueMapper
@@ -98,7 +98,7 @@ class DirectorViewModel @Inject constructor(
 
     private var lastPgmBitmap: Bitmap? = null
     private var lastPgmCameraName: String? = null
-    private val pgmRecordingDispatcher = PgmRecordingFrameDispatcher(recorder)
+    private val pgmOutputManager = PgmOutputManager(recorder)
     private val sharedGpuFrameListener: (String, SharedGpuVideoFrame) -> Unit = { cameraName, frame ->
         handleSharedGpuFrame(cameraName, frame)
     }
@@ -354,9 +354,9 @@ class DirectorViewModel @Inject constructor(
                             progress = state.transitionProgress
                         )
                     }
-                    pgmRecordingDispatcher.dispatch(
+                    pgmOutputManager.dispatchBitmap(
                         recording = recorder.recordingInfo.value.isRecording,
-                        camera = pgmCam.name,
+                        cameraName = pgmCam.name,
                         frameSequence = pgmStream.decoderFrameSequence.takeIf { it > 0L }
                             ?: pgmStream.frameSequence,
                         bitmap = pgmBitmap,
@@ -1487,6 +1487,7 @@ class DirectorViewModel @Inject constructor(
         gpuPreviewTargets.clear()
         gpuPreviewCameraByView.clear()
         streamClient.setSharedGpuFrameTargets(emptySet())
+        pgmOutputManager.release()
         transitionJob?.cancel()
         ptzCommandJobs.values.forEach { it.cancel() }
         ptzCommandJobs.clear()
@@ -1516,28 +1517,79 @@ class DirectorViewModel @Inject constructor(
     }
 
     private fun handleSharedGpuFrame(cameraName: String, frame: SharedGpuVideoFrame) {
-        gpuPreviewTargets[cameraName]?.forEach { target ->
-            val previewLease = runCatching { frame.retain() }.getOrNull() ?: return@forEach
-            if (!target.displayFrame(previewLease)) previewLease.close()
-        }
         val state = _uiState.value
         val pgmCamera = state.cameras.getOrNull(state.pgmCameraIndex)
+        val pvwCamera = state.cameras.getOrNull(state.pvwCameraIndex)
         val transitionActive = state.transitionProgress > 0f &&
             state.selectedTransition != TransitionType.CUT
         val recording = recorder.recordingInfo.value.let { it.isRecording && !it.isPaused }
+
+        if (cameraName == pvwCamera?.name) {
+            pgmOutputManager.cacheGpuFrame(cameraName, frame)
+        }
+        pgmOutputManager.discardGpuFramesExcept(pvwCamera?.name)
+
+        gpuPreviewTargets[cameraName]?.forEach { target ->
+            val previewLease = runCatching { frame.retain() }.getOrNull() ?: return@forEach
+            val gpuTransition = if (transitionActive && cameraName == pgmCamera?.name && pvwCamera != null) {
+                pgmOutputManager.retainFreshTransitionFrame(
+                    cameraName = pvwCamera.name,
+                    ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                    mode = transitionMode(state.selectedTransition),
+                    progress = state.transitionProgress
+                )
+            } else null
+            if (transitionActive && cameraName == pgmCamera?.name && gpuTransition == null) {
+                previewLease.close()
+                return@forEach
+            }
+            if (!target.displayFrame(previewLease, gpuTransition)) {
+                previewLease.close()
+                gpuTransition?.frame?.close()
+            }
+        }
+
+        if (pgmCamera?.name == cameraName && recording) {
+            val gpuTransition = if (transitionActive && pvwCamera != null) {
+                pgmOutputManager.retainFreshTransitionFrame(
+                    cameraName = pvwCamera.name,
+                    ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                    mode = transitionMode(state.selectedTransition),
+                    progress = state.transitionProgress
+                )
+            } else null
+
+            if (!transitionActive || gpuTransition != null) {
+                val accepted = pgmOutputManager.dispatchGpu(
+                    recording = true,
+                    cameraName = cameraName,
+                    frameSequence = frame.frameSequence,
+                    frame = frame,
+                    ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                    transition = gpuTransition
+                )
+                if (!accepted) {
+                    frame.close()
+                    gpuTransition?.frame?.close()
+                }
+                return
+            }
+            // Keep the Bitmap transition path as a temporary fallback until a fresh
+            // PVW texture is available; the next PGM frame can use the GPU composition.
+        }
+
         if (pgmCamera?.name != cameraName || !recording || transitionActive) {
             frame.close()
             return
         }
+        frame.close()
+    }
 
-        val accepted = pgmRecordingDispatcher.dispatchGpu(
-            recording = true,
-            camera = cameraName,
-            frameSequence = frame.frameSequence,
-            frame = frame,
-            ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState)
-        )
-        if (!accepted) frame.close()
+    private fun transitionMode(type: TransitionType): PgmTransitionMode = when (type) {
+        TransitionType.MIX -> PgmTransitionMode.MIX
+        TransitionType.DIP -> PgmTransitionMode.DIP
+        TransitionType.WIPE -> PgmTransitionMode.WIPE
+        TransitionType.CUT -> PgmTransitionMode.NONE
     }
 
     private fun Bitmap.asCachedImageBitmap(): ImageBitmap {

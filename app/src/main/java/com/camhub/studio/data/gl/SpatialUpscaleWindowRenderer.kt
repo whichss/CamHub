@@ -27,7 +27,8 @@ class SpatialUpscaleWindowRenderer(
         val sourceHeight: Int,
         val presentationTimeNs: Long,
         val ptzTransform: HubPtzTransform,
-        val transition: PgmTransitionFrame?
+        val transition: PgmTransitionFrame?,
+        val gpuTransition: PgmGpuTransitionFrame?
     )
 
     private val latestFrame = AtomicReference<PendingFrame?>()
@@ -90,7 +91,8 @@ class SpatialUpscaleWindowRenderer(
                     sourceHeight = bitmap.height,
                     presentationTimeNs = presentationTimeNs,
                     ptzTransform = ptzTransform,
-                    transition = transition
+                    transition = transition,
+                    gpuTransition = null
                 )
             )
             previous?.gpuFrame?.close()
@@ -104,7 +106,8 @@ class SpatialUpscaleWindowRenderer(
         gpuFrame: SharedGpuVideoFrame,
         presentationTimeNs: Long,
         ptzTransform: HubPtzTransform,
-        transition: PgmTransitionFrame? = null
+        transition: PgmTransitionFrame? = null,
+        gpuTransition: PgmGpuTransitionFrame? = null
     ): Boolean {
         synchronized(frameLock) {
             if (!acceptingFrames.get()) return false
@@ -116,10 +119,12 @@ class SpatialUpscaleWindowRenderer(
                     sourceHeight = gpuFrame.height,
                     presentationTimeNs = presentationTimeNs,
                     ptzTransform = ptzTransform,
-                    transition = transition
+                    transition = transition,
+                    gpuTransition = gpuTransition
                 )
             )
             previous?.gpuFrame?.close()
+            previous?.gpuTransition?.frame?.close()
             scheduleFrame()
         }
         return true
@@ -139,13 +144,19 @@ class SpatialUpscaleWindowRenderer(
         val glHandler = handler
         if (glHandler != null) {
             glHandler.post {
-                latestFrame.getAndSet(null)?.gpuFrame?.close()
+                latestFrame.getAndSet(null)?.let { pending ->
+                    pending.gpuFrame?.close()
+                    pending.gpuTransition?.frame?.close()
+                }
                 releaseInternal()
                 released.countDown()
             }
             released.await(timeoutMs, TimeUnit.MILLISECONDS)
         } else {
-            latestFrame.getAndSet(null)?.gpuFrame?.close()
+            latestFrame.getAndSet(null)?.let { pending ->
+                pending.gpuFrame?.close()
+                pending.gpuTransition?.frame?.close()
+            }
             releaseInternal()
         }
         thread?.quitSafely()
@@ -158,6 +169,7 @@ class SpatialUpscaleWindowRenderer(
         if (frame != null && acceptingFrames.get()) {
             var rendered = false
             var gpuReferenceReleased = false
+            var gpuTransitionReferenceReleased = false
             val egl = eglHelper
             val target = eglSurface
             val program = glProgram
@@ -166,6 +178,7 @@ class SpatialUpscaleWindowRenderer(
                     egl.makeCurrent(target)
                     val drawSucceeded = if (frame.gpuFrame != null) {
                         frame.gpuFrame.waitForProducerCommands()
+                        frame.gpuTransition?.frame?.waitForProducerCommands()
                         program.renderTexture(
                             sourceTextureId = frame.gpuFrame.textureId,
                             sourceWidth = frame.sourceWidth,
@@ -174,7 +187,9 @@ class SpatialUpscaleWindowRenderer(
                             outputHeight = outputHeight,
                             ptzTransform = frame.ptzTransform,
                             transition = frame.transition,
-                            enableSpatialReconstruction = enableSpatialReconstruction
+                            enableSpatialReconstruction = enableSpatialReconstruction,
+                            sourceRotationDegrees = frame.gpuFrame.rotationDegrees,
+                            gpuTransition = frame.gpuTransition
                         )
                     } else {
                         frame.bitmap?.let {
@@ -190,6 +205,8 @@ class SpatialUpscaleWindowRenderer(
                     }
                     frame.gpuFrame?.releaseAfterCurrentGlCommands()
                     gpuReferenceReleased = frame.gpuFrame != null
+                    frame.gpuTransition?.frame?.releaseAfterCurrentGlCommands()
+                    gpuTransitionReferenceReleased = frame.gpuTransition != null
                     if (drawSucceeded) {
                         egl.setPresentationTime(target, frame.presentationTimeNs)
                         if (egl.swapBuffers(target)) {
@@ -201,9 +218,13 @@ class SpatialUpscaleWindowRenderer(
                 }
             }
             if (!gpuReferenceReleased) frame.gpuFrame?.close()
+            if (!gpuTransitionReferenceReleased) {
+                frame.gpuTransition?.frame?.close()
+            }
             onFrameRendered(rendered)
         } else {
             frame?.gpuFrame?.close()
+            frame?.gpuTransition?.frame?.close()
         }
 
         if (latestFrame.get() != null && acceptingFrames.get()) {

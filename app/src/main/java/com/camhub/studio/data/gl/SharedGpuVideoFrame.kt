@@ -134,7 +134,7 @@ internal class SharedGpuTexturePool(private val textureIds: IntArray) {
             if (fence != 0L) slot.consumerFences += fence
             check(slot.activeReferences > 0) { "GPU texture slot released without an active reference" }
             slot.activeReferences--
-            if (closed && slot.activeReferences == 0 && !slot.deleted) {
+            if (closed && slot.activeReferences == 0 && !slot.deleted && fence != 0L) {
                 slot.deleted = true
                 true
             } else false
@@ -147,7 +147,10 @@ internal class SharedGpuTexturePool(private val textureIds: IntArray) {
             GLES30.glDeleteSync(slot.producerFence)
             slot.producerFence = 0L
         }
-        slot.consumerFences.forEach(GLES30::glDeleteSync)
+        slot.consumerFences.forEach { fence ->
+            GLES30.glWaitSync(fence, 0, GLES30.GL_TIMEOUT_IGNORED)
+            GLES30.glDeleteSync(fence)
+        }
         slot.consumerFences.clear()
         GLES30.glDeleteTextures(1, intArrayOf(slot.textureId), 0)
     }

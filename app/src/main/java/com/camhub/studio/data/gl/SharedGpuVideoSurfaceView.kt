@@ -22,6 +22,7 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
 ) : SurfaceView(context, attrs), SurfaceHolder.Callback {
     private data class Pending(
         val frame: SharedGpuVideoFrame,
+        val gpuTransition: PgmGpuTransitionFrame?,
         val cameraName: String,
         val transform: HubPtzTransform,
         val enableSpatialReconstruction: Boolean,
@@ -49,17 +50,21 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
         setBackgroundColor(android.graphics.Color.BLACK)
     }
 
-    /** Takes ownership of [frame] only when this returns true. */
+    /** Takes ownership of [frame] and the optional transition lease only when this returns true. */
     fun displayFrame(
         frame: SharedGpuVideoFrame,
+        gpuTransition: PgmGpuTransitionFrame? = null,
         ptzTransform: HubPtzTransform = this.ptzTransform,
         onFrameDrawn: (String, Long, Long) -> Unit = drawnCallback
     ): Boolean = synchronized(lock) {
         val glHandler = handler
         if (!acceptingFrames || glHandler == null) return@synchronized false
         pending.getAndSet(
-            Pending(frame, cameraName, ptzTransform, enableSpatialReconstruction, onFrameDrawn)
-        )?.frame?.close()
+            Pending(frame, gpuTransition, cameraName, ptzTransform, enableSpatialReconstruction, onFrameDrawn)
+        )?.let { old ->
+            old.frame.close()
+            old.gpuTransition?.frame?.close()
+        }
         queueRender(glHandler)
         true
     }
@@ -97,7 +102,10 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
                 queueRender(glHandler)
             } catch (error: Exception) {
                 Log.e(TAG, "Shared GPU preview initialization failed", error)
-                pending.getAndSet(null)?.frame?.close()
+                pending.getAndSet(null)?.let { old ->
+                    old.frame.close()
+                    old.gpuTransition?.frame?.close()
+                }
                 releaseGlResources()
             }
         }
@@ -122,14 +130,20 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
         if (glHandler != null && glThread != null) {
             val finished = CountDownLatch(1)
             glHandler.post {
-                pending.getAndSet(null)?.frame?.close()
+                pending.getAndSet(null)?.let { old ->
+                    old.frame.close()
+                    old.gpuTransition?.frame?.close()
+                }
                 releaseGlResources()
                 finished.countDown()
             }
             finished.await(RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             glThread.quitSafely()
         } else {
-            pending.getAndSet(null)?.frame?.close()
+            pending.getAndSet(null)?.let { old ->
+                old.frame.close()
+                old.gpuTransition?.frame?.close()
+            }
         }
     }
 
@@ -143,6 +157,7 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
         val item = pending.getAndSet(null)
         if (item != null) {
             var submitted = false
+            var transitionSubmitted = false
             try {
                 val helper = egl
                 val window = eglSurface
@@ -150,6 +165,7 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
                 if (helper != null && window != null && renderer != null) {
                     helper.makeCurrent(window)
                     item.frame.waitForProducerCommands()
+                    item.gpuTransition?.frame?.waitForProducerCommands()
                     val drawn = renderer.renderTexture(
                         sourceTextureId = item.frame.textureId,
                         sourceWidth = item.frame.width,
@@ -158,18 +174,29 @@ class SharedGpuVideoSurfaceView @JvmOverloads constructor(
                         outputHeight = outputHeight,
                         ptzTransform = item.transform,
                         enableSpatialReconstruction = item.enableSpatialReconstruction,
-                        sourceRotationDegrees = item.frame.rotationDegrees
+                        sourceRotationDegrees = item.frame.rotationDegrees,
+                        gpuTransition = item.gpuTransition
                     )
                     item.frame.releaseAfterCurrentGlCommands()
                     submitted = true
+                    item.gpuTransition?.frame?.releaseAfterCurrentGlCommands()
+                    transitionSubmitted = item.gpuTransition != null
                     if (drawn && helper.swapBuffers(window)) {
                         item.onFrameDrawn(item.cameraName, item.frame.frameSequence, android.os.SystemClock.elapsedRealtime())
+                        item.gpuTransition?.let { transition ->
+                            item.onFrameDrawn(
+                                transition.cameraName,
+                                transition.frameSequence,
+                                android.os.SystemClock.elapsedRealtime()
+                            )
+                        }
                     }
                 }
             } catch (error: Exception) {
                 Log.w(TAG, "Shared GPU preview frame failed", error)
             } finally {
                 if (!submitted) item.frame.close()
+                if (!transitionSubmitted) item.gpuTransition?.frame?.close()
             }
         }
 
