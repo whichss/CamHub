@@ -308,6 +308,9 @@ class DecoderGlRenderer(
             val readbackDue = bitmapOutputFpsLimit > 0 &&
                 decodedAtElapsedMs - lastReadbackAtElapsedMs >= minimumReadbackIntervalMs
             if (readbackDue) lastReadbackAtElapsedMs = decodedAtElapsedMs
+            // With no shared texture consumer, render only on frames that will be
+            // read back for an explicit Bitmap consumer.
+            if (!sharedGpuOutputEnabled && !readbackDue) return
             egl.makeCurrent(pbuf)
             acquiredSlot = if (sharedGpuOutputEnabled) sharedTexturePool?.acquireForWrite() else null
             if (sharedGpuOutputEnabled && acquiredSlot == null) {
