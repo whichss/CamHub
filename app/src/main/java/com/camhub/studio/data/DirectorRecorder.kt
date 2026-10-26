@@ -80,12 +80,8 @@ class DirectorRecorder @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleLock = Any()
-    private enum class LifecycleState { IDLE, STARTING, RECORDING, STOPPING }
-    private var lifecycleState = LifecycleState.IDLE
-    private var cancelStartRequested = false
-    @Volatile private var recordingStartNs = 0L
-    @Volatile private var accumulatedPauseNs = 0L
-    @Volatile private var pauseStartNs = 0L
+    private val recorderLifecycle = RecorderLifecycle()
+    private val recordingClock = RecordingClock()
 
     private var encoder: MediaCodec? = null
     private var muxer: MediaMuxer? = null
@@ -138,9 +134,7 @@ class DirectorRecorder @Inject constructor(
         includeAudio: Boolean = false
     ): String? {
         synchronized(lifecycleLock) {
-            if (lifecycleState != LifecycleState.IDLE) return null
-            lifecycleState = LifecycleState.STARTING
-            cancelStartRequested = false
+            if (!recorderLifecycle.beginStart()) return null
             currentOutputPath = null
             _recordingInfo.value = _recordingInfo.value.copy(isStarting = true, errorMessage = null)
         }
@@ -217,11 +211,8 @@ class DirectorRecorder @Inject constructor(
             currentOutputPath = displayPath
 
             synchronized(lifecycleLock) {
-                check(!cancelStartRequested) { "Recording start cancelled" }
-                lifecycleState = LifecycleState.RECORDING
-                recordingStartNs = System.nanoTime()
-                accumulatedPauseNs = 0L
-                pauseStartNs = 0L
+                check(recorderLifecycle.completeStart()) { "Recording start cancelled" }
+                recordingClock.start(System.nanoTime())
                 _recordingInfo.value = RecordingInfo(
                     isRecording = true,
                     startTimeMs = System.currentTimeMillis(),
@@ -242,13 +233,13 @@ class DirectorRecorder @Inject constructor(
             releaseResources()
             discardUnstartedOutput()
             synchronized(lifecycleLock) {
-                lifecycleState = LifecycleState.IDLE
+                recorderLifecycle.completeStop()
                 _recordingInfo.value = RecordingInfo(errorMessage = e.message ?: "Recording could not start")
             }
             null
         } finally {
             synchronized(lifecycleLock) {
-                cancelStartRequested = false
+                if (recorderLifecycle.isStarting()) recorderLifecycle.abortStart()
                 if (_recordingInfo.value.isStarting) {
                     _recordingInfo.value = _recordingInfo.value.copy(isStarting = false)
                 }
@@ -628,7 +619,7 @@ class DirectorRecorder @Inject constructor(
     fun pauseRecording() {
         val info = _recordingInfo.value
         if (!info.isRecording || info.isPaused) return
-        pauseStartNs = System.nanoTime()
+        if (!recordingClock.pause(System.nanoTime())) return
         _recordingInfo.value = info.copy(isPaused = true)
         Log.d(TAG, "Recording paused")
     }
@@ -636,25 +627,21 @@ class DirectorRecorder @Inject constructor(
     fun resumeRecording() {
         val info = _recordingInfo.value
         if (!info.isRecording || !info.isPaused) return
-        val nowNs = System.nanoTime()
-        val pausedElapsed = ((nowNs - pauseStartNs).coerceAtLeast(0L)) / 1_000_000L
-        accumulatedPauseNs += (nowNs - pauseStartNs).coerceAtLeast(0L)
+        val pausedElapsed = recordingClock.resume(System.nanoTime()) ?: return
         _recordingInfo.value = info.copy(
             isPaused = false,
             pausedDurationMs = info.pausedDurationMs + pausedElapsed
         )
-        pauseStartNs = 0L
         Log.d(TAG, "Recording resumed")
     }
 
     fun stopRecording() {
         synchronized(lifecycleLock) {
-            if (lifecycleState == LifecycleState.STARTING) {
-                cancelStartRequested = true
-                return
+            when (recorderLifecycle.requestStop()) {
+                RecorderLifecycle.StopRequest.CANCEL_START,
+                RecorderLifecycle.StopRequest.IGNORE -> return
+                RecorderLifecycle.StopRequest.STOP_RECORDING -> Unit
             }
-            if (lifecycleState != LifecycleState.RECORDING) return
-            lifecycleState = LifecycleState.STOPPING
         }
         val path = currentOutputPath
 
@@ -664,7 +651,6 @@ class DirectorRecorder @Inject constructor(
             isPaused = false,
             isSpatialUpscaling = false
         )
-        pauseStartNs = 0L
 
         scope.launch {
             finishRecording(path)
@@ -705,7 +691,7 @@ class DirectorRecorder @Inject constructor(
             val publishFailure = finalizeMediaStore()
             stopRequested = false
             synchronized(lifecycleLock) {
-                lifecycleState = LifecycleState.IDLE
+                recorderLifecycle.completeStop()
                 val failure = _recordingInfo.value.errorMessage
                     ?: finalizationFailure
                     ?: resourceFailure
@@ -723,11 +709,7 @@ class DirectorRecorder @Inject constructor(
     }
 
     private fun recordingPresentationTimeNs(timestampNs: Long): Long? {
-        val startedAt = recordingStartNs
-        if (startedAt == 0L || timestampNs < startedAt) return null
-        val pausedAt = pauseStartNs
-        val pausedSoFar = if (pausedAt > 0L) (timestampNs - pausedAt).coerceAtLeast(0L) else 0L
-        return (timestampNs - startedAt - accumulatedPauseNs - pausedSoFar).coerceAtLeast(0L)
+        return recordingClock.presentationTimeNs(timestampNs)
     }
 
     private fun recordingPresentationTimeUs(timestampNs: Long): Long? =
@@ -810,8 +792,7 @@ class DirectorRecorder @Inject constructor(
             Log.e(TAG, "drainEncoder error (drained $drainedFrames frames)", e)
             var shouldFinalize = false
             synchronized(lifecycleLock) {
-                if (_recordingInfo.value.isRecording && lifecycleState == LifecycleState.RECORDING) {
-                    lifecycleState = LifecycleState.STOPPING
+                if (_recordingInfo.value.isRecording && recorderLifecycle.failRecording()) {
                     shouldFinalize = true
                     _recordingInfo.value = _recordingInfo.value.copy(
                         isRecording = false,
@@ -893,9 +874,7 @@ class DirectorRecorder @Inject constructor(
         inputSurface = null
         videoTrackIndex = -1
         muxerStarted = false
-        recordingStartNs = 0L
-        accumulatedPauseNs = 0L
-        pauseStartNs = 0L
+        recordingClock.reset()
 
         // Ensure ParcelFileDescriptor is closed even if finalizeMediaStore() hasn't been called yet
         // (e.g., abnormal stop, crash recovery)
