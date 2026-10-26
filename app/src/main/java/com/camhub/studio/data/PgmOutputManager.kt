@@ -10,9 +10,14 @@ import com.camhub.studio.data.ptz.HubPtzTransform
 import java.util.concurrent.ConcurrentHashMap
 
 /** Coordinates PGM recording inputs independently from UI StateFlow emissions. */
-class PgmOutputManager(recorder: DirectorRecorder) {
+class PgmOutputManager(
+    recorder: DirectorRecorder,
+    private val externalDisplayManager: ExternalDisplayManager
+) {
     private val recordingFrames = PgmRecordingFrameDispatcher(recorder)
     private val latestGpuFrames = ConcurrentHashMap<String, SharedGpuVideoFrame>()
+    private val externalBitmapSequenceGate = FrameSequenceGate()
+    private val externalGpuSequenceGate = FrameSequenceGate()
 
     fun dispatchBitmap(
         recording: Boolean,
@@ -29,6 +34,66 @@ class PgmOutputManager(recorder: DirectorRecorder) {
         ptzTransform,
         transition
     )
+
+    fun dispatchExternalBitmap(
+        cameraName: String,
+        frameSequence: Long,
+        bitmap: Bitmap,
+        enableSpatialUpscaling: Boolean,
+        spatialUpscaleOutputHeight: Int,
+        ptzTransform: HubPtzTransform,
+        transition: PgmTransitionFrame?,
+        onFrameDrawn: (String, Long, Long) -> Unit
+    ): Boolean {
+        if (!externalDisplayManager.isOutputEnabled.value || frameSequence <= 0L || bitmap.isRecycled) {
+            return false
+        }
+        if (!externalBitmapSequenceGate.accept(cameraName, frameSequence)) return false
+        externalDisplayManager.updateFrame(
+            bitmap = bitmap,
+            cameraName = cameraName,
+            frameSequence = frameSequence,
+            enableSpatialUpscaling = enableSpatialUpscaling,
+            spatialUpscaleOutputHeight = spatialUpscaleOutputHeight,
+            ptzTransform = ptzTransform,
+            transition = transition,
+            onFrameDrawn = onFrameDrawn
+        )
+        return true
+    }
+
+    /** Retains the main texture and transfers it, plus the optional transition lease, to output. */
+    fun dispatchExternalGpu(
+        frame: SharedGpuVideoFrame,
+        cameraName: String,
+        ptzTransform: HubPtzTransform,
+        enableSpatialReconstruction: Boolean,
+        transition: PgmGpuTransitionFrame?,
+        onFrameDrawn: (String, Long, Long) -> Unit
+    ): Boolean {
+        if (!externalDisplayManager.isOutputEnabled.value) {
+            transition?.frame?.close()
+            return false
+        }
+        if (!externalGpuSequenceGate.accept(cameraName, frame.frameSequence)) {
+            transition?.frame?.close()
+            return false
+        }
+        val lease = runCatching { frame.retain() }.getOrNull()
+        if (lease == null) {
+            transition?.frame?.close()
+            return false
+        }
+        externalDisplayManager.updateGpuFrame(
+            frame = lease,
+            cameraName = cameraName,
+            ptzTransform = ptzTransform,
+            enableSpatialReconstruction = enableSpatialReconstruction,
+            transition = transition,
+            onFrameDrawn = onFrameDrawn
+        )
+        return true
+    }
 
     fun cacheGpuFrame(cameraName: String, frame: SharedGpuVideoFrame) {
         val lease = runCatching { frame.retain() }.getOrNull() ?: return
@@ -81,6 +146,8 @@ class PgmOutputManager(recorder: DirectorRecorder) {
     fun release() {
         latestGpuFrames.values.forEach { runCatching { it.close() } }
         latestGpuFrames.clear()
+        externalBitmapSequenceGate.reset()
+        externalGpuSequenceGate.reset()
     }
 
     companion object {

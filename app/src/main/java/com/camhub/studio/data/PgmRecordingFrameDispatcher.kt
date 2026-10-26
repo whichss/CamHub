@@ -10,8 +10,7 @@ import com.camhub.studio.data.ptz.HubPtzTransform
 class PgmRecordingFrameDispatcher(
     private val recorder: DirectorRecorder
 ) {
-    private var cameraName: String? = null
-    private var lastSequence = Long.MIN_VALUE
+    private val frameSequenceGate = FrameSequenceGate()
 
     @Synchronized
     fun dispatch(
@@ -22,13 +21,7 @@ class PgmRecordingFrameDispatcher(
         ptzTransform: HubPtzTransform,
         transition: PgmTransitionFrame?
     ) {
-        if (frameSequence <= 0L || bitmap.isRecycled) return
-        if (cameraName != camera) {
-            cameraName = camera
-            lastSequence = Long.MIN_VALUE
-        }
-        if (frameSequence <= lastSequence) return
-        lastSequence = frameSequence
+        if (bitmap.isRecycled || !frameSequenceGate.accept(camera, frameSequence)) return
         if (recording) recorder.onFrame(bitmap, ptzTransform, transition)
     }
 
@@ -42,14 +35,10 @@ class PgmRecordingFrameDispatcher(
         ptzTransform: HubPtzTransform,
         gpuTransition: PgmGpuTransitionFrame? = null
     ): Boolean {
-        if (!recording || frameSequence <= 0L || frameSequence <= lastSequence && cameraName == camera) {
+        if (!recording || !frameSequenceGate.accept(camera, frameSequence)) {
             return false
         }
         if (!recorder.onSharedGpuFrame(frame, ptzTransform, gpuTransition)) return false
-        if (cameraName != camera) {
-            cameraName = camera
-        }
-        lastSequence = frameSequence
         return true
     }
 }
