@@ -122,6 +122,15 @@ fun DirectorScreen(
                 ?: "CHECKING"
         )
         if (uiState.isAutomaticHubProfile) append(" · AUTO")
+        if (uiState.pgmCompositionSampleCount > 0) {
+            append(" · PGM GL ${uiState.pgmCompositionFps}fps")
+            if (uiState.pgmCompositionDroppedFrames > 0) {
+                append(" DROP ${uiState.pgmCompositionDroppedFrames}")
+            }
+            if (uiState.pgmTexturePoolStarvations > 0) {
+                append(" POOL ${uiState.pgmTexturePoolStarvations}")
+            }
+        }
         if (uiState.isStartingRecording) append(" · STARTING REC")
         else if (uiState.isRecording) {
             append(if (uiState.isRecordingAudio) " · REC A/V" else " · REC VIDEO")
@@ -178,8 +187,8 @@ fun DirectorScreen(
                         onFrameDrawn = { cameraName, frameSequence ->
                             viewModel.onFrameDrawn(cameraName, frameSequence)
                         },
-                        onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction ->
-                            if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction)
+                        onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction, isProgramOutput ->
+                            if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction, isProgramOutput)
                             else viewModel.unregisterGpuPreview(view)
                         },
                         gridState = gridState,
@@ -282,8 +291,8 @@ fun DirectorScreen(
                     onFrameDrawn = { cameraName, frameSequence ->
                         viewModel.onFrameDrawn(cameraName, frameSequence)
                     },
-                    onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction ->
-                        if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction)
+                    onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction, isProgramOutput ->
+                        if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction, isProgramOutput)
                         else viewModel.unregisterGpuPreview(view)
                     },
                     isVertical = false,
@@ -334,8 +343,8 @@ fun DirectorScreen(
                     onFrameDrawn = { cameraName, frameSequence ->
                         viewModel.onFrameDrawn(cameraName, frameSequence)
                     },
-                    onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction ->
-                        if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction)
+                    onGpuPreviewTargetChanged = { cameraName, view, active, transform, enableReconstruction, isProgramOutput ->
+                        if (active) viewModel.registerGpuPreview(cameraName, view, transform, enableReconstruction, isProgramOutput)
                         else viewModel.unregisterGpuPreview(view)
                     },
                     gridState = gridState,

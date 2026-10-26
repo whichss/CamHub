@@ -122,7 +122,7 @@ fun ViewportCard(
     onToggleLivePtzLock: () -> Unit = {},
     onPtzGesture: (String, Float, Float, Float) -> Unit = { _, _, _, _ -> },
     onPtzDoubleTap: (String, Float, Float) -> Unit = { _, _, _ -> },
-    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit = { _, _, _, _, _ -> }
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean, Boolean) -> Unit = { _, _, _, _, _, _ -> }
 ) {
     val enableSpatialReconstruction = enableSpatialUpscaling &&
         isPgm &&
@@ -141,7 +141,7 @@ fun ViewportCard(
     DisposableEffect(Unit) {
         onDispose {
             gpuPreviewViewRef.getAndSet(null)?.let { view ->
-                latestGpuTargetCallback.value("", view, false, ptzTransform, false)
+            latestGpuTargetCallback.value("", view, false, ptzTransform, false, isPgm)
             }
         }
     }
@@ -253,7 +253,7 @@ fun ViewportCard(
                                     view.updateDisplayConfig(cameraName, ptzTransform, enableReconstruction) { name, sequence, _ ->
                                         onFrameDrawn(name, sequence)
                                     }
-                                    onGpuPreviewTargetChanged(cameraName, view, true, ptzTransform, enableReconstruction)
+                                    onGpuPreviewTargetChanged(cameraName, view, true, ptzTransform, enableReconstruction, isPgm)
                                 }
                             },
                             update = { view ->
@@ -261,10 +261,10 @@ fun ViewportCard(
                                 view.updateDisplayConfig(cameraName, ptzTransform, enableReconstruction) { name, sequence, _ ->
                                     onFrameDrawn(name, sequence)
                                 }
-                                onGpuPreviewTargetChanged(cameraName, view, true, ptzTransform, enableReconstruction)
+                                onGpuPreviewTargetChanged(cameraName, view, true, ptzTransform, enableReconstruction, isPgm)
                             },
                             onRelease = { view ->
-                                latestGpuTargetCallback.value("", view, false, ptzTransform, false)
+                                latestGpuTargetCallback.value("", view, false, ptzTransform, false, isPgm)
                                 gpuPreviewViewRef.compareAndSet(view, null)
                             },
                             modifier = Modifier.fillMaxSize()
@@ -479,7 +479,7 @@ fun ViewportPanel(
     onToggleLivePtzLock: () -> Unit = {},
     onPtzGesture: (String, Float, Float, Float) -> Unit = { _, _, _, _ -> },
     onPtzDoubleTap: (String, Float, Float) -> Unit = { _, _, _ -> },
-    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit = { _, _, _, _, _ -> },
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean, Boolean) -> Unit = { _, _, _, _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     if (isVertical) {

@@ -28,7 +28,8 @@ class SpatialUpscaleWindowRenderer(
         val presentationTimeNs: Long,
         val ptzTransform: HubPtzTransform,
         val transition: PgmTransitionFrame?,
-        val gpuTransition: PgmGpuTransitionFrame?
+        val gpuTransition: PgmGpuTransitionFrame?,
+        val enableSpatialReconstruction: Boolean?
     )
 
     private val latestFrame = AtomicReference<PendingFrame?>()
@@ -92,7 +93,8 @@ class SpatialUpscaleWindowRenderer(
                     presentationTimeNs = presentationTimeNs,
                     ptzTransform = ptzTransform,
                     transition = transition,
-                    gpuTransition = null
+                    gpuTransition = null,
+                    enableSpatialReconstruction = null
                 )
             )
             previous?.gpuFrame?.close()
@@ -107,7 +109,8 @@ class SpatialUpscaleWindowRenderer(
         presentationTimeNs: Long,
         ptzTransform: HubPtzTransform,
         transition: PgmTransitionFrame? = null,
-        gpuTransition: PgmGpuTransitionFrame? = null
+        gpuTransition: PgmGpuTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean? = null
     ): Boolean {
         synchronized(frameLock) {
             if (!acceptingFrames.get()) return false
@@ -120,7 +123,8 @@ class SpatialUpscaleWindowRenderer(
                     presentationTimeNs = presentationTimeNs,
                     ptzTransform = ptzTransform,
                     transition = transition,
-                    gpuTransition = gpuTransition
+                    gpuTransition = gpuTransition,
+                    enableSpatialReconstruction = enableSpatialReconstruction
                 )
             )
             previous?.gpuFrame?.close()
@@ -187,7 +191,8 @@ class SpatialUpscaleWindowRenderer(
                             outputHeight = outputHeight,
                             ptzTransform = frame.ptzTransform,
                             transition = frame.transition,
-                            enableSpatialReconstruction = enableSpatialReconstruction,
+                            enableSpatialReconstruction = frame.enableSpatialReconstruction
+                                ?: enableSpatialReconstruction,
                             sourceRotationDegrees = frame.gpuFrame.rotationDegrees,
                             gpuTransition = frame.gpuTransition
                         )
@@ -199,7 +204,7 @@ class SpatialUpscaleWindowRenderer(
                                 outputHeight,
                                 frame.ptzTransform,
                                 frame.transition,
-                                enableSpatialReconstruction
+                                frame.enableSpatialReconstruction ?: enableSpatialReconstruction
                             )
                         } ?: false
                     }

@@ -37,12 +37,19 @@ class PgmRecordingFrameDispatcher(
         frameSequence: Long,
         frame: SharedGpuVideoFrame,
         ptzTransform: HubPtzTransform,
-        gpuTransition: PgmGpuTransitionFrame? = null
+        gpuTransition: PgmGpuTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean? = null
     ): Boolean {
         if (!recording || !frameSequenceGate.accept(camera, frameSequence)) {
             return false
         }
-        if (!recorder.onSharedGpuFrame(frame, ptzTransform, gpuTransition)) return false
+        if (!recorder.onSharedGpuFrame(
+                frame,
+                ptzTransform,
+                gpuTransition,
+                enableSpatialReconstruction
+            )
+        ) return false
         sourceArbiter.noteGpuAccepted(camera, SystemClock.elapsedRealtime())
         return true
     }

@@ -519,7 +519,8 @@ class DirectorRecorder @Inject constructor(
     fun onSharedGpuFrame(
         frame: SharedGpuVideoFrame,
         ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
-        gpuTransition: PgmGpuTransitionFrame? = null
+        gpuTransition: PgmGpuTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean? = null
     ): Boolean {
         if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused || stopRequested) return false
         if (!frameWriteInFlight.compareAndSet(false, true)) {
@@ -536,7 +537,8 @@ class DirectorRecorder @Inject constructor(
             frame,
             presentationTimeNs,
             ptzTransform,
-            gpuTransition = gpuTransition
+            gpuTransition = gpuTransition,
+            enableSpatialReconstruction = enableSpatialReconstruction
         )
         if (!accepted) {
             frameWriteInFlight.set(false)

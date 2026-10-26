@@ -22,6 +22,7 @@ import com.camhub.studio.data.capability.HubStreamLimits
 import com.camhub.studio.data.capability.PgmRecordingPolicy
 import com.camhub.studio.data.capability.RuntimePressure
 import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmGpuTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.gl.SharedGpuVideoSurfaceView
@@ -107,6 +108,7 @@ class DirectorViewModel @Inject constructor(
     }
     private val gpuPreviewTargets = ConcurrentHashMap<String, CopyOnWriteArraySet<SharedGpuVideoSurfaceView>>()
     private val gpuPreviewCameraByView = ConcurrentHashMap<SharedGpuVideoSurfaceView, String>()
+    private val gpuProgramPreviewViews = ConcurrentHashMap.newKeySet<SharedGpuVideoSurfaceView>()
     private val hubTriggeredRecordingNames = mutableSetOf<String>()
     private var transitionJob: Job? = null
     private val imageBitmapCache = IdentityHashMap<Bitmap, ImageBitmap>()
@@ -119,6 +121,8 @@ class DirectorViewModel @Inject constructor(
     private val adaptiveCounterSnapshots = mutableMapOf<String, AdaptiveCounterSnapshot>()
     private var lastAutomaticPeerNames: Set<String> = emptySet()
     private var lastPriorityLiveCameraCount = -1
+    private var lastPgmComposedFrameCount = 0L
+    private var lastPgmMetricsSampleAtMs = 0L
     private val ptzCommandJobs = mutableMapOf<String, Job>()
     private val pendingRemotePtz = mutableMapOf<String, PendingRemotePtz>()
     private val ptzRequestSequence = AtomicLong(0L)
@@ -146,6 +150,11 @@ class DirectorViewModel @Inject constructor(
         deviceMonitor.startMonitoring()
         externalDisplayManager.startListening()
         audioStreamClient.onMixedPcm = recorder::offerMixedAudio
+        viewModelScope.launch(Dispatchers.Default) {
+            if (!pgmOutputManager.startGpuCompositor()) {
+                Log.w(TAG, "PGM GPU compositor unavailable; output paths will use their existing renderers")
+            }
+        }
 
         viewModelScope.launch {
             networkTransportManager.state.collect { transportState ->
@@ -413,7 +422,26 @@ class DirectorViewModel @Inject constructor(
                 val totalBitrate = streamClient.getTotalBitrateKbps()
                 streamClient.refreshRendererMetrics()
                 recorder.refreshThroughputMetrics()
-                _uiState.update { it.copy(bitrateKbps = totalBitrate) }
+                val pgmMetrics = pgmOutputManager.gpuCompositorMetrics()
+                val pgmNowMs = SystemClock.elapsedRealtime()
+                val pgmElapsedMs = if (lastPgmMetricsSampleAtMs == 0L) 0L else {
+                    (pgmNowMs - lastPgmMetricsSampleAtMs).coerceAtLeast(1L)
+                }
+                val pgmFps = if (pgmElapsedMs == 0L) 0 else {
+                    ((pgmMetrics.composedFrames - lastPgmComposedFrameCount)
+                        .coerceAtLeast(0L) * 1_000L / pgmElapsedMs).toInt()
+                }
+                lastPgmComposedFrameCount = pgmMetrics.composedFrames
+                lastPgmMetricsSampleAtMs = pgmNowMs
+                _uiState.update {
+                    it.copy(
+                        bitrateKbps = totalBitrate,
+                        pgmCompositionFps = pgmFps,
+                        pgmCompositionSampleCount = pgmMetrics.composedFrames.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        pgmCompositionDroppedFrames = pgmMetrics.droppedFrames,
+                        pgmTexturePoolStarvations = pgmMetrics.texturePoolStarvations
+                    )
+                }
                 updateAdaptiveBitrates()
             }
         }
@@ -1463,7 +1491,8 @@ class DirectorViewModel @Inject constructor(
         cameraName: String,
         view: SharedGpuVideoSurfaceView,
         ptzTransform: HubPtzTransform,
-        enableSpatialReconstruction: Boolean
+        enableSpatialReconstruction: Boolean,
+        isProgramOutput: Boolean = false
     ) {
         view.updateDisplayConfig(
             cameraName,
@@ -1479,11 +1508,13 @@ class DirectorViewModel @Inject constructor(
             }
         }
         gpuPreviewTargets.computeIfAbsent(cameraName) { CopyOnWriteArraySet() }.add(view)
+        if (isProgramOutput) gpuProgramPreviewViews.add(view) else gpuProgramPreviewViews.remove(view)
         refreshSharedGpuFrameTargets()
     }
 
     fun unregisterGpuPreview(view: SharedGpuVideoSurfaceView) {
         val cameraName = gpuPreviewCameraByView.remove(view) ?: return
+        gpuProgramPreviewViews.remove(view)
         gpuPreviewTargets[cameraName]?.let { targets ->
             targets.remove(view)
             if (targets.isEmpty()) gpuPreviewTargets.remove(cameraName, targets)
@@ -1523,6 +1554,7 @@ class DirectorViewModel @Inject constructor(
         }
         gpuPreviewTargets.clear()
         gpuPreviewCameraByView.clear()
+        gpuProgramPreviewViews.clear()
         streamClient.setSharedGpuFrameTargets(emptySet())
         pgmOutputManager.release()
         transitionJob?.cancel()
@@ -1562,32 +1594,24 @@ class DirectorViewModel @Inject constructor(
         val transitionActive = state.transitionProgress > 0f &&
             state.selectedTransition != TransitionType.CUT
         val recording = recorder.recordingInfo.value.let { it.isRecording && !it.isPaused }
+        val programPreviewTargets = gpuPreviewTargets[cameraName]
+            ?.filter { it in gpuProgramPreviewViews }
+            .orEmpty()
+        val programOutputConsumerCount =
+            (if (recording) 1 else 0) +
+                (if (externalGpuOutputEnabled) 1 else 0) +
+                programPreviewTargets.size
+        val composeForMultipleOutputs = programOutputConsumerCount > 1
 
         if (cameraName == pvwCamera?.name) {
             pgmOutputManager.cacheGpuFrame(cameraName, frame)
         }
         pgmOutputManager.discardGpuFramesExcept(pvwCamera?.name)
 
-        if (externalGpuOutputEnabled && pgmCamera?.name == cameraName) {
-            val externalTransition = if (transitionActive && pvwCamera != null) {
-                pgmOutputManager.retainFreshTransitionFrame(
-                    cameraName = pvwCamera.name,
-                    ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
-                    mode = transitionMode(state.selectedTransition),
-                    progress = state.transitionProgress
-                )
-            } else null
-            pgmOutputManager.dispatchExternalGpu(
-                frame = frame,
-                cameraName = cameraName,
-                ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
-                enableSpatialReconstruction = state.isPgmSpatialUpscalingEnabled,
-                transition = externalTransition,
-                onFrameDrawn = streamClient::markExternalFrameDrawn
-            )
-        }
-
         gpuPreviewTargets[cameraName]?.forEach { target ->
+            if (composeForMultipleOutputs && cameraName == pgmCamera?.name &&
+                target in gpuProgramPreviewViews
+            ) return@forEach
             val previewLease = runCatching { frame.retain() }.getOrNull() ?: return@forEach
             val gpuTransition = if (transitionActive && cameraName == pgmCamera?.name && pvwCamera != null) {
                 pgmOutputManager.retainFreshTransitionFrame(
@@ -1607,8 +1631,62 @@ class DirectorViewModel @Inject constructor(
             }
         }
 
-        if (pgmCamera?.name == cameraName && recording) {
-            val gpuTransition = if (transitionActive && pvwCamera != null) {
+        if (pgmCamera?.name == cameraName && programOutputConsumerCount > 0) {
+            if (!composeForMultipleOutputs) {
+                if (externalGpuOutputEnabled) {
+                    val externalTransition = if (transitionActive && pvwCamera != null) {
+                        pgmOutputManager.retainFreshTransitionFrame(
+                            cameraName = pvwCamera.name,
+                            ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                            mode = transitionMode(state.selectedTransition),
+                            progress = state.transitionProgress
+                        )
+                    } else null
+                    if (transitionActive && externalTransition == null) {
+                        frame.close()
+                        return
+                    }
+                    pgmOutputManager.dispatchExternalGpu(
+                        frame = frame,
+                        cameraName = cameraName,
+                        ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                        enableSpatialReconstruction = state.isPgmSpatialUpscalingEnabled,
+                        transition = externalTransition,
+                        onFrameDrawn = streamClient::markExternalFrameDrawn
+                    )
+                }
+                if (recording) {
+                    val recordingTransition = if (transitionActive && pvwCamera != null) {
+                        pgmOutputManager.retainFreshTransitionFrame(
+                            cameraName = pvwCamera.name,
+                            ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                            mode = transitionMode(state.selectedTransition),
+                            progress = state.transitionProgress
+                        )
+                    } else null
+                    if (transitionActive && recordingTransition == null) {
+                        frame.close()
+                        return
+                    }
+                    val accepted = pgmOutputManager.dispatchGpu(
+                        recording = true,
+                        cameraName = cameraName,
+                        frameSequence = frame.frameSequence,
+                        frame = frame,
+                        ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                        transition = recordingTransition
+                    )
+                    if (!accepted) {
+                        frame.close()
+                        recordingTransition?.frame?.close()
+                    }
+                    return
+                }
+                frame.close()
+                return
+            }
+
+            val transition = if (transitionActive && pvwCamera != null) {
                 pgmOutputManager.retainFreshTransitionFrame(
                     cameraName = pvwCamera.name,
                     ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
@@ -1616,24 +1694,143 @@ class DirectorViewModel @Inject constructor(
                     progress = state.transitionProgress
                 )
             } else null
-
-            if (!transitionActive || gpuTransition != null) {
-                val accepted = pgmOutputManager.dispatchGpu(
-                    recording = true,
-                    cameraName = cameraName,
-                    frameSequence = frame.frameSequence,
-                    frame = frame,
-                    ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
-                    transition = gpuTransition
-                )
-                if (!accepted) {
-                    frame.close()
-                    gpuTransition?.frame?.close()
-                }
+            if (transitionActive && transition == null) {
+                frame.close()
                 return
             }
-            // Keep the Bitmap transition path as a temporary fallback until a fresh
-            // PVW texture is available; the next PGM frame can use the GPU composition.
+            val rotation = ((frame.rotationDegrees % 360) + 360) % 360
+            val sourceWidth = if (rotation == 90 || rotation == 270) frame.height else frame.width
+            val sourceHeight = if (rotation == 90 || rotation == 270) frame.width else frame.height
+            val outputPlan = PgmRecordingPolicy.plan(
+                sourceWidth = sourceWidth,
+                sourceHeight = sourceHeight,
+                spatialUpscalingEnabled = state.isPgmSpatialUpscalingEnabled,
+                targetHeight = state.pgmOutputHeight
+            )
+            val submitted = pgmOutputManager.composeGpuProgram(
+                source = frame,
+                ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                transition = transition,
+                outputWidth = outputPlan.width,
+                outputHeight = outputPlan.height,
+                enableSpatialReconstruction = outputPlan.useSpatialUpscaling
+            ) { composedFrame ->
+                try {
+                    val currentPgmName = _uiState.value.cameras
+                        .getOrNull(_uiState.value.pgmCameraIndex)
+                        ?.name
+                    if (currentPgmName != cameraName) return@composeGpuProgram
+                    programPreviewTargets.forEach { target ->
+                        if (gpuPreviewCameraByView[target] != cameraName) return@forEach
+                        val previewLease = runCatching { composedFrame.retain() }.getOrNull()
+                            ?: return@forEach
+                        target.updateDisplayConfig(
+                            cameraName = cameraName,
+                            transform = HybridPtzController.IDENTITY_TRANSFORM,
+                            enableSpatialReconstruction = false,
+                            onFrameDrawn = streamClient::markFrameDrawn
+                        )
+                        if (!target.displayFrame(
+                                previewLease,
+                                ptzTransform = HybridPtzController.IDENTITY_TRANSFORM
+                            )
+                        ) {
+                            previewLease.close()
+                        }
+                    }
+                    if (recording) {
+                        val recorderLease = runCatching { composedFrame.retain() }.getOrNull()
+                        if (recorderLease != null) {
+                            val accepted = pgmOutputManager.dispatchGpu(
+                                recording = true,
+                                cameraName = cameraName,
+                                frameSequence = composedFrame.frameSequence,
+                                frame = recorderLease,
+                                ptzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+                                enableSpatialReconstruction = false
+                            )
+                            if (!accepted) recorderLease.close()
+                        }
+                    }
+                    if (externalGpuOutputEnabled) {
+                        pgmOutputManager.dispatchExternalGpu(
+                            frame = composedFrame,
+                            cameraName = cameraName,
+                            ptzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+                            enableSpatialReconstruction = false,
+                            transition = null,
+                            onFrameDrawn = streamClient::markExternalFrameDrawn
+                        )
+                    }
+                } finally {
+                    composedFrame.close()
+                }
+            }
+            if (submitted) return
+
+            transition?.frame?.close()
+            programPreviewTargets.forEach { target ->
+                val previewLease = runCatching { frame.retain() }.getOrNull() ?: return@forEach
+                val previewTransition = if (transitionActive && pvwCamera != null) {
+                    pgmOutputManager.retainFreshTransitionFrame(
+                        cameraName = pvwCamera.name,
+                        ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                        mode = transitionMode(state.selectedTransition),
+                        progress = state.transitionProgress
+                    )
+                } else null
+                if (!target.displayFrame(previewLease, previewTransition)) {
+                    previewLease.close()
+                    previewTransition?.frame?.close()
+                }
+            }
+            if (externalGpuOutputEnabled) {
+                val externalTransition = if (transitionActive && pvwCamera != null) {
+                    pgmOutputManager.retainFreshTransitionFrame(
+                        cameraName = pvwCamera.name,
+                        ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                        mode = transitionMode(state.selectedTransition),
+                        progress = state.transitionProgress
+                    )
+                } else null
+                pgmOutputManager.dispatchExternalGpu(
+                    frame = frame,
+                    cameraName = cameraName,
+                    ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                    enableSpatialReconstruction = state.isPgmSpatialUpscalingEnabled,
+                    transition = externalTransition,
+                    onFrameDrawn = streamClient::markExternalFrameDrawn
+                )
+            }
+            if (recording) {
+                val recordingTransition = if (transitionActive && pvwCamera != null) {
+                    pgmOutputManager.retainFreshTransitionFrame(
+                        cameraName = pvwCamera.name,
+                        ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                        mode = transitionMode(state.selectedTransition),
+                        progress = state.transitionProgress
+                    )
+                } else null
+                val recorderLease = runCatching { frame.retain() }.getOrNull()
+                if (recorderLease != null) {
+                    val accepted = pgmOutputManager.dispatchGpu(
+                        recording = true,
+                        cameraName = cameraName,
+                        frameSequence = frame.frameSequence,
+                        frame = recorderLease,
+                        ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                        transition = recordingTransition
+                    )
+                    if (!accepted) {
+                        recorderLease.close()
+                        recordingTransition?.frame?.close()
+                    }
+                } else {
+                    recordingTransition?.frame?.close()
+                }
+            }
+            frame.close()
+            return
         }
 
         if (pgmCamera?.name != cameraName || !recording || transitionActive) {

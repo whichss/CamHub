@@ -3,6 +3,8 @@ package com.camhub.studio.data
 import android.graphics.Bitmap
 import android.os.SystemClock
 import com.camhub.studio.data.gl.PgmGpuTransitionFrame
+import com.camhub.studio.data.gl.PgmGpuCompositor
+import com.camhub.studio.data.gl.PgmGpuCompositorMetrics
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
@@ -15,9 +17,32 @@ class PgmOutputManager(
     private val externalDisplayManager: ExternalDisplayManager
 ) {
     private val recordingFrames = PgmRecordingFrameDispatcher(recorder)
+    private val gpuCompositor = PgmGpuCompositor()
     private val latestGpuFrames = ConcurrentHashMap<String, SharedGpuVideoFrame>()
     private val externalBitmapSequenceGate = FrameSequenceGate()
     private val externalGpuSequenceGate = FrameSequenceGate()
+
+    fun startGpuCompositor(): Boolean = gpuCompositor.start()
+    fun gpuCompositorMetrics(): PgmGpuCompositorMetrics = gpuCompositor.metricsSnapshot()
+
+    /** Takes ownership of source and transition leases only when accepted for composition. */
+    fun composeGpuProgram(
+        source: SharedGpuVideoFrame,
+        ptzTransform: HubPtzTransform,
+        transition: PgmGpuTransitionFrame?,
+        outputWidth: Int,
+        outputHeight: Int,
+        enableSpatialReconstruction: Boolean,
+        onComposed: (SharedGpuVideoFrame) -> Unit
+    ): Boolean = gpuCompositor.submit(
+        source = source,
+        transform = ptzTransform,
+        transition = transition,
+        outputWidth = outputWidth,
+        outputHeight = outputHeight,
+        enableSpatialReconstruction = enableSpatialReconstruction,
+        onComposed = onComposed
+    )
 
     fun dispatchBitmap(
         recording: Boolean,
@@ -133,17 +158,20 @@ class PgmOutputManager(
         frameSequence: Long,
         frame: SharedGpuVideoFrame,
         ptzTransform: HubPtzTransform,
-        transition: PgmGpuTransitionFrame? = null
+        transition: PgmGpuTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean? = null
     ): Boolean = recordingFrames.dispatchGpu(
         recording,
         cameraName,
         frameSequence,
         frame,
         ptzTransform,
-        transition
+        transition,
+        enableSpatialReconstruction
     )
 
     fun release() {
+        gpuCompositor.release()
         recordingFrames.reset()
         latestGpuFrames.values.forEach { runCatching { it.close() } }
         latestGpuFrames.clear()

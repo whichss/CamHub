@@ -163,7 +163,7 @@ private fun CameraCard(
     onLongClick: () -> Unit,
     onDisconnect: () -> Unit,
     onFrameDrawn: (String, Long) -> Unit,
-    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit,
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean, Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val gpuViewState = remember(camera.name) { mutableStateOf<SharedGpuVideoSurfaceView?>(null) }
@@ -175,6 +175,7 @@ private fun CameraCard(
                 gpuView,
                 true,
                 HybridPtzController.hubTransform(camera.ptzState),
+                false,
                 false
             )
         }
@@ -185,6 +186,7 @@ private fun CameraCard(
                     it,
                     false,
                     HybridPtzController.IDENTITY_TRANSFORM,
+                    false,
                     false
                 )
             }
@@ -411,7 +413,7 @@ fun CameraGrid(
     onOpenCameraControl: (Int) -> Unit,
     onDisconnect: (Int) -> Unit,
     onFrameDrawn: (String, Long) -> Unit,
-    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit,
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean, Boolean) -> Unit,
     gridState: LazyGridState = rememberLazyGridState(),
     modifier: Modifier = Modifier
 ) {
