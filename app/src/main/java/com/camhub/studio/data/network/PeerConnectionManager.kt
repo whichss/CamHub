@@ -112,7 +112,8 @@ data class PeerTrustRequest(
     val peer: DiscoveredPeer,
     val directorName: String,
     val fingerprint: String,
-    val requiresFingerprintConfirmation: Boolean
+    val requiresFingerprintConfirmation: Boolean,
+    val pinRejected: Boolean = false
 )
 
 @Singleton
@@ -154,6 +155,8 @@ class PeerConnectionManager @Inject constructor(
 
     private val _connectionState = MutableStateFlow(PeerConnectionState.DISCONNECTED)
     val connectionState: StateFlow<PeerConnectionState> = _connectionState.asStateFlow()
+    private val _connectionFailureMessage = MutableStateFlow<String?>(null)
+    val connectionFailureMessage: StateFlow<String?> = _connectionFailureMessage.asStateFlow()
 
     private val _connectedPeers = MutableStateFlow<List<ConnectedPeer>>(emptyList())
     val connectedPeers: StateFlow<List<ConnectedPeer>> = _connectedPeers.asStateFlow()
@@ -345,7 +348,11 @@ class PeerConnectionManager @Inject constructor(
             if (failureWindow != null && nowMs - failureWindow.firstAttemptAtMs < PAIRING_FAILURE_WINDOW_MS &&
                 failureWindow.attempts >= MAX_PAIRING_FAILURES
             ) {
-                writer.println(json.encodeToString(HandshakeMessage(type = "error")))
+                writer.println(
+                    json.encodeToString(
+                        HandshakeMessage(type = "error", stringValue = "pairing_rate_limited")
+                    )
+                )
                 return
             }
             if (!tlsHelper.isLocalPairingPinValid(hello.pin)) {
@@ -356,7 +363,11 @@ class PeerConnectionManager @Inject constructor(
                         previous.copy(attempts = previous.attempts + 1)
                     }
                 }
-                writer.println(json.encodeToString(HandshakeMessage(type = "error")))
+                writer.println(
+                    json.encodeToString(
+                        HandshakeMessage(type = "error", stringValue = "invalid_pairing_pin")
+                    )
+                )
                 return
             }
             pairingFailuresByIp.remove(clientIp)
@@ -421,6 +432,7 @@ class PeerConnectionManager @Inject constructor(
     fun connectToCamera(peer: DiscoveredPeer, directorName: String, pairingPin: String? = null) {
         scope.launch {
             localDeviceName = directorName
+            _connectionFailureMessage.value = null
             _connectionState.value = PeerConnectionState.CONNECTING
             var socket: javax.net.ssl.SSLSocket? = null
             var selectedNetwork: Network? = null
@@ -488,14 +500,24 @@ class PeerConnectionManager @Inject constructor(
                 } else null
 
                 if (ack == null || ack.type == "error") {
-                    if (ack?.type == "error" && resolvedPin != null) {
+                    if (ack?.type == "error" && ack.stringValue == "pairing_rate_limited") {
+                        _connectionFailureMessage.value =
+                            "Too many incorrect pairing PIN attempts. Wait one minute before trying again."
+                        _connectionState.value = PeerConnectionState.ERROR
+                        return@launch
+                    }
+                    if (
+                        ack?.type == "error" && resolvedPin != null &&
+                        ack.stringValue in setOf("invalid_pairing_pin", "")
+                    ) {
                         tlsHelper.removePeerPairingPin(peer.ip)
                         val request = PeerTrustRequest(
                             id = trustRequestSequence.incrementAndGet(),
                             peer = peer,
                             directorName = directorName,
                             fingerprint = fingerprint,
-                            requiresFingerprintConfirmation = false
+                            requiresFingerprintConfirmation = false,
+                            pinRejected = true
                         )
                         _peerTrustRequests.update { requests ->
                             requests.filterNot { it.peer.ip == peer.ip } + request
@@ -503,11 +525,16 @@ class PeerConnectionManager @Inject constructor(
                         _connectionState.value = PeerConnectionState.DISCONNECTED
                         return@launch
                     }
+                    _connectionFailureMessage.value = when {
+                        ack == null -> "No valid response from ${peer.name}. Check the connection and try again."
+                        else -> "${peer.name} rejected the connection for a reason other than the pairing PIN."
+                    }
                     _connectionState.value = PeerConnectionState.ERROR
                     return@launch
                 }
 
                 if (ack.type != "hello_ack") {
+                    _connectionFailureMessage.value = "${peer.name} returned an unsupported connection response."
                     _connectionState.value = PeerConnectionState.ERROR
                     return@launch
                 }
@@ -517,6 +544,7 @@ class PeerConnectionManager @Inject constructor(
                     val decoded = Base64.decode(ack.sessionKey, Base64.NO_WRAP)
                     if (decoded.size != AES_KEY_SIZE) {
                         Log.w(TAG, "Invalid session key size: ${decoded.size}")
+                        _connectionFailureMessage.value = "${peer.name} returned an invalid session key."
                         _connectionState.value = PeerConnectionState.ERROR
                         return@launch
                     }
@@ -555,6 +583,8 @@ class PeerConnectionManager @Inject constructor(
                 startHeartbeat(peerName, reader, writer, socket)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to connect to ${peer.name}", e)
+                _connectionFailureMessage.value = e.message?.let { "Connection to ${peer.name} failed: $it" }
+                    ?: "Connection to ${peer.name} failed. Check the network and try again."
                 _connectionState.value = PeerConnectionState.ERROR
             } finally {
                 if (!accepted) {

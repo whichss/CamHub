@@ -30,22 +30,32 @@ fun PeerTrustDialog(
     var pairingPin by remember(request.id) { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = { onResolve(request.id, false, "") },
-        title = { Text("Verify camera identity") },
+        title = { Text(if (request.pinRejected) "Pairing PIN rejected" else "Verify camera identity") },
         text = {
             Column {
-                Text("Compare the SHA-256 prefix below with VERIFY on ${request.peer.name}.")
+                Text(
+                    when {
+                        request.pinRejected -> "The saved pairing PIN for ${request.peer.name} was rejected. Enter the current 8-digit PAIR PIN shown on the camera."
+                        request.requiresFingerprintConfirmation -> "Compare the SHA-256 prefix below with VERIFY on ${request.peer.name}."
+                        else -> "${request.peer.name} is already verified. Enter the current 8-digit PAIR PIN shown on the camera."
+                    }
+                )
                 Spacer(Modifier.height(12.dp))
-                SelectionContainer {
+                if (request.requiresFingerprintConfirmation) {
+                    SelectionContainer {
+                        Text(
+                            request.fingerprint.take(16).chunked(4).joinToString(" "),
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+                if (request.requiresFingerprintConfirmation) {
                     Text(
-                        request.fingerprint.take(16).chunked(4).joinToString(" "),
-                        style = MaterialTheme.typography.labelMedium
+                        "Reveal the camera's PAIR PIN on its screen and enter it here. The camera will not release its video key until the PIN matches.",
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "Reveal the camera's PAIR PIN on its screen and enter it here. The camera will not release its video key until the PIN matches.",
-                    style = MaterialTheme.typography.bodySmall
-                )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = pairingPin,

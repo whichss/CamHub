@@ -80,6 +80,12 @@ class ConnectionViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            connectionManager.connectionFailureMessage.collect { message ->
+                _uiState.update { it.copy(errorMessage = message) }
+            }
+        }
+
+        viewModelScope.launch {
             connectionManager.connectionState.collect { state ->
                 _uiState.update {
                     it.copy(

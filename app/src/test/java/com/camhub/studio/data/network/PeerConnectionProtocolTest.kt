@@ -36,4 +36,17 @@ class PeerConnectionProtocolTest {
         assertEquals(0L, decoded.requestId)
         assertEquals("set_zoom", decoded.command)
     }
+
+    @Test
+    fun `pairing rejection and temporary lockout have distinct response codes`() {
+        val invalidPin = json.decodeFromString<HandshakeMessage>(
+            json.encodeToString(HandshakeMessage(type = "error", stringValue = "invalid_pairing_pin"))
+        )
+        val rateLimited = json.decodeFromString<HandshakeMessage>(
+            json.encodeToString(HandshakeMessage(type = "error", stringValue = "pairing_rate_limited"))
+        )
+
+        assertEquals("invalid_pairing_pin", invalidPin.stringValue)
+        assertEquals("pairing_rate_limited", rateLimited.stringValue)
+    }
 }
