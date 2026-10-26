@@ -98,6 +98,7 @@ class DirectorViewModel @Inject constructor(
 
     private var lastPgmBitmap: Bitmap? = null
     private var lastPgmCameraName: String? = null
+    @Volatile private var externalGpuOutputEnabled = false
     private val pgmOutputManager = PgmOutputManager(recorder)
     private val sharedGpuFrameListener: (String, SharedGpuVideoFrame) -> Unit = { cameraName, frame ->
         handleSharedGpuFrame(cameraName, frame)
@@ -363,7 +364,7 @@ class DirectorViewModel @Inject constructor(
                         ptzTransform = ptzTransform,
                         transition = transition
                     )
-                    if (externalDisplayManager.isOutputEnabled.value) {
+                    if (externalDisplayManager.isOutputEnabled.value && !externalGpuOutputEnabled) {
                         val frameSequence = pgmStream.pipelineLatency?.frameSequence
                             ?: pgmStream.frameSequence
                         externalDisplayManager.updateFrame(
@@ -448,6 +449,8 @@ class DirectorViewModel @Inject constructor(
 
         viewModelScope.launch {
             externalDisplayManager.isOutputEnabled.collect { enabled ->
+                externalGpuOutputEnabled = enabled
+                refreshSharedGpuFrameTargets()
                 _uiState.update { it.copy(isExternalDisplayEnabled = enabled) }
             }
         }
@@ -1476,6 +1479,10 @@ class DirectorViewModel @Inject constructor(
         if (recorder.recordingInfo.value.isRecording) {
             currentState.cameras.getOrNull(currentState.pgmCameraIndex)?.name?.let(targets::add)
         }
+        if (externalGpuOutputEnabled) {
+            currentState.cameras.getOrNull(currentState.pgmCameraIndex)?.name?.let(targets::add)
+            currentState.cameras.getOrNull(currentState.pvwCameraIndex)?.name?.let(targets::add)
+        }
         streamClient.setSharedGpuFrameTargets(targets)
     }
 
@@ -1528,6 +1535,28 @@ class DirectorViewModel @Inject constructor(
             pgmOutputManager.cacheGpuFrame(cameraName, frame)
         }
         pgmOutputManager.discardGpuFramesExcept(pvwCamera?.name)
+
+        if (externalGpuOutputEnabled && pgmCamera?.name == cameraName) {
+            val externalLease = runCatching { frame.retain() }.getOrNull()
+            if (externalLease != null) {
+                val externalTransition = if (transitionActive && pvwCamera != null) {
+                    pgmOutputManager.retainFreshTransitionFrame(
+                        cameraName = pvwCamera.name,
+                        ptzTransform = HybridPtzController.hubTransform(pvwCamera.ptzState),
+                        mode = transitionMode(state.selectedTransition),
+                        progress = state.transitionProgress
+                    )
+                } else null
+                externalDisplayManager.updateGpuFrame(
+                    frame = externalLease,
+                    cameraName = cameraName,
+                    ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState),
+                    enableSpatialReconstruction = state.isPgmSpatialUpscalingEnabled,
+                    transition = externalTransition,
+                    onFrameDrawn = streamClient::markExternalFrameDrawn
+                )
+            }
+        }
 
         gpuPreviewTargets[cameraName]?.forEach { target ->
             val previewLease = runCatching { frame.retain() }.getOrNull() ?: return@forEach

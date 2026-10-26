@@ -15,6 +15,9 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import com.camhub.studio.data.gl.PgmTransitionFrame
+import com.camhub.studio.data.gl.PgmGpuTransitionFrame
+import com.camhub.studio.data.gl.SharedGpuVideoFrame
+import com.camhub.studio.data.gl.SharedGpuVideoSurfaceView
 import com.camhub.studio.data.gl.SpatialUpscaleSurfaceView
 import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.HybridPtzController
@@ -23,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -102,6 +106,24 @@ class ExternalDisplayManager @Inject constructor(
         )
     }
 
+    /** Takes ownership of both frame leases; call only for the current PGM output. */
+    fun updateGpuFrame(
+        frame: SharedGpuVideoFrame,
+        cameraName: String,
+        ptzTransform: HubPtzTransform,
+        enableSpatialReconstruction: Boolean,
+        transition: PgmGpuTransitionFrame? = null,
+        onFrameDrawn: (String, Long, Long) -> Unit
+    ) {
+        val target = presentation
+        if (target == null) {
+            frame.close()
+            transition?.frame?.close()
+        } else {
+            target.updateGpuFrame(frame, cameraName, ptzTransform, enableSpatialReconstruction, transition, onFrameDrawn)
+        }
+    }
+
     private fun dismiss() {
         try { presentation?.dismiss() } catch (_: Exception) {}
         presentation = null
@@ -128,9 +150,19 @@ private class PgmPresentation(
 
     private var imageView: MeasuredPgmImageView? = null
     private var upscaleView: SpatialUpscaleSurfaceView? = null
+    private var sharedGpuView: SharedGpuVideoSurfaceView? = null
     private var container: FrameLayout? = null
     private var upscaleViewBoundsKey: String? = null
     @Volatile private var latestFrame: PgmOutputFrame? = null
+    private data class PendingGpuFrame(
+        val frame: SharedGpuVideoFrame,
+        val cameraName: String,
+        val transform: HubPtzTransform,
+        val reconstruction: Boolean,
+        val transition: PgmGpuTransitionFrame?,
+        val onFrameDrawn: (String, Long, Long) -> Unit
+    )
+    private val latestGpuFrame = AtomicReference<PendingGpuFrame?>(null)
     private val framePostPending = AtomicBoolean(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -155,6 +187,10 @@ private class PgmPresentation(
     }
 
     fun updateFrame(frame: PgmOutputFrame) {
+        latestGpuFrame.getAndSet(null)?.let { old ->
+            old.frame.close()
+            old.transition?.frame?.close()
+        }
         latestFrame = frame
         val iv = imageView ?: return
         if (framePostPending.compareAndSet(false, true)) {
@@ -162,9 +198,43 @@ private class PgmPresentation(
         }
     }
 
+    fun updateGpuFrame(
+        frame: SharedGpuVideoFrame,
+        cameraName: String,
+        transform: HubPtzTransform,
+        reconstruction: Boolean,
+        transition: PgmGpuTransitionFrame?,
+        onFrameDrawn: (String, Long, Long) -> Unit
+    ) {
+        latestFrame = null
+        latestGpuFrame.getAndSet(
+            PendingGpuFrame(frame, cameraName, transform, reconstruction, transition, onFrameDrawn)
+        )?.let { old -> old.frame.close(); old.transition?.frame?.close() }
+        val iv = imageView ?: run { frame.close(); transition?.frame?.close(); return }
+        if (framePostPending.compareAndSet(false, true)) iv.post { publishLatestFrame() }
+    }
+
     private fun publishLatestFrame() {
+        val gpuFrame = latestGpuFrame.getAndSet(null)
+        if (gpuFrame != null) {
+            imageView?.visibility = View.GONE
+            upscaleView?.visibility = View.GONE
+            val gpuView = getOrCreateSharedGpuView()
+            gpuView.visibility = View.VISIBLE
+            gpuView.updateDisplayConfig(
+                cameraName = gpuFrame.cameraName,
+                transform = gpuFrame.transform,
+                enableSpatialReconstruction = gpuFrame.reconstruction,
+                onFrameDrawn = gpuFrame.onFrameDrawn
+            )
+            if (!gpuView.displayFrame(gpuFrame.frame, gpuFrame.transition, gpuFrame.transform)) {
+                gpuFrame.frame.close()
+                gpuFrame.transition?.frame?.close()
+            }
+        }
         val displayed = latestFrame
-        if (displayed != null) {
+        if (displayed != null && gpuFrame == null) {
+            sharedGpuView?.visibility = View.GONE
             if (displayed.enableSpatialUpscaling || displayed.transition != null) {
                 imageView?.visibility = View.GONE
                 val glView = getOrCreateUpscaleView()
@@ -199,8 +269,23 @@ private class PgmPresentation(
         framePostPending.set(false)
 
         // If a newer frame arrived during this UI pass, schedule exactly one more pass.
-        if (latestFrame !== displayed && framePostPending.compareAndSet(false, true)) {
+        if ((latestFrame !== displayed || latestGpuFrame.get() != null) &&
+            framePostPending.compareAndSet(false, true)
+        ) {
             imageView?.post { publishLatestFrame() }
+        }
+    }
+
+    private fun getOrCreateSharedGpuView(): SharedGpuVideoSurfaceView {
+        sharedGpuView?.let { return it }
+        return SharedGpuVideoSurfaceView(context).also { view ->
+            view.visibility = View.GONE
+            view.setBackgroundColor(android.graphics.Color.BLACK)
+            container?.addView(view, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+            sharedGpuView = view
         }
     }
 
