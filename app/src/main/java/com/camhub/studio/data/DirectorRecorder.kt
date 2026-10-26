@@ -79,9 +79,9 @@ class DirectorRecorder @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleLock = Any()
-    @Volatile private var startInProgress = false
-    @Volatile private var cancelStartRequested = false
-    @Volatile private var stopInProgress = false
+    private enum class LifecycleState { IDLE, STARTING, RECORDING, STOPPING }
+    private var lifecycleState = LifecycleState.IDLE
+    private var cancelStartRequested = false
     @Volatile private var recordingStartNs = 0L
     @Volatile private var accumulatedPauseNs = 0L
     @Volatile private var pauseStartNs = 0L
@@ -137,8 +137,8 @@ class DirectorRecorder @Inject constructor(
         includeAudio: Boolean = false
     ): String? {
         synchronized(lifecycleLock) {
-            if (startInProgress || stopInProgress || _recordingInfo.value.isRecording) return null
-            startInProgress = true
+            if (lifecycleState != LifecycleState.IDLE) return null
+            lifecycleState = LifecycleState.STARTING
             cancelStartRequested = false
             currentOutputPath = null
             _recordingInfo.value = _recordingInfo.value.copy(isStarting = true, errorMessage = null)
@@ -217,6 +217,7 @@ class DirectorRecorder @Inject constructor(
 
             synchronized(lifecycleLock) {
                 check(!cancelStartRequested) { "Recording start cancelled" }
+                lifecycleState = LifecycleState.RECORDING
                 recordingStartNs = System.nanoTime()
                 accumulatedPauseNs = 0L
                 pauseStartNs = 0L
@@ -228,34 +229,24 @@ class DirectorRecorder @Inject constructor(
                     outputHeight = h,
                     includesAudio = audioExpected
                 )
+                recordingStartedElapsedMs = android.os.SystemClock.elapsedRealtime()
+                if (audioExpected) startAudioInputPump()
+                drainJob = scope.launch { drainEncoder() }
             }
 
-            recordingStartedElapsedMs = android.os.SystemClock.elapsedRealtime()
-            if (audioExpected) startAudioInputPump()
-            drainJob = scope.launch { drainEncoder() }
-            val stopRequestedDuringStart = synchronized(lifecycleLock) {
-                startInProgress = false
-                val cancel = cancelStartRequested
-                cancelStartRequested = false
-                cancel
-            }
             Log.d(TAG, "Recording started: $displayPath")
-            if (stopRequestedDuringStart) {
-                stopRecording()
-                return null
-            }
             displayPath
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
             releaseResources()
             discardUnstartedOutput()
             synchronized(lifecycleLock) {
+                lifecycleState = LifecycleState.IDLE
                 _recordingInfo.value = RecordingInfo(errorMessage = e.message ?: "Recording could not start")
             }
             null
         } finally {
             synchronized(lifecycleLock) {
-                startInProgress = false
                 cancelStartRequested = false
                 if (_recordingInfo.value.isStarting) {
                     _recordingInfo.value = _recordingInfo.value.copy(isStarting = false)
@@ -652,12 +643,12 @@ class DirectorRecorder @Inject constructor(
 
     fun stopRecording() {
         synchronized(lifecycleLock) {
-            if (startInProgress) {
+            if (lifecycleState == LifecycleState.STARTING) {
                 cancelStartRequested = true
                 return
             }
-            if (stopInProgress || !_recordingInfo.value.isRecording) return
-            stopInProgress = true
+            if (lifecycleState != LifecycleState.RECORDING) return
+            lifecycleState = LifecycleState.STOPPING
         }
         val path = currentOutputPath
 
@@ -709,7 +700,7 @@ class DirectorRecorder @Inject constructor(
             finalizeMediaStore()
             stopRequested = false
             synchronized(lifecycleLock) {
-                stopInProgress = false
+                lifecycleState = LifecycleState.IDLE
                 _recordingInfo.value = _recordingInfo.value.copy(isStopping = false)
             }
         }
@@ -803,8 +794,8 @@ class DirectorRecorder @Inject constructor(
             Log.e(TAG, "drainEncoder error (drained $drainedFrames frames)", e)
             var shouldFinalize = false
             synchronized(lifecycleLock) {
-                if (_recordingInfo.value.isRecording && !stopInProgress) {
-                    stopInProgress = true
+                if (_recordingInfo.value.isRecording && lifecycleState == LifecycleState.RECORDING) {
+                    lifecycleState = LifecycleState.STOPPING
                     shouldFinalize = true
                     _recordingInfo.value = _recordingInfo.value.copy(
                         isRecording = false,
