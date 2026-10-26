@@ -1492,14 +1492,25 @@ class DirectorViewModel @Inject constructor(
     private fun refreshSharedGpuFrameTargets() {
         val targets = gpuPreviewTargets.keys.toMutableSet()
         val currentState = _uiState.value
+        val pgmCameraName = currentState.cameras.getOrNull(currentState.pgmCameraIndex)?.name
+        val pvwCameraName = currentState.cameras.getOrNull(currentState.pvwCameraIndex)?.name
         if (recorder.recordingInfo.value.isRecording) {
-            currentState.cameras.getOrNull(currentState.pgmCameraIndex)?.name?.let(targets::add)
+            pgmCameraName?.let(targets::add)
         }
         if (externalGpuOutputEnabled) {
-            currentState.cameras.getOrNull(currentState.pgmCameraIndex)?.name?.let(targets::add)
-            currentState.cameras.getOrNull(currentState.pvwCameraIndex)?.name?.let(targets::add)
+            pgmCameraName?.let(targets::add)
+            pvwCameraName?.let(targets::add)
         }
         streamClient.setSharedGpuFrameTargets(targets)
+
+        val bitmapTargets = currentState.cameras
+            .filter { it.name !in targets }
+            .mapTo(mutableSetOf()) { it.name }
+        if (externalDisplayManager.isOutputEnabled.value && !externalGpuOutputEnabled) {
+            pgmCameraName?.let(bitmapTargets::add)
+            pvwCameraName?.let(bitmapTargets::add)
+        }
+        streamClient.setBitmapOutputTargets(bitmapTargets)
     }
 
     override fun onCleared() {

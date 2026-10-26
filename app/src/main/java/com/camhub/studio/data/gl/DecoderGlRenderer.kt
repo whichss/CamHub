@@ -112,6 +112,7 @@ class DecoderGlRenderer(
     private val bitmapReadDroppedCount = AtomicLong(0L)
     @Volatile private var outputFpsLimit = 30
     @Volatile private var sharedGpuOutputEnabled = false
+    @Volatile private var bitmapOutputEnabled = true
     @Volatile private var bitmapOutputFpsLimit = 30
     private var lastRenderAtElapsedMs = 0L
     private var lastReadbackAtElapsedMs = 0L
@@ -134,13 +135,19 @@ class DecoderGlRenderer(
     /** Limits GL output cadence without slowing MediaCodec decode. */
     fun setOutputFpsLimit(fps: Int) {
         outputFpsLimit = fps.coerceIn(1, 60)
-        if (!sharedGpuOutputEnabled) bitmapOutputFpsLimit = outputFpsLimit
+        updateBitmapOutputCadence()
     }
 
-    /** Enables shared GPU output and throttles the legacy Bitmap readback to one frame per second. */
+    /** Enables/disables Bitmap readback based on active CPU-side consumers. */
+    fun setBitmapOutputEnabled(enabled: Boolean) {
+        bitmapOutputEnabled = enabled
+        updateBitmapOutputCadence()
+    }
+
+    /** Enables shared GPU output and applies a low-rate Bitmap fallback when it is demanded. */
     fun setSharedGpuOutputEnabled(enabled: Boolean) {
         sharedGpuOutputEnabled = enabled
-        bitmapOutputFpsLimit = if (enabled) SHARED_GPU_BITMAP_FPS else outputFpsLimit
+        updateBitmapOutputCadence()
         glHandler?.post {
             if (enabled && sharedTexturePool == null && glThread != null) {
                 sharedTexturePool = createSharedTexturePool()
@@ -148,6 +155,14 @@ class DecoderGlRenderer(
                 sharedTexturePool?.close()
                 sharedTexturePool = null
             }
+        }
+    }
+
+    private fun updateBitmapOutputCadence() {
+        bitmapOutputFpsLimit = when {
+            !bitmapOutputEnabled -> 0
+            sharedGpuOutputEnabled -> SHARED_GPU_BITMAP_FPS
+            else -> outputFpsLimit
         }
     }
 
@@ -275,7 +290,8 @@ class DecoderGlRenderer(
             }
             lastRenderAtElapsedMs = decodedAtElapsedMs
             val minimumReadbackIntervalMs = 1_000L / bitmapOutputFpsLimit.coerceAtLeast(1)
-            val readbackDue = decodedAtElapsedMs - lastReadbackAtElapsedMs >= minimumReadbackIntervalMs
+            val readbackDue = bitmapOutputFpsLimit > 0 &&
+                decodedAtElapsedMs - lastReadbackAtElapsedMs >= minimumReadbackIntervalMs
             if (readbackDue) lastReadbackAtElapsedMs = decodedAtElapsedMs
             egl.makeCurrent(pbuf)
             acquiredSlot = if (sharedGpuOutputEnabled) sharedTexturePool?.acquireForWrite() else null

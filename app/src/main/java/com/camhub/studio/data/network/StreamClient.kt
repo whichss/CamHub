@@ -173,6 +173,8 @@ class StreamClient @Inject constructor(
     private data class RendererMetricBaseline(val renderedFrames: Long, val sampledAtMs: Long)
     private val rendererMetricBaselines = ConcurrentHashMap<String, RendererMetricBaseline>()
     private val sharedGpuFrameTargets = ConcurrentHashMap.newKeySet<String>()
+    private val bitmapOutputTargets = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var bitmapOutputTargetsConfigured = false
     private val renderFpsLimits = ConcurrentHashMap<String, Int>()
     private val decoderDispatchers = ConcurrentHashMap<String, ExecutorCoroutineDispatcher>()
     private val wifiLock = LowLatencyWifiLock(context, "CamHubDirectorStream")
@@ -1069,6 +1071,9 @@ class StreamClient @Inject constructor(
                     }
                     glRenderers[cameraName] = glRenderer
                     glRenderer.setSharedGpuOutputEnabled(cameraName in sharedGpuFrameTargets)
+                    glRenderer.setBitmapOutputEnabled(
+                        !bitmapOutputTargetsConfigured || cameraName in bitmapOutputTargets
+                    )
                     decoders[cameraName] = decoder
                     surfaceConfigured = true
                     Log.d(TAG, "H.264 decoder configured (GPU surface) for $cameraName: ${meta.width}x${meta.height}")
@@ -1544,6 +1549,16 @@ class StreamClient @Inject constructor(
         sharedGpuFrameTargets.addAll(cameraNames)
         glRenderers.forEach { (cameraName, renderer) ->
             renderer.setSharedGpuOutputEnabled(cameraName in sharedGpuFrameTargets)
+        }
+    }
+
+    /** Supplies readback only for cameras whose current output path consumes CPU Bitmaps. */
+    fun setBitmapOutputTargets(cameraNames: Set<String>) {
+        bitmapOutputTargets.clear()
+        bitmapOutputTargets.addAll(cameraNames)
+        bitmapOutputTargetsConfigured = true
+        glRenderers.forEach { (cameraName, renderer) ->
+            renderer.setBitmapOutputEnabled(cameraName in bitmapOutputTargets)
         }
     }
 
