@@ -131,7 +131,8 @@ class DirectorRecorder @Inject constructor(
         height: Int,
         sessionTimestamp: String = "",
         useSpatialUpscaling: Boolean = false,
-        includeAudio: Boolean = false
+        includeAudio: Boolean = false,
+        startCancellation: RecordingStartCancellation = RecordingStartCancellation()
     ): String? {
         synchronized(lifecycleLock) {
             if (!recorderLifecycle.beginStart()) return null
@@ -147,6 +148,7 @@ class DirectorRecorder @Inject constructor(
         val effectiveBitrate = bitrateMbps * 1_000_000
 
         return try {
+            startCancellation.throwIfCancelled()
             val format = MediaFormat.createVideoFormat(mimeType, w, h).apply {
                 setInteger(
                     MediaFormat.KEY_COLOR_FORMAT,
@@ -164,6 +166,7 @@ class DirectorRecorder @Inject constructor(
                 inputSurface = createInputSurface()
                 start()
             }
+            startCancellation.throwIfCancelled()
 
             audioEncoder = if (includeAudio) createAudioEncoder() else null
             audioExpected = audioEncoder != null
@@ -178,6 +181,7 @@ class DirectorRecorder @Inject constructor(
             // reach MediaCodec without allocating intermediate CPU bitmaps.
             val encoderSurface = inputSurface
                 ?: throw IllegalStateException("Encoder input surface is unavailable")
+            startCancellation.throwIfCancelled()
             val glRenderer = SpatialUpscaleWindowRenderer(
                 surface = encoderSurface,
                 outputWidth = w,
@@ -200,6 +204,7 @@ class DirectorRecorder @Inject constructor(
             } else {
                 Log.w(TAG, "OpenGL recording unavailable; using Canvas fallback")
             }
+            startCancellation.throwIfCancelled()
 
             val muxerResult = createMuxer(sessionTimestamp)
             muxer = muxerResult.first
@@ -211,6 +216,7 @@ class DirectorRecorder @Inject constructor(
             currentOutputPath = displayPath
 
             synchronized(lifecycleLock) {
+                startCancellation.throwIfCancelled()
                 check(recorderLifecycle.completeStart()) { "Recording start cancelled" }
                 recordingClock.start(System.nanoTime())
                 _recordingInfo.value = RecordingInfo(
@@ -234,7 +240,11 @@ class DirectorRecorder @Inject constructor(
             discardUnstartedOutput()
             synchronized(lifecycleLock) {
                 recorderLifecycle.completeStop()
-                _recordingInfo.value = RecordingInfo(errorMessage = e.message ?: "Recording could not start")
+                _recordingInfo.value = if (startCancellation.isCancelled) {
+                    RecordingInfo()
+                } else {
+                    RecordingInfo(errorMessage = e.message ?: "Recording could not start")
+                }
             }
             null
         } finally {

@@ -9,6 +9,7 @@ import com.camhub.studio.data.DeviceMonitor
 import com.camhub.studio.data.DirectorRecorder
 import com.camhub.studio.data.ExternalDisplayManager
 import com.camhub.studio.data.PgmOutputManager
+import com.camhub.studio.data.RecordingStartCancellation
 import com.camhub.studio.data.StreamingConfig
 import com.camhub.studio.data.audio.AudioStreamClient
 import com.camhub.studio.data.camera.CameraValueMapper
@@ -98,6 +99,7 @@ class DirectorViewModel @Inject constructor(
 
     private var lastPgmBitmap: Bitmap? = null
     private var lastPgmCameraName: String? = null
+    @Volatile private var activeRecordingStartCancellation: RecordingStartCancellation? = null
     @Volatile private var externalGpuOutputEnabled = false
     private val pgmOutputManager = PgmOutputManager(recorder, externalDisplayManager)
     private val sharedGpuFrameListener: (String, SharedGpuVideoFrame) -> Unit = { cameraName, frame ->
@@ -1297,6 +1299,8 @@ class DirectorViewModel @Inject constructor(
                 targetHeight = state.pgmOutputHeight
             )
             val includeAudio = audioStreamClient.channelStates.value.values.any { it.isConnected }
+            val startCancellation = RecordingStartCancellation()
+            activeRecordingStartCancellation = startCancellation
             _uiState.update { it.copy(isStartingRecording = true) }
             viewModelScope.launch {
                 val recordingPath = try {
@@ -1306,7 +1310,8 @@ class DirectorViewModel @Inject constructor(
                             height = recordingPlan.height,
                             sessionTimestamp = timestamp,
                             useSpatialUpscaling = recordingPlan.useSpatialUpscaling,
-                            includeAudio = includeAudio
+                            includeAudio = includeAudio,
+                            startCancellation = startCancellation
                         )
                     }
                 } catch (cancelled: CancellationException) {
@@ -1315,6 +1320,9 @@ class DirectorViewModel @Inject constructor(
                     Log.e(TAG, "Could not start PGM recording", error)
                     null
                 } finally {
+                    if (activeRecordingStartCancellation === startCancellation) {
+                        activeRecordingStartCancellation = null
+                    }
                     _uiState.update { it.copy(isStartingRecording = false) }
                 }
                 if (recordingPath == null) return@launch
@@ -1488,6 +1496,7 @@ class DirectorViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        activeRecordingStartCancellation?.cancel()
         if (streamClient.onSharedGpuFrame === sharedGpuFrameListener) {
             streamClient.onSharedGpuFrame = null
         }
@@ -1508,7 +1517,9 @@ class DirectorViewModel @Inject constructor(
         try { deviceMonitor.stopMonitoring() } catch (_: Exception) {}
         try { externalDisplayManager.stopListening() } catch (_: Exception) {}
         try { externalDisplayManager.disableOutput() } catch (_: Exception) {}
-        if (recorder.recordingInfo.value.isRecording || recorder.recordingInfo.value.isStarting) {
+        if (_uiState.value.isStartingRecording || recorder.recordingInfo.value.isRecording ||
+            recorder.recordingInfo.value.isStarting
+        ) {
             try { recorder.stopRecording() } catch (_: Exception) {}
         }
         connectedStreamNames.clear()
