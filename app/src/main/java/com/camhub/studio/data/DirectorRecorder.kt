@@ -352,14 +352,10 @@ class DirectorRecorder @Inject constructor(
     private fun startMuxerWhenReady() {
         if (muxerStarted || !videoFormatReady || !audioFormatReady) return
         val mux = muxer ?: return
-        try {
-            mux.start()
-            muxerStarted = true
-            while (preMuxSamples.isNotEmpty()) writeMuxSample(mux, preMuxSamples.removeFirst())
-            Log.d(TAG, "A/V muxer started")
-        } catch (error: Exception) {
-            Log.e(TAG, "Could not start A/V muxer", error)
-        }
+        mux.start()
+        muxerStarted = true
+        while (preMuxSamples.isNotEmpty()) writeMuxSample(mux, preMuxSamples.removeFirst())
+        Log.d(TAG, "A/V muxer started")
     }
 
     private fun writeMuxSample(mux: MediaMuxer, sample: PendingMuxSample) {
@@ -422,8 +418,9 @@ class DirectorRecorder @Inject constructor(
     private var pendingMediaUri: android.net.Uri? = null
     private var pendingFd: android.os.ParcelFileDescriptor? = null
 
-    private fun finalizeMediaStore() {
-        val uri = pendingMediaUri ?: return
+    private fun finalizeMediaStore(): String? {
+        val uri = pendingMediaUri ?: return null
+        var failure: String? = null
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
@@ -434,10 +431,12 @@ class DirectorRecorder @Inject constructor(
             }
         } catch (e: Exception) {
             Log.e(TAG, "MediaStore finalize error", e)
+            failure = e.message ?: "Could not publish recording to Movies"
         }
         try { pendingFd?.close() } catch (_: Exception) {}
         pendingFd = null
         pendingMediaUri = null
+        return failure
     }
 
     private fun discardUnstartedOutput() {
@@ -674,6 +673,7 @@ class DirectorRecorder @Inject constructor(
 
     private suspend fun finishRecording(path: String?) {
         stopRequested = true
+        var finalizationFailure: String? = null
         try {
             spatialUpscaleRenderer?.release()
             spatialUpscaleRenderer = null
@@ -699,16 +699,25 @@ class DirectorRecorder @Inject constructor(
             Log.d(TAG, "Recording stopped: $path (total frames: $frameCount)")
         } catch (error: Exception) {
             Log.e(TAG, "Recording finalization failed", error)
-            _recordingInfo.value = _recordingInfo.value.copy(
-                errorMessage = error.message ?: "Recording could not be finalized"
-            )
+            finalizationFailure = error.message ?: "Recording could not be finalized"
         } finally {
-            releaseResources()
-            finalizeMediaStore()
+            val resourceFailure = releaseResources()
+            val publishFailure = finalizeMediaStore()
             stopRequested = false
             synchronized(lifecycleLock) {
                 lifecycleState = LifecycleState.IDLE
-                _recordingInfo.value = _recordingInfo.value.copy(isStopping = false)
+                val failure = _recordingInfo.value.errorMessage
+                    ?: finalizationFailure
+                    ?: resourceFailure
+                    ?: publishFailure
+                _recordingInfo.value = _recordingInfo.value.copy(
+                    isRecording = false,
+                    isPaused = false,
+                    isStopping = false,
+                    isStarting = false,
+                    isSpatialUpscaling = false,
+                    errorMessage = failure
+                )
             }
         }
     }
@@ -845,7 +854,8 @@ class DirectorRecorder @Inject constructor(
         }
     }
 
-    private fun releaseResources() {
+    private fun releaseResources(): String? {
+        var failure: String? = null
         audioInputJob?.cancel()
         audioInputJob = null
         audioInputQueue.clear()
@@ -869,9 +879,13 @@ class DirectorRecorder @Inject constructor(
                 muxer?.stop()
                 Log.d(TAG, "Muxer stopped successfully")
             }
-            muxer?.release()
         } catch (e: Exception) {
             Log.w(TAG, "Muxer stop/release error: ${e.message}")
+            failure = e.message ?: "Could not finalize recording container"
+        }
+        try { muxer?.release() } catch (e: Exception) {
+            Log.w(TAG, "Muxer release error: ${e.message}")
+            if (failure == null) failure = e.message ?: "Could not release recording container"
         }
 
         encoder = null
@@ -890,5 +904,6 @@ class DirectorRecorder @Inject constructor(
             pendingFd = null
             Log.w(TAG, "ParcelFileDescriptor closed in releaseResources (fallback)")
         }
+        return failure
     }
 }
