@@ -42,6 +42,7 @@ class DecoderGlRenderer(
         private const val TAG = "DecoderGlRenderer"
         private const val BITMAP_POOL_SIZE = 3
         private const val SHARED_TEXTURE_POOL_SIZE = 3
+        private const val SHARED_GPU_BITMAP_FPS = 1
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f,
@@ -96,6 +97,8 @@ class DecoderGlRenderer(
     private val renderAgain = AtomicBoolean(false)
     @Volatile private var outputFpsLimit = 30
     @Volatile private var sharedGpuOutputEnabled = false
+    @Volatile private var bitmapOutputFpsLimit = 30
+    private var lastRenderAtElapsedMs = 0L
     private var lastReadbackAtElapsedMs = 0L
 
     var surface: Surface? = null
@@ -105,14 +108,16 @@ class DecoderGlRenderer(
     /** Ownership of each emitted lease transfers to the callback. */
     var onGpuFrameReady: ((SharedGpuVideoFrame) -> Unit)? = null
 
-    /** Limits costly GPU-to-CPU Bitmap readback without slowing MediaCodec decode. */
+    /** Limits GL output cadence without slowing MediaCodec decode. */
     fun setOutputFpsLimit(fps: Int) {
         outputFpsLimit = fps.coerceIn(1, 60)
+        if (!sharedGpuOutputEnabled) bitmapOutputFpsLimit = outputFpsLimit
     }
 
-    /** Enables the shared texture ring only for current PGM/PVW/recording consumers. */
+    /** Enables shared GPU output and throttles the legacy Bitmap readback to one frame per second. */
     fun setSharedGpuOutputEnabled(enabled: Boolean) {
         sharedGpuOutputEnabled = enabled
+        bitmapOutputFpsLimit = if (enabled) SHARED_GPU_BITMAP_FPS else outputFpsLimit
         glHandler?.post {
             if (enabled && sharedTexturePool == null && glThread != null) {
                 sharedTexturePool = createSharedTexturePool()
@@ -241,11 +246,14 @@ class DecoderGlRenderer(
             st.getTransformMatrix(texMatrix)
             val presentationTimeUs = st.timestamp / 1_000L
             val decodedAtElapsedMs = SystemClock.elapsedRealtime()
-            val minimumIntervalMs = 1_000L / outputFpsLimit.coerceAtLeast(1)
-            if (decodedAtElapsedMs - lastReadbackAtElapsedMs < minimumIntervalMs) {
+            val minimumRenderIntervalMs = 1_000L / outputFpsLimit.coerceAtLeast(1)
+            if (decodedAtElapsedMs - lastRenderAtElapsedMs < minimumRenderIntervalMs) {
                 return
             }
-            lastReadbackAtElapsedMs = decodedAtElapsedMs
+            lastRenderAtElapsedMs = decodedAtElapsedMs
+            val minimumReadbackIntervalMs = 1_000L / bitmapOutputFpsLimit.coerceAtLeast(1)
+            val readbackDue = decodedAtElapsedMs - lastReadbackAtElapsedMs >= minimumReadbackIntervalMs
+            if (readbackDue) lastReadbackAtElapsedMs = decodedAtElapsedMs
             val nextSequence = ++frameSequence
             acquiredSlot = if (sharedGpuOutputEnabled) sharedTexturePool?.acquireForWrite() else null
             val renderTexture = acquiredSlot?.textureId ?: scratchTexture
@@ -288,12 +296,14 @@ class DecoderGlRenderer(
             // --- PBO async readback (ping-pong) ---
             // Step 1: Initiate async DMA read of current frame into PBO[pboIndex]
             //         glReadPixels with a bound PBO returns IMMEDIATELY (no GPU stall)
-            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[pboIndex])
-            GLES30.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
-            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
-            pboPresentationTimeUs[pboIndex] = presentationTimeUs
-            pboDecodedAtElapsedMs[pboIndex] = decodedAtElapsedMs
-            pboFrameSequences[pboIndex] = nextSequence
+            if (readbackDue) {
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[pboIndex])
+                GLES30.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+                pboPresentationTimeUs[pboIndex] = presentationTimeUs
+                pboDecodedAtElapsedMs[pboIndex] = decodedAtElapsedMs
+                pboFrameSequences[pboIndex] = nextSequence
+            }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
@@ -318,7 +328,7 @@ class DecoderGlRenderer(
             }
 
             // Step 2: Map the OTHER PBO (previous frame, DMA already complete) → zero-wait read
-            if (pboInitialized) {
+            if (readbackDue && pboInitialized) {
                 val readIndex = 1 - pboIndex
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[readIndex])
                 val mappedBuffer = GLES30.glMapBufferRange(
@@ -342,8 +352,10 @@ class DecoderGlRenderer(
             }
 
             // Step 3: Swap PBO index for next frame
-            pboIndex = 1 - pboIndex
-            pboInitialized = true
+            if (readbackDue) {
+                pboIndex = 1 - pboIndex
+                pboInitialized = true
+            }
         } catch (e: Exception) {
             Log.e(TAG, "renderAndReadBitmap error", e)
         } finally {
@@ -418,6 +430,7 @@ class DecoderGlRenderer(
         pboFrameSequences.fill(0L)
         renderQueued.set(false)
         renderAgain.set(false)
+        lastRenderAtElapsedMs = 0L
         lastReadbackAtElapsedMs = 0L
         for (i in reusableBitmaps.indices) {
             reusableBitmaps[i]?.recycle()
