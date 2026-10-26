@@ -139,11 +139,16 @@ private fun streamQualityLabel(camera: CameraNode): String {
         "${camera.fps}fps"
     }
     val gpu = if (camera.gpuRenderedFps > 0) " · GL ${camera.gpuRenderedFps}fps" else ""
+    val gpuCompletion = if (camera.gpuCompletionSampleCount > 0) {
+        val us = camera.gpuCompletionP95Us
+        val value = if (us >= 1_000) "${us / 1_000}.${(us % 1_000) / 100}ms" else "${us}µs"
+        " · GPUq P95 $value"
+    } else ""
     val pool = if (camera.gpuTexturePoolStarvations > 0) " · GPU pool ${camera.gpuTexturePoolStarvations}" else ""
     val copies = if (camera.gpuBitmapReadsCompleted > 0 || camera.gpuBitmapReadsDropped > 0) {
         " · CPU copy ${camera.gpuBitmapReadsCompleted}/drop ${camera.gpuBitmapReadsDropped}"
     } else ""
-    return "${camera.videoTransport.displayLabel}$fallback · $resolution · $fps$gpu · $latency$drops$loss$pool$copies"
+    return "${camera.videoTransport.displayLabel}$fallback · $resolution · $fps$gpu$gpuCompletion · $latency$drops$loss$pool$copies"
 }
 
 /**

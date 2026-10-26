@@ -14,7 +14,9 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 data class DecoderRenderMetrics(
@@ -22,7 +24,10 @@ data class DecoderRenderMetrics(
     val texturePoolStarvations: Long,
     val bitmapReadsSubmitted: Long,
     val bitmapReadsCompleted: Long,
-    val bitmapReadsDropped: Long
+    val bitmapReadsDropped: Long,
+    /** GL submission-to-fence wall time (includes queued work, not pure shader time). */
+    val gpuCompletionP95Us: Int,
+    val gpuCompletionSampleCount: Int
 )
 
 data class RenderedVideoFrame(
@@ -52,6 +57,9 @@ class DecoderGlRenderer(
         private const val BITMAP_POOL_SIZE = 3
         private const val SHARED_TEXTURE_POOL_SIZE = 3
         private const val SHARED_GPU_BITMAP_FPS = 1
+        private const val GPU_COMPLETION_SAMPLE_INTERVAL = 10L
+        private const val GPU_COMPLETION_MAX_PENDING = 8
+        private const val GPU_COMPLETION_WINDOW_SIZE = 120
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f,
@@ -110,6 +118,11 @@ class DecoderGlRenderer(
     private val bitmapReadSubmittedCount = AtomicLong(0L)
     private val bitmapReadCompletedCount = AtomicLong(0L)
     private val bitmapReadDroppedCount = AtomicLong(0L)
+    private data class GpuCompletionSample(val fence: Long, val submittedAtNs: Long)
+    private val gpuCompletionFences = ArrayDeque<GpuCompletionSample>()
+    private val gpuCompletionDurationsUs = ArrayDeque<Int>()
+    private val gpuCompletionP95Us = AtomicInteger(0)
+    private val gpuCompletionSampleCount = AtomicInteger(0)
     @Volatile private var outputFpsLimit = 30
     @Volatile private var sharedGpuOutputEnabled = false
     @Volatile private var bitmapOutputEnabled = true
@@ -129,7 +142,9 @@ class DecoderGlRenderer(
         texturePoolStarvations = texturePoolStarvationCount.get(),
         bitmapReadsSubmitted = bitmapReadSubmittedCount.get(),
         bitmapReadsCompleted = bitmapReadCompletedCount.get(),
-        bitmapReadsDropped = bitmapReadDroppedCount.get()
+        bitmapReadsDropped = bitmapReadDroppedCount.get(),
+        gpuCompletionP95Us = gpuCompletionP95Us.get(),
+        gpuCompletionSampleCount = gpuCompletionSampleCount.get()
     )
 
     /** Limits GL output cadence without slowing MediaCodec decode. */
@@ -334,6 +349,7 @@ class DecoderGlRenderer(
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             renderedFrameCount.incrementAndGet()
+            sampleGpuCompletion()
 
             // Read from the rendered FBO while it is still bound. Reading after the
             // unbind would sample the pbuffer's default framebuffer instead.
@@ -469,6 +485,45 @@ class DecoderGlRenderer(
         }
     }
 
+    /** Polls sampled frame fences without blocking the decoder GL thread. */
+    private fun sampleGpuCompletion() {
+        val iterator = gpuCompletionFences.iterator()
+        while (iterator.hasNext()) {
+            val sample = iterator.next()
+            when (GLES30.glClientWaitSync(sample.fence, 0, 0L)) {
+                GLES30.GL_ALREADY_SIGNALED, GLES30.GL_CONDITION_SATISFIED -> {
+                    GLES30.glDeleteSync(sample.fence)
+                    val elapsedUs = ((SystemClock.elapsedRealtimeNanos() - sample.submittedAtNs)
+                        .coerceAtLeast(0L) / 1_000L).toInt()
+                    gpuCompletionDurationsUs.addLast(elapsedUs)
+                    while (gpuCompletionDurationsUs.size > GPU_COMPLETION_WINDOW_SIZE) {
+                        gpuCompletionDurationsUs.removeFirst()
+                    }
+                    val sorted = gpuCompletionDurationsUs.sorted()
+                    val p95Index = ((sorted.size * 95 + 99) / 100 - 1)
+                        .coerceIn(0, sorted.lastIndex)
+                    gpuCompletionP95Us.set(sorted[p95Index])
+                    gpuCompletionSampleCount.set(sorted.size)
+                    iterator.remove()
+                }
+                GLES30.GL_WAIT_FAILED -> {
+                    GLES30.glDeleteSync(sample.fence)
+                    iterator.remove()
+                }
+            }
+        }
+
+        if (renderedFrameCount.get() % GPU_COMPLETION_SAMPLE_INTERVAL != 0L ||
+            gpuCompletionFences.size >= GPU_COMPLETION_MAX_PENDING
+        ) return
+        val fence = GLES30.glFenceSync(GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+        if (fence == 0L) return
+        gpuCompletionFences.addLast(
+            GpuCompletionSample(fence, SystemClock.elapsedRealtimeNanos())
+        )
+        GLES30.glFlush()
+    }
+
     private fun createRgbaTexture(): Int {
         val textures = IntArray(1)
         GLES20.glGenTextures(1, textures, 0)
@@ -517,6 +572,11 @@ class DecoderGlRenderer(
             pbos[0] = 0
             pbos[1] = 0
         }
+        gpuCompletionFences.forEach { GLES30.glDeleteSync(it.fence) }
+        gpuCompletionFences.clear()
+        gpuCompletionDurationsUs.clear()
+        gpuCompletionP95Us.set(0)
+        gpuCompletionSampleCount.set(0)
         if (oesTexId != 0) {
             GLES20.glDeleteTextures(1, intArrayOf(oesTexId), 0)
             oesTexId = 0

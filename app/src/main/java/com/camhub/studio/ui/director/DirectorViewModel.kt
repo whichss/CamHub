@@ -287,6 +287,8 @@ class DirectorViewModel @Inject constructor(
                                 droppedFrames = stream.droppedFrames,
                                 ingressFps = stream.ingressFps,
                                 gpuRenderedFps = stream.gpuRenderedFps,
+                                gpuCompletionP95Us = stream.gpuCompletionP95Us,
+                                gpuCompletionSampleCount = stream.gpuCompletionSampleCount,
                                 gpuTexturePoolStarvations = stream.gpuTexturePoolStarvations,
                                 gpuBitmapReadsCompleted = stream.gpuBitmapReadsCompleted,
                                 gpuBitmapReadsDropped = stream.gpuBitmapReadsDropped,

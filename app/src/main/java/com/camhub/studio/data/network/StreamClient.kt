@@ -57,6 +57,8 @@ data class CameraStreamState(
     val actualFps: Int = 0,
     val ingressFps: Int = 0,
     val gpuRenderedFps: Int = 0,
+    val gpuCompletionP95Us: Int = 0,
+    val gpuCompletionSampleCount: Int = 0,
     val gpuTexturePoolStarvations: Long = 0L,
     val gpuBitmapReadsCompleted: Long = 0L,
     val gpuBitmapReadsDropped: Long = 0L,
@@ -1536,6 +1538,8 @@ class StreamClient @Inject constructor(
                 }
                 stream.copy(
                     gpuRenderedFps = renderedFps,
+                    gpuCompletionP95Us = metrics.gpuCompletionP95Us,
+                    gpuCompletionSampleCount = metrics.gpuCompletionSampleCount,
                     gpuTexturePoolStarvations = metrics.texturePoolStarvations,
                     gpuBitmapReadsCompleted = metrics.bitmapReadsCompleted,
                     gpuBitmapReadsDropped = metrics.bitmapReadsDropped

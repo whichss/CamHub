@@ -91,6 +91,8 @@ data class CameraNode(
     val ingressFps: Int = 0,
     /** Actual frames composited by this camera's GL renderer. */
     val gpuRenderedFps: Int = 0,
+    val gpuCompletionP95Us: Int = 0,
+    val gpuCompletionSampleCount: Int = 0,
     val gpuTexturePoolStarvations: Long = 0L,
     val gpuBitmapReadsCompleted: Long = 0L,
     val gpuBitmapReadsDropped: Long = 0L,
