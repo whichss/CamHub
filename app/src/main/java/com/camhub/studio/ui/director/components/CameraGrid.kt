@@ -30,6 +30,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +42,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.camhub.studio.data.gl.SharedGpuVideoSurfaceView
+import com.camhub.studio.data.ptz.HubPtzTransform
+import com.camhub.studio.data.ptz.HybridPtzController
 import com.camhub.studio.ui.director.model.CameraNode
 import com.camhub.studio.ui.director.model.ConnectionStatus
 import com.camhub.studio.data.network.VideoTransport
@@ -146,8 +153,33 @@ private fun CameraCard(
     onLongClick: () -> Unit,
     onDisconnect: () -> Unit,
     onFrameDrawn: (String, Long) -> Unit,
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val gpuViewState = remember(camera.name) { mutableStateOf<SharedGpuVideoSurfaceView?>(null) }
+    val gpuView = gpuViewState.value
+    DisposableEffect(camera.name, camera.status, camera.ptzState, gpuView) {
+        if (camera.status == ConnectionStatus.LIVE && gpuView != null) {
+            onGpuPreviewTargetChanged(
+                camera.name,
+                gpuView,
+                true,
+                HybridPtzController.hubTransform(camera.ptzState),
+                false
+            )
+        }
+        onDispose {
+            gpuView?.let {
+                onGpuPreviewTargetChanged(
+                    camera.name,
+                    it,
+                    false,
+                    HybridPtzController.IDENTITY_TRANSFORM,
+                    false
+                )
+            }
+        }
+    }
     TallyBorder(
         isPgm = camera.isPgm,
         isPvw = camera.isPvw,
@@ -174,14 +206,22 @@ private fun CameraCard(
                     .drawWithContent {
                         drawContent()
                         val sequence = camera.frameSequence
-                        if (sequence > 0L) {
+                        if (sequence > 0L && (camera.status != ConnectionStatus.LIVE || gpuView == null)) {
                             onFrameDrawn(camera.name, sequence)
                         }
                     },
                 contentAlignment = Alignment.Center
             ) {
                 val previewBitmap = camera.previewBitmap
-                if (previewBitmap != null) {
+                if (camera.status == ConnectionStatus.LIVE) {
+                    AndroidView(
+                        factory = { context ->
+                            SharedGpuVideoSurfaceView(context).also { gpuViewState.value = it }
+                        },
+                        update = { gpuViewState.value = it },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (previewBitmap != null) {
                     Image(
                         bitmap = previewBitmap,
                         contentDescription = "${camera.name} preview",
@@ -361,6 +401,7 @@ fun CameraGrid(
     onOpenCameraControl: (Int) -> Unit,
     onDisconnect: (Int) -> Unit,
     onFrameDrawn: (String, Long) -> Unit,
+    onGpuPreviewTargetChanged: (String, SharedGpuVideoSurfaceView, Boolean, HubPtzTransform, Boolean) -> Unit,
     gridState: LazyGridState = rememberLazyGridState(),
     modifier: Modifier = Modifier
 ) {
@@ -381,7 +422,8 @@ fun CameraGrid(
                 onClick = { onSelectPvw(index) },
                 onLongClick = { onOpenCameraControl(index) },
                 onDisconnect = { onDisconnect(index) },
-                onFrameDrawn = onFrameDrawn
+                onFrameDrawn = onFrameDrawn,
+                onGpuPreviewTargetChanged = onGpuPreviewTargetChanged
             )
         }
     }
