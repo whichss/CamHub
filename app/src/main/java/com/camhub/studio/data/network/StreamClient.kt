@@ -56,6 +56,10 @@ data class CameraStreamState(
     val droppedFrames: Int = 0,
     val actualFps: Int = 0,
     val ingressFps: Int = 0,
+    val gpuRenderedFps: Int = 0,
+    val gpuTexturePoolStarvations: Long = 0L,
+    val gpuBitmapReadsCompleted: Long = 0L,
+    val gpuBitmapReadsDropped: Long = 0L,
     val frameSequence: Long = 0,
     val decoderFrameSequence: Long = 0,
     val videoTransport: VideoTransport = VideoTransport.NONE,
@@ -166,6 +170,8 @@ class StreamClient @Inject constructor(
     private val lastLatencySnapshotTimeMap = ConcurrentHashMap<String, AtomicLong>()
     private val decoders = ConcurrentHashMap<String, H264Decoder>()
     private val glRenderers = ConcurrentHashMap<String, DecoderGlRenderer>()
+    private data class RendererMetricBaseline(val renderedFrames: Long, val sampledAtMs: Long)
+    private val rendererMetricBaselines = ConcurrentHashMap<String, RendererMetricBaseline>()
     private val sharedGpuFrameTargets = ConcurrentHashMap.newKeySet<String>()
     private val renderFpsLimits = ConcurrentHashMap<String, Int>()
     private val decoderDispatchers = ConcurrentHashMap<String, ExecutorCoroutineDispatcher>()
@@ -1506,6 +1512,31 @@ class StreamClient @Inject constructor(
         val previous = renderFpsLimits.put(cameraName, clamped)
         if (previous == clamped) return
         glRenderers[cameraName]?.setOutputFpsLimit(clamped)
+    }
+
+    /** Samples per-camera GL output and backpressure counters without touching decoder queues. */
+    fun refreshRendererMetrics(nowMs: Long = SystemClock.elapsedRealtime()) {
+        val metricSnapshots = glRenderers.mapValues { (_, renderer) -> renderer.metricsSnapshot() }
+        _streams.update { streams ->
+            streams.mapValues { (cameraName, stream) ->
+                val metrics = metricSnapshots[cameraName] ?: return@mapValues stream
+                val previous = rendererMetricBaselines.put(
+                    cameraName,
+                    RendererMetricBaseline(metrics.renderedFrames, nowMs)
+                )
+                val elapsedMs = previous?.let { nowMs - it.sampledAtMs }?.coerceAtLeast(1L)
+                val renderedFps = if (previous == null || elapsedMs == null) 0 else {
+                    ((metrics.renderedFrames - previous.renderedFrames).coerceAtLeast(0L) * 1_000L /
+                        elapsedMs).toInt()
+                }
+                stream.copy(
+                    gpuRenderedFps = renderedFps,
+                    gpuTexturePoolStarvations = metrics.texturePoolStarvations,
+                    gpuBitmapReadsCompleted = metrics.bitmapReadsCompleted,
+                    gpuBitmapReadsDropped = metrics.bitmapReadsDropped
+                )
+            }
+        }
     }
 
     fun setSharedGpuFrameTargets(cameraNames: Set<String>) {

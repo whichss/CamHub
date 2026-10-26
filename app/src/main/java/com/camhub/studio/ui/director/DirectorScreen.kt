@@ -123,7 +123,13 @@ fun DirectorScreen(
         )
         if (uiState.isAutomaticHubProfile) append(" · AUTO")
         if (uiState.isStartingRecording) append(" · STARTING REC")
-        else if (uiState.isRecording) append(if (uiState.isRecordingAudio) " · REC A/V" else " · REC VIDEO")
+        else if (uiState.isRecording) {
+            append(if (uiState.isRecordingAudio) " · REC A/V" else " · REC VIDEO")
+            append(" ${uiState.recordingAcceptedFrameFps}fps")
+            if (uiState.recordingDroppedFrameFps > 0) {
+                append(" · DROP ${uiState.recordingDroppedFrameFps}/s")
+            }
+        }
         if (uiState.recordingError != null) append(" · REC ERROR")
         if (uiState.isRecordingSpatialUpscaling) {
             append(" · REC↑${uiState.recordingOutputHeight}")

@@ -15,6 +15,15 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+data class DecoderRenderMetrics(
+    val renderedFrames: Long,
+    val texturePoolStarvations: Long,
+    val bitmapReadsSubmitted: Long,
+    val bitmapReadsCompleted: Long,
+    val bitmapReadsDropped: Long
+)
 
 data class RenderedVideoFrame(
     val bitmap: Bitmap,
@@ -85,7 +94,8 @@ class DecoderGlRenderer(
     // PBO double-buffering for async pixel readback
     private val pbos = IntArray(2)
     private var pboIndex = 0
-    private var pboInitialized = false
+    private val pboFences = LongArray(2)
+    private val pboHasPendingRead = BooleanArray(2)
     private val pboPresentationTimeUs = LongArray(2)
     private val pboDecodedAtElapsedMs = LongArray(2)
     private val pboFrameSequences = LongArray(2)
@@ -95,6 +105,11 @@ class DecoderGlRenderer(
     private var reusableBitmapIndex = 0
     private val renderQueued = AtomicBoolean(false)
     private val renderAgain = AtomicBoolean(false)
+    private val renderedFrameCount = AtomicLong(0L)
+    private val texturePoolStarvationCount = AtomicLong(0L)
+    private val bitmapReadSubmittedCount = AtomicLong(0L)
+    private val bitmapReadCompletedCount = AtomicLong(0L)
+    private val bitmapReadDroppedCount = AtomicLong(0L)
     @Volatile private var outputFpsLimit = 30
     @Volatile private var sharedGpuOutputEnabled = false
     @Volatile private var bitmapOutputFpsLimit = 30
@@ -107,6 +122,14 @@ class DecoderGlRenderer(
     var onBitmapReady: ((RenderedVideoFrame) -> Unit)? = null
     /** Ownership of each emitted lease transfers to the callback. */
     var onGpuFrameReady: ((SharedGpuVideoFrame) -> Unit)? = null
+
+    fun metricsSnapshot() = DecoderRenderMetrics(
+        renderedFrames = renderedFrameCount.get(),
+        texturePoolStarvations = texturePoolStarvationCount.get(),
+        bitmapReadsSubmitted = bitmapReadSubmittedCount.get(),
+        bitmapReadsCompleted = bitmapReadCompletedCount.get(),
+        bitmapReadsDropped = bitmapReadDroppedCount.get()
+    )
 
     /** Limits GL output cadence without slowing MediaCodec decode. */
     fun setOutputFpsLimit(fps: Int) {
@@ -182,7 +205,7 @@ class DecoderGlRenderer(
                 }
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
                 pboIndex = 0
-                pboInitialized = false
+                pboHasPendingRead.fill(false)
 
                 // Create OES texture + SurfaceTexture for decoder output
                 oesTexId = EglHelper.createTexture()
@@ -254,11 +277,17 @@ class DecoderGlRenderer(
             val minimumReadbackIntervalMs = 1_000L / bitmapOutputFpsLimit.coerceAtLeast(1)
             val readbackDue = decodedAtElapsedMs - lastReadbackAtElapsedMs >= minimumReadbackIntervalMs
             if (readbackDue) lastReadbackAtElapsedMs = decodedAtElapsedMs
-            val nextSequence = ++frameSequence
-            acquiredSlot = if (sharedGpuOutputEnabled) sharedTexturePool?.acquireForWrite() else null
-            val renderTexture = acquiredSlot?.textureId ?: scratchTexture
-
             egl.makeCurrent(pbuf)
+            acquiredSlot = if (sharedGpuOutputEnabled) sharedTexturePool?.acquireForWrite() else null
+            if (sharedGpuOutputEnabled && acquiredSlot == null) {
+                texturePoolStarvationCount.incrementAndGet()
+            }
+            // When every shared texture is still leased, skip this frame unless a CPU
+            // consumer explicitly needs a Bitmap. Drawing into scratchTexture without
+            // either consumer would spend GPU time only to discard the result.
+            if (sharedGpuOutputEnabled && acquiredSlot == null && !readbackDue) return
+            val nextSequence = ++frameSequence
+            val renderTexture = acquiredSlot?.textureId ?: scratchTexture
 
             // Render OES texture to FBO
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
@@ -288,22 +317,43 @@ class DecoderGlRenderer(
             GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            renderedFrameCount.incrementAndGet()
+
+            // Read from the rendered FBO while it is still bound. Reading after the
+            // unbind would sample the pbuffer's default framebuffer instead.
+            drainReadyBitmapReadback()
+            if (readbackDue) {
+                val writeIndex = when {
+                    !pboHasPendingRead[pboIndex] -> pboIndex
+                    !pboHasPendingRead[1 - pboIndex] -> 1 - pboIndex
+                    else -> -1
+                }
+                if (writeIndex >= 0) {
+                    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[writeIndex])
+                    GLES30.glReadPixels(
+                        0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0
+                    )
+                    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+                    pboPresentationTimeUs[writeIndex] = presentationTimeUs
+                    pboDecodedAtElapsedMs[writeIndex] = decodedAtElapsedMs
+                    pboFrameSequences[writeIndex] = nextSequence
+                    val fence = GLES30.glFenceSync(
+                        GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0
+                    )
+                    pboFences[writeIndex] = fence
+                    pboHasPendingRead[writeIndex] = fence != 0L
+                    if (fence == 0L) bitmapReadDroppedCount.incrementAndGet()
+                    else bitmapReadSubmittedCount.incrementAndGet()
+                    pboIndex = 1 - writeIndex
+                    GLES30.glFlush()
+                } else {
+                    bitmapReadDroppedCount.incrementAndGet()
+                }
+            }
 
             GLES20.glDisableVertexAttribArray(aPositionLoc)
             GLES20.glDisableVertexAttribArray(aTexCoordLoc)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
-
-            // --- PBO async readback (ping-pong) ---
-            // Step 1: Initiate async DMA read of current frame into PBO[pboIndex]
-            //         glReadPixels with a bound PBO returns IMMEDIATELY (no GPU stall)
-            if (readbackDue) {
-                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[pboIndex])
-                GLES30.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
-                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
-                pboPresentationTimeUs[pboIndex] = presentationTimeUs
-                pboDecodedAtElapsedMs[pboIndex] = decodedAtElapsedMs
-                pboFrameSequences[pboIndex] = nextSequence
-            }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
@@ -327,39 +377,79 @@ class DecoderGlRenderer(
                 }
             }
 
-            // Step 2: Map the OTHER PBO (previous frame, DMA already complete) → zero-wait read
-            if (readbackDue && pboInitialized) {
-                val readIndex = 1 - pboIndex
-                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[readIndex])
-                val mappedBuffer = GLES30.glMapBufferRange(
-                    GLES30.GL_PIXEL_PACK_BUFFER, 0, pixelByteSize, GLES30.GL_MAP_READ_BIT
-                )
-                if (mappedBuffer is ByteBuffer) {
-                    val bitmap = nextReusableBitmap()
-                    bitmap.copyPixelsFromBuffer(mappedBuffer)
-                    onBitmapReady?.invoke(
-                        RenderedVideoFrame(
-                            bitmap = bitmap,
-                            frameSequence = pboFrameSequences[readIndex],
-                            presentationTimeUs = pboPresentationTimeUs[readIndex],
-                            decodedAtElapsedMs = pboDecodedAtElapsedMs[readIndex],
-                            readyAtElapsedMs = SystemClock.elapsedRealtime()
-                        )
-                    )
-                }
-                GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
-                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
-            }
-
-            // Step 3: Swap PBO index for next frame
-            if (readbackDue) {
-                pboIndex = 1 - pboIndex
-                pboInitialized = true
-            }
         } catch (e: Exception) {
             Log.e(TAG, "renderAndReadBitmap error", e)
         } finally {
             acquiredSlot?.let { sharedTexturePool?.abandonWrite(it) }
+        }
+    }
+
+    private fun drainReadyBitmapReadback() {
+        var readyIndex = -1
+        for (index in pbos.indices) {
+            if (!pboHasPendingRead[index]) continue
+            val fence = pboFences[index]
+            if (fence == 0L) continue
+            when (GLES30.glClientWaitSync(fence, 0, 0L)) {
+                GLES30.GL_ALREADY_SIGNALED, GLES30.GL_CONDITION_SATISFIED -> {
+                    if (readyIndex < 0 || pboFrameSequences[index] > pboFrameSequences[readyIndex]) {
+                        readyIndex = index
+                    }
+                }
+                GLES30.GL_WAIT_FAILED -> {
+                    GLES30.glDeleteSync(fence)
+                    pboFences[index] = 0L
+                    pboHasPendingRead[index] = false
+                    bitmapReadDroppedCount.incrementAndGet()
+                }
+            }
+        }
+        if (readyIndex < 0) return
+
+        // This output is latest-frame oriented: release older completed reads instead
+        // of converting stale frames into Bitmaps after a GPU backlog.
+        for (index in pbos.indices) {
+            if (index == readyIndex || !pboHasPendingRead[index]) continue
+            val fence = pboFences[index]
+            if (fence == 0L) continue
+            val status = GLES30.glClientWaitSync(fence, 0, 0L)
+            if (status == GLES30.GL_ALREADY_SIGNALED || status == GLES30.GL_CONDITION_SATISFIED) {
+                GLES30.glDeleteSync(fence)
+                pboFences[index] = 0L
+                pboHasPendingRead[index] = false
+            }
+        }
+
+        val fence = pboFences[readyIndex]
+        if (fence != 0L) GLES30.glDeleteSync(fence)
+        pboFences[readyIndex] = 0L
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbos[readyIndex])
+        val mappedBuffer = GLES30.glMapBufferRange(
+            GLES30.GL_PIXEL_PACK_BUFFER, 0, pixelByteSize, GLES30.GL_MAP_READ_BIT
+        )
+        if (mappedBuffer is ByteBuffer) {
+            try {
+                val bitmap = nextReusableBitmap()
+                bitmap.copyPixelsFromBuffer(mappedBuffer)
+                bitmapReadCompletedCount.incrementAndGet()
+                onBitmapReady?.invoke(
+                    RenderedVideoFrame(
+                        bitmap = bitmap,
+                        frameSequence = pboFrameSequences[readyIndex],
+                        presentationTimeUs = pboPresentationTimeUs[readyIndex],
+                        decodedAtElapsedMs = pboDecodedAtElapsedMs[readyIndex],
+                        readyAtElapsedMs = SystemClock.elapsedRealtime()
+                    )
+                )
+            } finally {
+                GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+                pboHasPendingRead[readyIndex] = false
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+            }
+        } else {
+            pboHasPendingRead[readyIndex] = false
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+            bitmapReadDroppedCount.incrementAndGet()
         }
     }
 
@@ -404,6 +494,9 @@ class DecoderGlRenderer(
             scratchTexture = 0
         }
         if (pbos[0] != 0 || pbos[1] != 0) {
+            pboFences.forEach { fence -> if (fence != 0L) GLES30.glDeleteSync(fence) }
+            pboFences.fill(0L)
+            pboHasPendingRead.fill(false)
             GLES30.glDeleteBuffers(2, pbos, 0)
             pbos[0] = 0
             pbos[1] = 0
@@ -424,7 +517,9 @@ class DecoderGlRenderer(
             egl.release()
         }
         eglHelper = null
-        pboInitialized = false
+        pboFences.fill(0L)
+        pboHasPendingRead.fill(false)
+        pboIndex = 0
         pboPresentationTimeUs.fill(0L)
         pboDecodedAtElapsedMs.fill(0L)
         pboFrameSequences.fill(0L)

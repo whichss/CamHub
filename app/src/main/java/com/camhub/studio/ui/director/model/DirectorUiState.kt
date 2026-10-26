@@ -24,6 +24,8 @@ data class DirectorUiState(
     val recordingPath: String = "",
     val isRecordingSpatialUpscaling: Boolean = false,
     val recordingOutputHeight: Int = 0,
+    val recordingAcceptedFrameFps: Int = 0,
+    val recordingDroppedFrameFps: Int = 0,
     val recordingError: String? = null,
     val wifiStrength: Int = 0,
     val networkTransportLabel: String = "AUTO · OFFLINE",
@@ -87,6 +89,11 @@ data class CameraNode(
     val droppedFrames: Int = 0,
     /** Source frames arriving from the camera, independent of multiview render throttling. */
     val ingressFps: Int = 0,
+    /** Actual frames composited by this camera's GL renderer. */
+    val gpuRenderedFps: Int = 0,
+    val gpuTexturePoolStarvations: Long = 0L,
+    val gpuBitmapReadsCompleted: Long = 0L,
+    val gpuBitmapReadsDropped: Long = 0L,
     val videoTransport: VideoTransport = VideoTransport.NONE,
     val udpPacketsReceived: Long = 0,
     val udpCompletedFrames: Long = 0,

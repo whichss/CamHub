@@ -286,6 +286,10 @@ class DirectorViewModel @Inject constructor(
                                 externalLatencySampleCount = stream.externalLatencySampleCount,
                                 droppedFrames = stream.droppedFrames,
                                 ingressFps = stream.ingressFps,
+                                gpuRenderedFps = stream.gpuRenderedFps,
+                                gpuTexturePoolStarvations = stream.gpuTexturePoolStarvations,
+                                gpuBitmapReadsCompleted = stream.gpuBitmapReadsCompleted,
+                                gpuBitmapReadsDropped = stream.gpuBitmapReadsDropped,
                                 videoTransport = stream.videoTransport,
                                 udpPacketsReceived = stream.udpPacketsReceived,
                                 udpCompletedFrames = stream.udpCompletedFrames,
@@ -405,6 +409,8 @@ class DirectorViewModel @Inject constructor(
             while (isActive) {
                 delay(1000)
                 val totalBitrate = streamClient.getTotalBitrateKbps()
+                streamClient.refreshRendererMetrics()
+                recorder.refreshThroughputMetrics()
                 _uiState.update { it.copy(bitrateKbps = totalBitrate) }
                 updateAdaptiveBitrates()
             }
@@ -422,7 +428,9 @@ class DirectorViewModel @Inject constructor(
                         recordingPath = info.outputPath,
                         recordingError = info.errorMessage,
                         isRecordingSpatialUpscaling = info.isSpatialUpscaling,
-                        recordingOutputHeight = info.outputHeight
+                        recordingOutputHeight = info.outputHeight,
+                        recordingAcceptedFrameFps = info.acceptedFrameFps,
+                        recordingDroppedFrameFps = info.droppedFrameFps
                     )
                 }
             }

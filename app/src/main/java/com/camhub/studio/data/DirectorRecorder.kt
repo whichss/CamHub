@@ -54,6 +54,10 @@ data class RecordingInfo(
     val isSpatialUpscaling: Boolean = false,
     val outputHeight: Int = 0,
     val includesAudio: Boolean = false,
+    val acceptedFrameFps: Int = 0,
+    val droppedFrameFps: Int = 0,
+    val acceptedFrameCount: Long = 0L,
+    val droppedFrameCount: Long = 0L,
     val errorMessage: String? = null
 )
 
@@ -106,7 +110,11 @@ class DirectorRecorder @Inject constructor(
         Thread(runnable, "DirectorRecorderFrameWriter").apply { isDaemon = true }
     }
     private val frameWriteInFlight = AtomicBoolean(false)
+    private val acceptedFrameCount = AtomicLong(0)
     private val droppedFrameCount = AtomicLong(0)
+    private var lastThroughputSampleAtMs = 0L
+    private var lastAcceptedThroughputSample = 0L
+    private var lastDroppedThroughputSample = 0L
 
     private data class AudioInputChunk(val samples: ShortArray, val presentationTimeUs: Long)
     private data class PendingMuxSample(
@@ -211,7 +219,11 @@ class DirectorRecorder @Inject constructor(
             val displayPath = muxerResult.second
 
             frameCount = 0
+            acceptedFrameCount.set(0)
             droppedFrameCount.set(0)
+            lastThroughputSampleAtMs = android.os.SystemClock.elapsedRealtime()
+            lastAcceptedThroughputSample = 0
+            lastDroppedThroughputSample = 0
             stopRequested = false
             currentOutputPath = displayPath
 
@@ -475,6 +487,8 @@ class DirectorRecorder @Inject constructor(
             if (!glRenderer.render(bitmap, presentationTimeNs, ptzTransform, transition)) {
                 frameWriteInFlight.set(false)
                 noteDroppedRecordFrame()
+            } else {
+                acceptedFrameCount.incrementAndGet()
             }
             return
         }
@@ -491,6 +505,7 @@ class DirectorRecorder @Inject constructor(
                     frameWriteInFlight.set(false)
                 }
             }
+            acceptedFrameCount.incrementAndGet()
         } catch (e: RejectedExecutionException) {
             frameWriteInFlight.set(false)
             Log.w(TAG, "Frame write rejected: ${e.message}")
@@ -526,8 +541,28 @@ class DirectorRecorder @Inject constructor(
         if (!accepted) {
             frameWriteInFlight.set(false)
             noteDroppedRecordFrame()
+        } else {
+            acceptedFrameCount.incrementAndGet()
         }
         return accepted
+    }
+
+    /** Publishes bounded-window recording input throughput without extending the frame queue. */
+    fun refreshThroughputMetrics(nowMs: Long = android.os.SystemClock.elapsedRealtime()) {
+        val elapsedMs = (nowMs - lastThroughputSampleAtMs).coerceAtLeast(1L)
+        val accepted = acceptedFrameCount.get()
+        val dropped = droppedFrameCount.get()
+        val acceptedFps = ((accepted - lastAcceptedThroughputSample).coerceAtLeast(0L) * 1_000L / elapsedMs).toInt()
+        val droppedFps = ((dropped - lastDroppedThroughputSample).coerceAtLeast(0L) * 1_000L / elapsedMs).toInt()
+        lastThroughputSampleAtMs = nowMs
+        lastAcceptedThroughputSample = accepted
+        lastDroppedThroughputSample = dropped
+        _recordingInfo.value = _recordingInfo.value.copy(
+            acceptedFrameFps = acceptedFps,
+            droppedFrameFps = droppedFps,
+            acceptedFrameCount = accepted,
+            droppedFrameCount = dropped
+        )
     }
 
     private fun drawFrameToSurface(
