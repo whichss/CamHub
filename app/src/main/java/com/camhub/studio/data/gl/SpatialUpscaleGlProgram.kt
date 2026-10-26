@@ -71,25 +71,53 @@ class SpatialUpscaleGlProgram {
         enableSpatialReconstruction: Boolean = true
     ): Boolean {
         if (bitmap.isRecycled || program == 0 || texture == 0) return false
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        uploadBitmap(bitmap)
+        return renderTexture(
+            sourceTextureId = texture,
+            sourceWidth = inputWidth,
+            sourceHeight = inputHeight,
+            outputWidth = outputWidth,
+            outputHeight = outputHeight,
+            ptzTransform = ptzTransform,
+            transition = transition,
+            enableSpatialReconstruction = enableSpatialReconstruction
+        )
+    }
+
+    /**
+     * Composites a 2D texture created by another EglHelper context in the shared EGL group.
+     * The caller owns the source texture and must keep it alive until this draw has been
+     * submitted. This path avoids both glReadPixels-to-Bitmap and GLUtils bitmap upload.
+     */
+    fun renderTexture(
+        sourceTextureId: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM,
+        transition: PgmTransitionFrame? = null,
+        enableSpatialReconstruction: Boolean = true
+    ): Boolean {
+        if (sourceTextureId == 0 || sourceWidth <= 0 || sourceHeight <= 0 || program == 0) return false
         while (GLES30.glGetError() != GLES30.GL_NO_ERROR) {
             // Clear a stale error from earlier work in this context before measuring this draw.
         }
-        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        uploadBitmap(bitmap)
 
         GLES30.glViewport(0, 0, outputWidth.coerceAtLeast(1), outputHeight.coerceAtLeast(1))
         GLES30.glClearColor(0f, 0f, 0f, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         GLES30.glUseProgram(program)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, sourceTextureId)
         GLES30.glUniform1i(textureLocation, 0)
         GLES30.glUniform2f(
             texelSizeLocation,
-            1f / inputWidth.coerceAtLeast(1),
-            1f / inputHeight.coerceAtLeast(1)
+            1f / sourceWidth,
+            1f / sourceHeight
         )
-        val scale = fitScale(inputWidth, inputHeight, outputWidth, outputHeight)
+        val scale = fitScale(sourceWidth, sourceHeight, outputWidth, outputHeight)
         GLES30.glUniform2f(scaleLocation, scale.first, scale.second)
         GLES30.glUniform1f(ptzScaleLocation, ptzTransform.scale)
         GLES30.glUniform2f(ptzCenterLocation, ptzTransform.centerX, ptzTransform.centerY)

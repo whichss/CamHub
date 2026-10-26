@@ -28,6 +28,28 @@ Camera 4 ─┘                 USB-C LAN ─┘
 
 ## 현재 구현
 
+### 데스크톱 허브 기반
+
+- Windows와 macOS에서 같은 코드로 실행되는 별도 JVM 데스크톱 모듈
+- 연결된 모니터의 이름·해상도·주사율 탐지
+- 선택한 모니터에 테두리 없는 PGM 전체화면 출력
+- `ESC` 전체화면 종료와 출력 중 모니터 분리 감지
+- Android와 데스크톱이 함께 사용하는 RTP 재조립·AES-256-GCM 공통 모듈
+- 최대 4대 멀티뷰, PVW/PGM, 연결 및 출력 상태를 위한 데스크톱 허브 화면 골격
+- Android 카메라의 mDNS·UDP 이중 검색 목록과 `REFRESH`, `CONNECT`, `CONNECT ALL`, `DISCONNECT`
+- 자동 검색이 제한된 네트워크를 위한 숨김형 `IP:포트` 수동 연결
+- 카메라 화면으로 이동한 뒤에도 검색 광고와 제어 서버 유지
+- 자체 서명 TLS 제어 핸드셰이크, 세션 키 수신, 암호화 UDP/RTP 구독
+- 카메라별 수신·프레임 마감·FFmpeg H.264 디코딩 전용 스레드
+- 데스크톱 디코더 입력을 2프레임으로 제한하고 적체 시 다음 키프레임부터 복구
+- 컴퓨터 도착 이후 180ms를 넘긴 디코더 출력 폐기와 저지연 FFmpeg 옵션
+- 멀티뷰 선택으로 PGM 지정, 선택 영상의 PGM 미리보기와 모니터 전체화면 공간 확대
+- 프레임 상태 UI를 초당 4회로 제한하고 영상 표시는 최신 이미지로 교체
+- 핑/퐁 시계 보정 이후에만 카메라 촬영부터 데스크톱 표시까지의 지연 계산
+- 카메라 연결 단절 감지와 지수 백오프 자동 재연결
+
+현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰와 PGM 전체화면에 표시할 수 있습니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩, GPU FSR 샤프닝, PVW/CUT/AUTO와 PGM 녹화는 다음 단계입니다.
+
 ### 카메라 모드
 
 - CameraX + Camera2 Interop 기반 촬영
@@ -71,8 +93,10 @@ Camera 4 ─┘                 USB-C LAN ─┘
 
 ### 네트워크 자동 선택
 
-- mDNS로 같은 로컬 네트워크의 카메라 자동 검색
-- PIN 인증과 TLS 제어 채널에서 세션 키 교환
+- mDNS 및 UDP 알림으로 같은 로컬 네트워크의 카메라 자동 검색
+- TLS 제어 채널에서 세션 키 교환
+- 카메라 인증서 지문을 기기 화면끼리 비교한 뒤 고정하고, 카메라 PIN 검증 전에는 세션 키를 전달하지 않음
+- 이 페어링 핸드셰이크를 지원하는 CamHub Android/desktop 버전끼리 연결해야 함
 - `AUTO`, `WI-FI FIXED`, `LAN FIXED` 선택 모드
 - AUTO에서는 목적지 경로가 유효한 Ethernet을 우선하고 Wi-Fi를 대안으로 사용
 - 선택한 Android `Network`에 제어·영상·오디오 소켓을 함께 고정
@@ -88,7 +112,8 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 사용자가 정한 비트레이트는 상한값으로 유지
 - 코덱 동시 디코딩 수, 메모리, CPU 코어, OpenGL ES 능력 기반 허브 등급 분류
 - 발열·드롭·실제 수신 FPS·지연에 따른 런타임 프로필 조절
-- PGM/PVW/멀티뷰 렌더링을 각각 30/20/10fps로 제한해 화면 부하 절감
+- 카메라별 전용 디코딩 스레드를 사용하고 PGM은 30fps를 유지
+- PVW는 10~20fps, 나머지 멀티뷰는 5~15fps 범위에서 연결 대수·지연·발열에 따라 자동 조절
 
 자동 조절값은 카메라의 저장 설정을 덮어쓰지 않으며 현재 세션에만 적용됩니다. 신규 설치에서는 자동 허브 프로필과 자동 비트레이트가 기본 활성화되고, 사용자가 직접 끈 설정은 유지됩니다.
 
@@ -159,22 +184,24 @@ Camera 4 ─┘                 USB-C LAN ─┘
 ## 프로젝트 구조
 
 ```text
-app/src/main/java/com/camhub/studio/
-├── data/
-│   ├── audio/       # 캡처, 전송, 믹싱, Opus 래퍼
-│   ├── camera/      # CameraX/Camera2 제어
-│   ├── capability/  # 기기 분류와 런타임 성능 정책
-│   ├── gl/          # 카메라/디코더 렌더링과 공간 업스케일링
-│   ├── metrics/     # 시계 보정과 단계별 지연 백분위
-│   ├── network/     # 검색, TLS, UDP/RTP, SRT/TCP, 자동 경로 선택
-│   └── ptz/         # 카메라별 혼합형 PTZ 상태와 변환
-├── navigation/      # 역할 선택과 Compose 경로
-└── ui/
-    ├── camera/      # 카메라 HUD
-    ├── connection/  # 검색, 연결, 네트워크 선택
-    ├── director/    # 멀티뷰, PVW/PGM, 녹화, 기기 관리
-    ├── settings/    # 스트림·디스플레이·녹화·시스템 설정
-    └── audio/       # 허브 오디오 믹서
+├── protocol/         # Android/Windows/macOS 공통 RTP·암호화 규격
+├── desktop/          # Windows/macOS 허브와 모니터 PGM 출력
+└── app/src/main/java/com/camhub/studio/
+    ├── data/
+    │   ├── audio/       # 캡처, 전송, 믹싱, Opus 래퍼
+    │   ├── camera/      # CameraX/Camera2 제어
+    │   ├── capability/  # 기기 분류와 런타임 성능 정책
+    │   ├── gl/          # 카메라/디코더 렌더링과 공간 업스케일링
+    │   ├── metrics/     # 시계 보정과 단계별 지연 백분위
+    │   ├── network/     # 검색, TLS, UDP/RTP, SRT/TCP, 자동 경로 선택
+    │   └── ptz/         # 카메라별 혼합형 PTZ 상태와 변환
+    ├── navigation/  # 역할 선택과 Compose 경로
+    └── ui/
+        ├── camera/      # 카메라 HUD
+        ├── connection/  # 검색, 연결, 네트워크 선택
+        ├── director/    # 멀티뷰, PVW/PGM, 녹화, 기기 관리
+        ├── settings/    # 스트림·디스플레이·녹화·시스템 설정
+        └── audio/       # 허브 오디오 믹서
 ```
 
 ## 빌드 및 테스트
@@ -195,9 +222,25 @@ app/src/main/java/com/camhub/studio/
 # 클린 검증
 ./gradlew clean testDebugUnitTest assembleDebug
 
+# 데스크톱 허브 실행
+./gradlew :desktop:run
+
+# Windows/macOS 실행 스크립트가 포함된 배포 폴더 생성
+./gradlew :desktop:installDist
+
+# Java 런타임이 포함된 macOS 앱 생성 (macOS에서 실행)
+./gradlew :desktop:packageMacApp
+# 결과: desktop/build/package/macos/CamHub Desktop.app
+
+# Java 런타임이 포함된 Windows 설치 파일 생성 (Windows에서 실행)
+gradlew.bat :desktop:packageWindowsExe
+# 결과: desktop/build/package/windows/*.exe
+
 # Release AAB
 ./gradlew bundleRelease
 ```
+
+`.github/workflows/desktop-packages.yml`을 수동 실행하거나 데스크톱 관련 변경을 `main`에 푸시하면 macOS arm64 앱과 Windows x64 설치 파일을 각각 해당 운영체제에서 빌드합니다.
 
 Release 서명에는 다음 환경 변수가 필요합니다.
 
@@ -216,6 +259,9 @@ CAMHUB_KEY_PASSWORD
 - Opus는 송수신 코덱 협상과 기기 호환성 검증 후 기본 활성화 예정
 - 외부 입력(USB/UVC, 캡처 카드)은 [docs/external-input-plan.md](docs/external-input-plan.md)의 계획 단계
 - 현재 영상 코덱은 Android 하드웨어 H.264/HEVC이며 자체 영상 코덱은 구현하지 않음
+- 데스크톱 VideoToolbox/Media Foundation 하드웨어 디코더 선택은 후속 구현 단계
+- 카메라 TLS 인증서는 앱 내부에 보존되고, 최초 연결 시 카메라와 허브 화면의 SHA-256 지문을 직접 비교해 신뢰를 고정함
+- 카메라의 8자리 페어링 PIN은 TLS 인증서 지문 확인 뒤 전송되며, PIN이 맞기 전에는 카메라가 영상 세션 키를 보내지 않음
 
 ## 문서
 

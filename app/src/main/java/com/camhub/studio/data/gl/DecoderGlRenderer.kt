@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class RenderedVideoFrame(
     val bitmap: Bitmap,
+    val frameSequence: Long,
     val presentationTimeUs: Long,
     val decodedAtElapsedMs: Long,
     val readyAtElapsedMs: Long
@@ -40,6 +41,7 @@ class DecoderGlRenderer(
     companion object {
         private const val TAG = "DecoderGlRenderer"
         private const val BITMAP_POOL_SIZE = 3
+        private const val SHARED_TEXTURE_POOL_SIZE = 3
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f,
@@ -68,7 +70,9 @@ class DecoderGlRenderer(
     private val texMatrix = FloatArray(16)
 
     private var fbo = 0
-    private var renderBuffer = 0
+    private var sharedTexturePool: SharedGpuTexturePool? = null
+    private var scratchTexture = 0
+    private var frameSequence = 0L
 
     private var vertexBuffer: FloatBuffer? = null
     private var texCoordBuffer: FloatBuffer? = null
@@ -83,6 +87,7 @@ class DecoderGlRenderer(
     private var pboInitialized = false
     private val pboPresentationTimeUs = LongArray(2)
     private val pboDecodedAtElapsedMs = LongArray(2)
+    private val pboFrameSequences = LongArray(2)
     private val pixelByteSize get() = width * height * 4
 
     private val reusableBitmaps = arrayOfNulls<Bitmap>(BITMAP_POOL_SIZE)
@@ -96,6 +101,8 @@ class DecoderGlRenderer(
         private set
 
     var onBitmapReady: ((RenderedVideoFrame) -> Unit)? = null
+    /** Ownership of each emitted lease transfers to the callback. */
+    var onGpuFrameReady: ((SharedGpuVideoFrame) -> Unit)? = null
 
     /** Limits costly GPU-to-CPU Bitmap readback without slowing MediaCodec decode. */
     fun setOutputFpsLimit(fps: Int) {
@@ -129,23 +136,21 @@ class DecoderGlRenderer(
                 texCoordBuffer = ByteBuffer.allocateDirect(TEX_COORDS.size * 4)
                     .order(ByteOrder.nativeOrder()).asFloatBuffer().put(TEX_COORDS).also { it.position(0) }
 
-                // Create FBO + renderbuffer
+                // Render decoded frames into a shareable texture. The same GL object can be
+                // sampled by a PGM encoder context in the EglHelper share group; PBO readback
+                // remains temporarily enabled for the existing multiview Bitmap consumers.
                 val fbos = IntArray(1)
                 GLES20.glGenFramebuffers(1, fbos, 0)
                 fbo = fbos[0]
 
-                val rbs = IntArray(1)
-                GLES20.glGenRenderbuffers(1, rbs, 0)
-                renderBuffer = rbs[0]
-
-                GLES20.glBindRenderbuffer(GLES20.GL_RENDERBUFFER, renderBuffer)
-                GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES20.GL_RGBA4, width, height)
-
+                val sharedTextures = IntArray(SHARED_TEXTURE_POOL_SIZE)
+                GLES20.glGenTextures(sharedTextures.size, sharedTextures, 0)
+                sharedTextures.forEach { configureRgbaTexture(it) }
+                sharedTexturePool = SharedGpuTexturePool(sharedTextures)
+                scratchTexture = createRgbaTexture()
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
-                GLES20.glFramebufferRenderbuffer(
-                    GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
-                    GLES20.GL_RENDERBUFFER, renderBuffer
-                )
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                    GLES20.GL_TEXTURE_2D, scratchTexture, 0)
 
                 val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
                 if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
@@ -219,6 +224,7 @@ class DecoderGlRenderer(
         val st = surfaceTexture ?: return
         val pbuf = pbufferSurface ?: return
 
+        var acquiredSlot: SharedGpuTexturePool.Slot? = null
         try {
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
@@ -229,11 +235,21 @@ class DecoderGlRenderer(
                 return
             }
             lastReadbackAtElapsedMs = decodedAtElapsedMs
+            val nextSequence = ++frameSequence
+            acquiredSlot = sharedTexturePool?.acquireForWrite()
+            val renderTexture = acquiredSlot?.textureId ?: scratchTexture
 
             egl.makeCurrent(pbuf)
 
             // Render OES texture to FBO
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER,
+                GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D,
+                renderTexture,
+                0
+            )
             GLES20.glViewport(0, 0, width, height)
 
             GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -266,8 +282,29 @@ class DecoderGlRenderer(
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
             pboPresentationTimeUs[pboIndex] = presentationTimeUs
             pboDecodedAtElapsedMs[pboIndex] = decodedAtElapsedMs
+            pboFrameSequences[pboIndex] = nextSequence
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+            acquiredSlot?.let { slot ->
+                val gpuFrame = sharedTexturePool?.publish(
+                    slot = slot,
+                    width = width,
+                    height = height,
+                    frameSequence = nextSequence,
+                    presentationTimeUs = presentationTimeUs,
+                    decodedAtElapsedMs = decodedAtElapsedMs
+                )
+                acquiredSlot = null
+                if (gpuFrame != null) {
+                    try {
+                        onGpuFrameReady?.invoke(gpuFrame) ?: gpuFrame.close()
+                    } catch (error: Throwable) {
+                        gpuFrame.close()
+                        throw error
+                    }
+                }
+            }
 
             // Step 2: Map the OTHER PBO (previous frame, DMA already complete) → zero-wait read
             if (pboInitialized) {
@@ -282,6 +319,7 @@ class DecoderGlRenderer(
                     onBitmapReady?.invoke(
                         RenderedVideoFrame(
                             bitmap = bitmap,
+                            frameSequence = pboFrameSequences[readIndex],
                             presentationTimeUs = pboPresentationTimeUs[readIndex],
                             decodedAtElapsedMs = pboDecodedAtElapsedMs[readIndex],
                             readyAtElapsedMs = SystemClock.elapsedRealtime()
@@ -297,7 +335,27 @@ class DecoderGlRenderer(
             pboInitialized = true
         } catch (e: Exception) {
             Log.e(TAG, "renderAndReadBitmap error", e)
+        } finally {
+            acquiredSlot?.let { sharedTexturePool?.abandonWrite(it) }
         }
+    }
+
+    private fun createRgbaTexture(): Int {
+        val textures = IntArray(1)
+        GLES20.glGenTextures(1, textures, 0)
+        configureRgbaTexture(textures[0])
+        return textures[0]
+    }
+
+    private fun configureRgbaTexture(textureId: Int) {
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
     }
 
     private fun releaseInternal() {
@@ -309,9 +367,11 @@ class DecoderGlRenderer(
             GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
             fbo = 0
         }
-        if (renderBuffer != 0) {
-            GLES20.glDeleteRenderbuffers(1, intArrayOf(renderBuffer), 0)
-            renderBuffer = 0
+        sharedTexturePool?.close()
+        sharedTexturePool = null
+        if (scratchTexture != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(scratchTexture), 0)
+            scratchTexture = 0
         }
         if (pbos[0] != 0 || pbos[1] != 0) {
             GLES30.glDeleteBuffers(2, pbos, 0)
@@ -337,6 +397,7 @@ class DecoderGlRenderer(
         pboInitialized = false
         pboPresentationTimeUs.fill(0L)
         pboDecodedAtElapsedMs.fill(0L)
+        pboFrameSequences.fill(0L)
         renderQueued.set(false)
         renderAgain.set(false)
         lastReadbackAtElapsedMs = 0L
@@ -346,6 +407,7 @@ class DecoderGlRenderer(
         }
         reusableBitmapIndex = 0
         onBitmapReady = null
+        onGpuFrameReady = null
         Log.d(TAG, "DecoderGlRenderer released")
     }
 

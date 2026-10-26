@@ -354,7 +354,7 @@ class NsdDiscoveryManager @Inject constructor(
         udpBroadcastJob = scope.launch {
             val sockets = mutableMapOf<android.net.Network, DatagramSocket>()
             try {
-                val broadcastAddr = InetAddress.getByName("255.255.255.255")
+                val limitedBroadcast = InetAddress.getByName("255.255.255.255")
                 Log.d(TAG, "UDP broadcast started for $deviceName on local transports")
                 while (isActive) {
                     val networks = networkTransportManager.networkSnapshot()
@@ -374,13 +374,20 @@ class NsdDiscoveryManager @Inject constructor(
                             val message = json.encodeToString(
                                 UdpAnnounce(ip = localIp, port = port)
                             ).toByteArray()
-                            val packet = DatagramPacket(
-                                message,
-                                message.size,
-                                broadcastAddr,
-                                UDP_BROADCAST_PORT
-                            )
-                            socket.send(packet)
+                            val destinations = listOfNotNull(
+                                limitedBroadcast,
+                                networkTransportManager.broadcastIpv4Address(network)
+                            ).distinct()
+                            destinations.forEach { destination ->
+                                socket.send(
+                                    DatagramPacket(
+                                        message,
+                                        message.size,
+                                        destination,
+                                        UDP_BROADCAST_PORT
+                                    )
+                                )
+                            }
                         } catch (e: Exception) {
                             Log.w(TAG, "UDP broadcast send failed: ${e.message}")
                         }

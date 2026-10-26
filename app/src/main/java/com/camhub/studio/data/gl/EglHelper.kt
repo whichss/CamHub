@@ -96,47 +96,16 @@ class EglHelper {
     var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
         private set
     private var eglConfig: EGLConfig? = null
+    private var sharedContextLease: EglSharedContextPool.Lease? = null
 
     fun init() {
-        eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
-            throw RuntimeException("eglGetDisplay failed")
-        }
-
-        val version = IntArray(2)
-        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
-            throw RuntimeException("eglInitialize failed")
-        }
-
-        // Request ES 3.0 (0x40 = EGL_OPENGL_ES3_BIT_KHR) — needed for PBO async readback
-        // All devices with API 26+ support ES 3.0; GLES20 calls remain fully compatible
-        val configAttribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8,
-            EGL14.EGL_GREEN_SIZE, 8,
-            EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8,
-            EGL_RECORDABLE_ANDROID, 1,
-            EGL14.EGL_RENDERABLE_TYPE, 0x40,
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
-            EGL14.EGL_NONE
-        )
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val numConfigs = IntArray(1)
-        if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)) {
-            throw RuntimeException("eglChooseConfig failed")
-        }
-        eglConfig = configs[0] ?: throw RuntimeException("No suitable EGL config found")
-
-        val contextAttribs = intArrayOf(
-            EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
-            EGL14.EGL_NONE
-        )
-        eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
-        if (eglContext == EGL14.EGL_NO_CONTEXT) {
-            throw RuntimeException("eglCreateContext failed")
-        }
-
-        Log.d(TAG, "EGL initialized: EGL ${version[0]}.${version[1]}")
+        check(sharedContextLease == null) { "EGL helper is already initialized" }
+        val lease = EglSharedContextPool.acquire()
+        sharedContextLease = lease
+        eglDisplay = lease.display
+        eglConfig = lease.config
+        eglContext = lease.context
+        Log.d(TAG, "EGL initialized in shared texture group")
     }
 
     fun createWindowSurface(surface: Surface): EGLSurface {
@@ -176,16 +145,113 @@ class EglHelper {
     }
 
     fun release() {
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY && eglContext != EGL14.EGL_NO_CONTEXT) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            if (eglContext != EGL14.EGL_NO_CONTEXT) {
-                EGL14.eglDestroyContext(eglDisplay, eglContext)
-            }
-            EGL14.eglTerminate(eglDisplay)
+            EGL14.eglDestroyContext(eglDisplay, eglContext)
         }
+        sharedContextLease?.let(EglSharedContextPool::release)
+        sharedContextLease = null
         eglDisplay = EGL14.EGL_NO_DISPLAY
         eglContext = EGL14.EGL_NO_CONTEXT
         eglConfig = null
         Log.d(TAG, "EGL released")
+    }
+}
+
+/**
+ * Owns a root EGL context and gives each GL worker a child context in the same share group.
+ * This makes 2D textures created by decoder workers visible to PGM encoder workers without
+ * routing pixels through a CPU Bitmap. The root context is never made current and is retained
+ * until the last child context is released.
+ */
+private object EglSharedContextPool {
+    data class Lease(
+        val display: EGLDisplay,
+        val config: EGLConfig,
+        val context: EGLContext
+    )
+
+    private const val EGL_RECORDABLE_ANDROID = 0x3142
+    private const val EGL_OPENGL_ES3_BIT_KHR = 0x40
+
+    private val lock = Any()
+    private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
+    private var config: EGLConfig? = null
+    private var rootContext: EGLContext = EGL14.EGL_NO_CONTEXT
+    private var childCount = 0
+
+    fun acquire(): Lease = synchronized(lock) {
+        ensureRootContext()
+        val sharedConfig = checkNotNull(config)
+        val childContext = EGL14.eglCreateContext(
+            display,
+            sharedConfig,
+            rootContext,
+            intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE),
+            0
+        )
+        check(childContext != EGL14.EGL_NO_CONTEXT) {
+            "eglCreateContext failed for shared worker: 0x${Integer.toHexString(EGL14.eglGetError())}"
+        }
+        childCount++
+        Lease(display, sharedConfig, childContext)
+    }
+
+    fun release(lease: Lease) = synchronized(lock) {
+        if (lease.display != display || childCount <= 0) return@synchronized
+        childCount--
+        if (childCount == 0) {
+            if (rootContext != EGL14.EGL_NO_CONTEXT) {
+                EGL14.eglDestroyContext(display, rootContext)
+            }
+            EGL14.eglTerminate(display)
+            display = EGL14.EGL_NO_DISPLAY
+            config = null
+            rootContext = EGL14.EGL_NO_CONTEXT
+        }
+    }
+
+    private fun ensureRootContext() {
+        if (rootContext != EGL14.EGL_NO_CONTEXT) return
+        display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        check(display != EGL14.EGL_NO_DISPLAY) { "eglGetDisplay failed" }
+
+        val version = IntArray(2)
+        check(EGL14.eglInitialize(display, version, 0, version, 1)) { "eglInitialize failed" }
+        try {
+            val configAttribs = intArrayOf(
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL_RECORDABLE_ANDROID, 1,
+                EGL14.EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val configCount = IntArray(1)
+            check(EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, configCount, 0)) {
+                "eglChooseConfig failed"
+            }
+            config = configs[0] ?: error("No suitable EGL config found")
+            rootContext = EGL14.eglCreateContext(
+                display,
+                config,
+                EGL14.EGL_NO_CONTEXT,
+                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE),
+                0
+            )
+            check(rootContext != EGL14.EGL_NO_CONTEXT) { "eglCreateContext failed for shared root" }
+        } catch (error: Throwable) {
+            if (rootContext != EGL14.EGL_NO_CONTEXT) {
+                EGL14.eglDestroyContext(display, rootContext)
+            }
+            EGL14.eglTerminate(display)
+            display = EGL14.EGL_NO_DISPLAY
+            config = null
+            rootContext = EGL14.EGL_NO_CONTEXT
+            throw error
+        }
     }
 }

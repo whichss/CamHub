@@ -681,6 +681,11 @@ class StreamServer @Inject constructor(
         return encoder?.setBitrate(bitrate) ?: false
     }
 
+    /** Requests an independent recovery frame from either encoder pipeline. */
+    fun requestKeyFrame() {
+        encoder?.requestKeyFrame() ?: keyFrameRequester?.invoke()
+    }
+
     fun stop() {
         serverJob?.cancel()
         serverJob = null

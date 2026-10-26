@@ -21,13 +21,17 @@ class SpatialUpscaleWindowRenderer(
     private val onFrameRendered: (Boolean) -> Unit
 ) {
     private data class PendingFrame(
-        val bitmap: Bitmap,
+        val bitmap: Bitmap?,
+        val gpuFrame: SharedGpuVideoFrame?,
+        val sourceWidth: Int,
+        val sourceHeight: Int,
         val presentationTimeNs: Long,
         val ptzTransform: HubPtzTransform,
         val transition: PgmTransitionFrame?
     )
 
     private val latestFrame = AtomicReference<PendingFrame?>()
+    private val frameLock = Any()
     private val renderQueued = AtomicBoolean(false)
     private val acceptingFrames = AtomicBoolean(false)
     private var thread: HandlerThread? = null
@@ -75,26 +79,73 @@ class SpatialUpscaleWindowRenderer(
         ptzTransform: HubPtzTransform,
         transition: PgmTransitionFrame? = null
     ): Boolean {
-        if (!acceptingFrames.get() || bitmap.isRecycled) return false
-        latestFrame.set(PendingFrame(bitmap, presentationTimeNs, ptzTransform, transition))
-        if (renderQueued.compareAndSet(false, true)) {
-            handler?.post { drainLatestFrame() }
+        if (bitmap.isRecycled) return false
+        synchronized(frameLock) {
+            if (!acceptingFrames.get()) return false
+            val previous = latestFrame.getAndSet(
+                PendingFrame(
+                    bitmap = bitmap,
+                    gpuFrame = null,
+                    sourceWidth = bitmap.width,
+                    sourceHeight = bitmap.height,
+                    presentationTimeNs = presentationTimeNs,
+                    ptzTransform = ptzTransform,
+                    transition = transition
+                )
+            )
+            previous?.gpuFrame?.close()
+            scheduleFrame()
         }
         return true
     }
 
+    /** Queues a shared-context 2D texture directly, with no intermediate Bitmap upload. */
+    fun renderTexture(
+        gpuFrame: SharedGpuVideoFrame,
+        presentationTimeNs: Long,
+        ptzTransform: HubPtzTransform,
+        transition: PgmTransitionFrame? = null
+    ): Boolean {
+        synchronized(frameLock) {
+            if (!acceptingFrames.get()) return false
+            val previous = latestFrame.getAndSet(
+                PendingFrame(
+                    bitmap = null,
+                    gpuFrame = gpuFrame,
+                    sourceWidth = gpuFrame.width,
+                    sourceHeight = gpuFrame.height,
+                    presentationTimeNs = presentationTimeNs,
+                    ptzTransform = ptzTransform,
+                    transition = transition
+                )
+            )
+            previous?.gpuFrame?.close()
+            scheduleFrame()
+        }
+        return true
+    }
+
+    private fun scheduleFrame() {
+        if (renderQueued.compareAndSet(false, true)) {
+            handler?.post { drainLatestFrame() }
+        }
+    }
+
     fun release(timeoutMs: Long = RELEASE_TIMEOUT_MS) {
-        acceptingFrames.set(false)
-        latestFrame.set(null)
+        synchronized(frameLock) {
+            acceptingFrames.set(false)
+        }
         val released = CountDownLatch(1)
         val glHandler = handler
         if (glHandler != null) {
             glHandler.post {
+                latestFrame.getAndSet(null)?.gpuFrame?.close()
                 releaseInternal()
                 released.countDown()
             }
             released.await(timeoutMs, TimeUnit.MILLISECONDS)
         } else {
+            latestFrame.getAndSet(null)?.gpuFrame?.close()
             releaseInternal()
         }
         thread?.quitSafely()
@@ -106,21 +157,40 @@ class SpatialUpscaleWindowRenderer(
         val frame = latestFrame.getAndSet(null)
         if (frame != null && acceptingFrames.get()) {
             var rendered = false
+            var gpuReferenceReleased = false
             val egl = eglHelper
             val target = eglSurface
             val program = glProgram
             if (egl != null && target != null && program != null) {
                 try {
                     egl.makeCurrent(target)
-                    if (program.render(
-                            frame.bitmap,
-                            outputWidth,
-                            outputHeight,
-                            frame.ptzTransform,
-                            frame.transition,
-                            enableSpatialReconstruction
+                    val drawSucceeded = if (frame.gpuFrame != null) {
+                        frame.gpuFrame.waitForProducerCommands()
+                        program.renderTexture(
+                            sourceTextureId = frame.gpuFrame.textureId,
+                            sourceWidth = frame.sourceWidth,
+                            sourceHeight = frame.sourceHeight,
+                            outputWidth = outputWidth,
+                            outputHeight = outputHeight,
+                            ptzTransform = frame.ptzTransform,
+                            transition = frame.transition,
+                            enableSpatialReconstruction = enableSpatialReconstruction
                         )
-                    ) {
+                    } else {
+                        frame.bitmap?.let {
+                            program.render(
+                                it,
+                                outputWidth,
+                                outputHeight,
+                                frame.ptzTransform,
+                                frame.transition,
+                                enableSpatialReconstruction
+                            )
+                        } ?: false
+                    }
+                    frame.gpuFrame?.releaseAfterCurrentGlCommands()
+                    gpuReferenceReleased = frame.gpuFrame != null
+                    if (drawSucceeded) {
                         egl.setPresentationTime(target, frame.presentationTimeNs)
                         if (egl.swapBuffers(target)) {
                             rendered = true
@@ -130,7 +200,10 @@ class SpatialUpscaleWindowRenderer(
                     Log.e(TAG, "Recording GL render failed", e)
                 }
             }
+            if (!gpuReferenceReleased) frame.gpuFrame?.close()
             onFrameRendered(rendered)
+        } else {
+            frame?.gpuFrame?.close()
         }
 
         if (latestFrame.get() != null && acceptingFrames.get()) {

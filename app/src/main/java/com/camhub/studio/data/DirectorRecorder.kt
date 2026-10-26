@@ -18,6 +18,7 @@ import android.util.Log
 import android.view.Surface
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
+import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.gl.SpatialUpscaleWindowRenderer
 import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.HybridPtzController
@@ -500,6 +501,33 @@ class DirectorRecorder @Inject constructor(
             frameWriteInFlight.set(false)
             Log.w(TAG, "Frame write rejected: ${e.message}")
         }
+    }
+
+    /**
+     * Queues a decoder-owned shared texture directly to the encoder GL context. On true, the
+     * renderer owns [frame] and releases it after a GPU fence; on false, ownership stays here.
+     */
+    fun onSharedGpuFrame(
+        frame: SharedGpuVideoFrame,
+        ptzTransform: HubPtzTransform = HybridPtzController.IDENTITY_TRANSFORM
+    ): Boolean {
+        if (!_recordingInfo.value.isRecording || _recordingInfo.value.isPaused || stopRequested) return false
+        if (!frameWriteInFlight.compareAndSet(false, true)) {
+            noteDroppedRecordFrame()
+            return false
+        }
+        val presentationTimeNs = recordingPresentationTimeNs(System.nanoTime())
+        val glRenderer = spatialUpscaleRenderer
+        if (presentationTimeNs == null || glRenderer == null) {
+            frameWriteInFlight.set(false)
+            return false
+        }
+        val accepted = glRenderer.renderTexture(frame, presentationTimeNs, ptzTransform)
+        if (!accepted) {
+            frameWriteInFlight.set(false)
+            noteDroppedRecordFrame()
+        }
+        return accepted
     }
 
     private fun drawFrameToSurface(

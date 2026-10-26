@@ -1,0 +1,46 @@
+name: Desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "protocol/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - ".github/workflows/desktop-packages.yml"
+
+jobs:
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :protocol:test :desktop:test :desktop:packageMacApp
+      - run: ditto -c -k --keepParent "desktop/build/package/macos/CamHub Desktop.app" "desktop/build/package/CamHub-Desktop-macOS-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CamHub-Desktop-macOS-arm64
+          path: desktop/build/package/CamHub-Desktop-macOS-arm64.zip
+
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - uses: gradle/actions/setup-gradle@v4
+      - run: .\gradlew.bat :protocol:test :desktop:test :desktop:packageWindowsExe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CamHub-Desktop-Windows-x64
+          path: desktop/build/package/windows/*.exe

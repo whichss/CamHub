@@ -21,3 +21,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "camera"
 include(":app")
+include(":protocol")
+include(":desktop")

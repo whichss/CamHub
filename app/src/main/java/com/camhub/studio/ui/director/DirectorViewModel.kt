@@ -22,6 +22,7 @@ import com.camhub.studio.data.capability.PgmRecordingPolicy
 import com.camhub.studio.data.capability.RuntimePressure
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
+import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.ptz.HybridPtzState
 import com.camhub.studio.data.ptz.HybridPtzController
 import com.camhub.studio.data.ptz.PtzMode
@@ -94,6 +95,9 @@ class DirectorViewModel @Inject constructor(
     private var lastPgmBitmap: Bitmap? = null
     private var lastPgmCameraName: String? = null
     private val pgmRecordingDispatcher = PgmRecordingFrameDispatcher(recorder)
+    private val sharedGpuFrameListener: (String, SharedGpuVideoFrame) -> Unit = { cameraName, frame ->
+        handleSharedGpuFrame(cameraName, frame)
+    }
     private val hubTriggeredRecordingNames = mutableSetOf<String>()
     private var transitionJob: Job? = null
     private val imageBitmapCache = IdentityHashMap<Bitmap, ImageBitmap>()
@@ -129,6 +133,7 @@ class DirectorViewModel @Inject constructor(
     }
 
     init {
+        streamClient.onSharedGpuFrame = sharedGpuFrameListener
         deviceMonitor.startMonitoring()
         externalDisplayManager.startListening()
         audioStreamClient.onMixedPcm = recorder::offerMixedAudio
@@ -346,7 +351,8 @@ class DirectorViewModel @Inject constructor(
                     pgmRecordingDispatcher.dispatch(
                         recording = recorder.recordingInfo.value.isRecording,
                         camera = pgmCam.name,
-                        frameSequence = pgmStream.pipelineLatency?.frameSequence ?: pgmStream.frameSequence,
+                        frameSequence = pgmStream.decoderFrameSequence.takeIf { it > 0L }
+                            ?: pgmStream.frameSequence,
                         bitmap = pgmBitmap,
                         ptzTransform = ptzTransform,
                         transition = transition
@@ -1426,6 +1432,9 @@ class DirectorViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        if (streamClient.onSharedGpuFrame === sharedGpuFrameListener) {
+            streamClient.onSharedGpuFrame = null
+        }
         transitionJob?.cancel()
         ptzCommandJobs.values.forEach { it.cancel() }
         ptzCommandJobs.clear()
@@ -1452,6 +1461,27 @@ class DirectorViewModel @Inject constructor(
         audioStreamClient.disconnectAll()
         audioStreamClient.onMixedPcm = null
         imageBitmapCache.clear()
+    }
+
+    private fun handleSharedGpuFrame(cameraName: String, frame: SharedGpuVideoFrame) {
+        val state = _uiState.value
+        val pgmCamera = state.cameras.getOrNull(state.pgmCameraIndex)
+        val transitionActive = state.transitionProgress > 0f &&
+            state.selectedTransition != TransitionType.CUT
+        val recording = recorder.recordingInfo.value.let { it.isRecording && !it.isPaused }
+        if (pgmCamera?.name != cameraName || !recording || transitionActive) {
+            frame.close()
+            return
+        }
+
+        val accepted = pgmRecordingDispatcher.dispatchGpu(
+            recording = true,
+            camera = cameraName,
+            frameSequence = frame.frameSequence,
+            frame = frame,
+            ptzTransform = HybridPtzController.hubTransform(pgmCamera.ptzState)
+        )
+        if (!accepted) frame.close()
     }
 
     private fun Bitmap.asCachedImageBitmap(): ImageBitmap {

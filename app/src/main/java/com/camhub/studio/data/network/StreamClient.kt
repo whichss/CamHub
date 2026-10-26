@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.camhub.studio.data.LowLatencyWifiLock
 import com.camhub.studio.data.gl.DecoderGlRenderer
+import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.metrics.LatencyPercentiles
 import com.camhub.studio.data.metrics.FrameSinkLatencyBreakdown
 import com.camhub.studio.data.metrics.PipelineLatencyBreakdown
@@ -21,10 +22,12 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.io.DataInputStream
 import com.camhub.studio.data.StreamingConfig
 import java.net.DatagramSocket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -54,6 +57,7 @@ data class CameraStreamState(
     val actualFps: Int = 0,
     val ingressFps: Int = 0,
     val frameSequence: Long = 0,
+    val decoderFrameSequence: Long = 0,
     val videoTransport: VideoTransport = VideoTransport.NONE,
     val udpPacketsReceived: Long = 0,
     val udpCompletedFrames: Long = 0,
@@ -87,6 +91,9 @@ class StreamClient @Inject constructor(
         private const val MAX_PENDING_FRAME_TIMINGS = 120
         private const val DEFAULT_MULTIVIEW_FPS = 10
         private const val UDP_WATCHDOG_INTERVAL_MS = 250L
+        private const val MAX_RECEIVE_TO_DECODE_MS = 120L
+        private const val MAX_CAPTURE_TO_DECODE_MS = 180L
+        private const val KEY_FRAME_REQUEST_COOLDOWN_MS = 250L
     }
 
     private data class H264FrameMeta(
@@ -128,6 +135,10 @@ class StreamClient @Inject constructor(
     private val _streams = MutableStateFlow<Map<String, CameraStreamState>>(emptyMap())
     val streams: StateFlow<Map<String, CameraStreamState>> = _streams.asStateFlow()
 
+    /** Receives ownership of a GPU frame lease; listeners must release every accepted frame. */
+    @Volatile
+    var onSharedGpuFrame: ((cameraName: String, frame: SharedGpuVideoFrame) -> Unit)? = null
+
     private val streamJobs = ConcurrentHashMap<String, Job>()
     private val udpReceivers = ConcurrentHashMap<String, UdpVideoReceiver>()
     private val udpWatchdogJobs = ConcurrentHashMap<String, Job>()
@@ -140,6 +151,8 @@ class StreamClient @Inject constructor(
     private val lastIngressFpsTimeMap = ConcurrentHashMap<String, AtomicLong>()
     private val droppedFrameMap = ConcurrentHashMap<String, AtomicLong>()
     private val decodeErrorMap = ConcurrentHashMap<String, AtomicLong>()
+    private val awaitingKeyFrameMap = ConcurrentHashMap<String, AtomicBoolean>()
+    private val lastKeyFrameRequestAtMap = ConcurrentHashMap<String, AtomicLong>()
     private val latestFrameSentAtWallMsMap = ConcurrentHashMap<String, AtomicLong>()
     private val latestFrameRotationMap = ConcurrentHashMap<String, AtomicLong>()
     private val pendingFrameTimings = ConcurrentHashMap<String, ConcurrentHashMap<Long, PendingFrameTiming>>()
@@ -154,6 +167,7 @@ class StreamClient @Inject constructor(
     private val decoders = ConcurrentHashMap<String, H264Decoder>()
     private val glRenderers = ConcurrentHashMap<String, DecoderGlRenderer>()
     private val renderFpsLimits = ConcurrentHashMap<String, Int>()
+    private val decoderDispatchers = ConcurrentHashMap<String, ExecutorCoroutineDispatcher>()
     private val wifiLock = LowLatencyWifiLock(context, "CamHubDirectorStream")
 
     fun connectToStream(
@@ -171,6 +185,7 @@ class StreamClient @Inject constructor(
         streamJobs.remove(cameraName)?.cancel()
         udpReceivers.remove(cameraName)?.stop()
         udpWatchdogJobs.remove(cameraName)?.cancel()
+        decoderDispatchers.remove(cameraName)?.close()
         glRenderers.remove(cameraName)?.release()
         decoders.remove(cameraName)?.release()
 
@@ -183,6 +198,8 @@ class StreamClient @Inject constructor(
         lastIngressFpsTimeMap[cameraName] = AtomicLong(System.currentTimeMillis())
         droppedFrameMap[cameraName] = AtomicLong(0)
         decodeErrorMap[cameraName] = AtomicLong(0)
+        awaitingKeyFrameMap[cameraName] = AtomicBoolean(false)
+        lastKeyFrameRequestAtMap[cameraName] = AtomicLong(0L)
         latestFrameSentAtWallMsMap[cameraName] = AtomicLong(0)
         latestFrameRotationMap[cameraName] = AtomicLong(0)
         pendingFrameTimings[cameraName] = ConcurrentHashMap()
@@ -256,6 +273,7 @@ class StreamClient @Inject constructor(
                 streamJobs.remove(cameraName)
                 glRenderers.remove(cameraName)?.release()
                 renderFpsLimits.remove(cameraName)
+                decoderDispatchers.remove(cameraName)?.close()
                 decoders.remove(cameraName)?.release()
                 bytesReceivedMap.remove(cameraName)
                 lastBitrateTimeMap.remove(cameraName)
@@ -266,6 +284,8 @@ class StreamClient @Inject constructor(
                 lastIngressFpsTimeMap.remove(cameraName)
                 droppedFrameMap.remove(cameraName)
                 decodeErrorMap.remove(cameraName)
+                awaitingKeyFrameMap.remove(cameraName)
+                lastKeyFrameRequestAtMap.remove(cameraName)
                 latestFrameSentAtWallMsMap.remove(cameraName)
                 latestFrameRotationMap.remove(cameraName)
                 pendingFrameTimings.remove(cameraName)
@@ -307,6 +327,7 @@ class StreamClient @Inject constructor(
         streamJobs.remove(cameraName)?.cancel()
         udpReceivers.remove(cameraName)?.stop()
         udpWatchdogJobs.remove(cameraName)?.cancel()
+        decoderDispatchers.remove(cameraName)?.close()
         glRenderers.remove(cameraName)?.release()
         decoders.remove(cameraName)?.release()
         initializeTracking(cameraName)
@@ -324,7 +345,7 @@ class StreamClient @Inject constructor(
             }
         }
 
-        val processorJob = scope.launch(Dispatchers.Default, start = CoroutineStart.LAZY) {
+        val processorJob = scope.launch(decoderDispatcher(cameraName), start = CoroutineStart.LAZY) {
             for (frame in frameQueue) {
                 val plaintext = try {
                     udpCipher?.decrypt(frame.bytes) ?: frame.bytes
@@ -432,6 +453,24 @@ class StreamClient @Inject constructor(
             { socket -> selectedNetwork.bindSocket(socket) }
         }
 
+    private fun decoderDispatcher(cameraName: String): ExecutorCoroutineDispatcher =
+        decoderDispatchers.computeIfAbsent(cameraName) {
+            val safeName = cameraName
+                .replace(Regex("[^A-Za-z0-9_-]"), "_")
+                .take(28)
+            Executors.newSingleThreadExecutor { task ->
+                Thread(
+                    {
+                        android.os.Process.setThreadPriority(
+                            android.os.Process.THREAD_PRIORITY_DISPLAY
+                        )
+                        task.run()
+                    },
+                    "HubVideoDecode-$safeName"
+                ).apply { isDaemon = true }
+            }.asCoroutineDispatcher()
+        }
+
     private fun initializeTracking(cameraName: String) {
         bytesReceivedMap[cameraName] = AtomicLong(0)
         lastBitrateTimeMap[cameraName] = AtomicLong(System.currentTimeMillis())
@@ -442,6 +481,8 @@ class StreamClient @Inject constructor(
         lastIngressFpsTimeMap[cameraName] = AtomicLong(System.currentTimeMillis())
         droppedFrameMap[cameraName] = AtomicLong(0)
         decodeErrorMap[cameraName] = AtomicLong(0)
+        awaitingKeyFrameMap[cameraName] = AtomicBoolean(false)
+        lastKeyFrameRequestAtMap[cameraName] = AtomicLong(0L)
         latestFrameSentAtWallMsMap[cameraName] = AtomicLong(0)
         latestFrameRotationMap[cameraName] = AtomicLong(0)
         pendingFrameTimings[cameraName] = ConcurrentHashMap()
@@ -461,20 +502,49 @@ class StreamClient @Inject constructor(
         frameQueue: Channel<ReceivedFrame>,
         frame: ReceivedFrame
     ) {
-        if (isConfigFrame(frame.bytes)) {
-            dropQueuedFrames(cameraName, frameQueue)
-            if (frameQueue.trySend(frame).isFailure) noteDroppedFrame(cameraName)
-            return
-        }
+        // UDP payloads are still encrypted here, so frame flags are inspected only
+        // after decryption on the processor thread.
         if (frameQueue.trySend(frame).isSuccess) return
-        if (frameQueue.tryReceive().getOrNull() != null) noteDroppedFrame(cameraName)
+        if (frameQueue.tryReceive().getOrNull() != null) {
+            noteDroppedFrame(cameraName)
+            enterKeyFrameRecovery(cameraName, "udp_decoder_queue_overflow")
+        }
         if (frameQueue.trySend(frame).isFailure) noteDroppedFrame(cameraName)
+    }
+
+    private fun enterKeyFrameRecovery(cameraName: String, reason: String) {
+        val waiting = awaitingKeyFrameMap
+            .getOrPut(cameraName) { AtomicBoolean(false) }
+        if (waiting.compareAndSet(false, true)) {
+            pendingFrameTimings[cameraName]?.clear()
+            readyAtElapsedByFrame[cameraName]?.clear()
+            readyPipelineByFrame[cameraName]?.clear()
+            Log.d(TAG, "Waiting for recovery key frame from $cameraName: $reason")
+        }
+        requestKeyFrameIfDue(cameraName, reason)
+    }
+
+    private fun requestKeyFrameIfDue(cameraName: String, reason: String) {
+        val now = SystemClock.elapsedRealtime()
+        val lastRequest = lastKeyFrameRequestAtMap
+            .getOrPut(cameraName) { AtomicLong(0L) }
+        while (true) {
+            val previous = lastRequest.get()
+            if (now - previous < KEY_FRAME_REQUEST_COOLDOWN_MS) return
+            if (lastRequest.compareAndSet(previous, now)) {
+                connectionManager.sendCommand(cameraName, "request_key_frame")
+                Log.d(TAG, "Requested key frame from $cameraName: $reason")
+                return
+            }
+        }
     }
 
     private fun resetDecoderStateForReconnect(cameraName: String) {
         glRenderers.remove(cameraName)?.release()
         decoders.remove(cameraName)?.release()
         decodeErrorMap[cameraName]?.set(0)
+        awaitingKeyFrameMap[cameraName]?.set(false)
+        lastKeyFrameRequestAtMap[cameraName]?.set(0L)
         latestFrameSentAtWallMsMap[cameraName]?.set(0)
         latestFrameRotationMap[cameraName]?.set(0)
         pendingFrameTimings[cameraName]?.clear()
@@ -616,7 +686,7 @@ class StreamClient @Inject constructor(
         readFrames: suspend CoroutineScope.(Channel<ReceivedFrame>) -> Unit
     ) = coroutineScope {
         val frameQueue = Channel<ReceivedFrame>(capacity = FRAME_QUEUE_CAPACITY)
-        val processor = launch(Dispatchers.Default) {
+        val processor = launch(decoderDispatcher(cameraName)) {
             for (frame in frameQueue) {
                 processFrame(cameraName, frame)
             }
@@ -646,6 +716,7 @@ class StreamClient @Inject constructor(
 
         if (frameQueue.tryReceive().getOrNull() != null) {
             noteDroppedFrame(cameraName)
+            enterKeyFrameRecovery(cameraName, "decoder_queue_overflow")
         }
 
         val secondTry = frameQueue.trySend(frame)
@@ -676,6 +747,41 @@ class StreamClient @Inject constructor(
     private fun processFrame(cameraName: String, receivedFrame: ReceivedFrame) {
         val decrypted = receivedFrame.bytes
         val meta = parseH264FrameMeta(decrypted) ?: return
+        if (!meta.isConfig) {
+            val queueResidenceMs = SystemClock.elapsedRealtime() - receivedFrame.receivedAtElapsedMs
+            if (queueResidenceMs > MAX_RECEIVE_TO_DECODE_MS && !meta.isKeyFrame) {
+                noteDroppedFrame(cameraName)
+                enterKeyFrameRecovery(cameraName, "late_complete_frame")
+                return
+            }
+            val remoteClockOffsetMs = connectionManager.getRemoteClockOffsetMs(cameraName)
+            val captureAtRemoteWallMs = meta.captureAtWallMs
+            if (remoteClockOffsetMs != null && captureAtRemoteWallMs != null) {
+                val captureAgeMs = System.currentTimeMillis() -
+                    captureAtRemoteWallMs + remoteClockOffsetMs
+                if (captureAgeMs > MAX_CAPTURE_TO_DECODE_MS && !meta.isKeyFrame) {
+                    noteDroppedFrame(cameraName)
+                    enterKeyFrameRecovery(cameraName, "capture_deadline_expired")
+                    return
+                }
+            }
+
+            val awaitingKeyFrame = awaitingKeyFrameMap
+                .getOrPut(cameraName) { AtomicBoolean(false) }
+            if (awaitingKeyFrame.get()) {
+                if (!meta.isKeyFrame) {
+                    noteDroppedFrame(cameraName)
+                    requestKeyFrameIfDue(cameraName, "waiting_for_key_frame")
+                    return
+                }
+                decoders[cameraName]?.flushAfterError()
+                pendingFrameTimings[cameraName]?.clear()
+                readyAtElapsedByFrame[cameraName]?.clear()
+                readyPipelineByFrame[cameraName]?.clear()
+                awaitingKeyFrame.set(false)
+                Log.d(TAG, "Decoder recovered at key frame for $cameraName")
+            }
+        }
         val ingressFps = if (meta.isConfig) {
             _streams.value[cameraName]?.ingressFps ?: 0
         } else {
@@ -870,6 +976,23 @@ class StreamClient @Inject constructor(
                 }
                 val surface = glRenderer.surface
                 if (surface != null && decoder.configureSurface(meta.width, meta.height, configData, surface, streamingConfig.lowLatencyDecode)) {
+                    glRenderer.onGpuFrameReady = { gpuFrame ->
+                        val frameTiming = pendingFrameTimings[cameraName]?.get(gpuFrame.presentationTimeUs)
+                        val rotationDegrees = frameTiming?.meta?.rotationDegrees
+                            ?: latestFrameRotationMap[cameraName]?.get()?.toInt()
+                            ?: 0
+                        val listener = onSharedGpuFrame
+                        if (listener == null || rotationDegrees != 0) {
+                            gpuFrame.close()
+                        } else {
+                            try {
+                                listener(cameraName, gpuFrame)
+                            } catch (error: Throwable) {
+                                gpuFrame.close()
+                                Log.e(TAG, "GPU frame listener failed for $cameraName", error)
+                            }
+                        }
+                    }
                     glRenderer.onBitmapReady = { renderedFrame ->
                         val timing = pendingFrameTimings[cameraName]
                             ?.remove(renderedFrame.presentationTimeUs)
@@ -924,6 +1047,7 @@ class StreamClient @Inject constructor(
                                 droppedFrames = droppedFrameCount(cameraName),
                                 actualFps = actualFps,
                                 ingressFps = previousStream?.ingressFps ?: 0,
+                                decoderFrameSequence = renderedFrame.frameSequence,
                                 frameSequence = nextFrameSequence(cameraName),
                                 videoTransport = previousStream?.videoTransport ?: VideoTransport.NONE,
                                 udpPacketsReceived = previousStream?.udpPacketsReceived ?: 0,
@@ -998,7 +1122,12 @@ class StreamClient @Inject constructor(
             )
             if (!accepted || decoder.lastDecodeFailed) {
                 pendingFrameTimings[cameraName]?.remove(meta.frameSequence)
-                handleDecodeFailure(cameraName, decoder, surfaceMode = true)
+                if (!accepted && !decoder.lastDecodeFailed) {
+                    noteDroppedFrame(cameraName)
+                    enterKeyFrameRecovery(cameraName, "decoder_input_busy")
+                } else {
+                    handleDecodeFailure(cameraName, decoder, surfaceMode = true)
+                }
             } else {
                 decodeErrorMap[cameraName]?.set(0)
             }
@@ -1013,6 +1142,12 @@ class StreamClient @Inject constructor(
             meta.isKeyFrame,
             meta.frameSequence
         )
+        if (!decoder.lastInputAccepted) {
+            pendingFrameTimings[cameraName]?.remove(meta.frameSequence)
+            noteDroppedFrame(cameraName)
+            enterKeyFrameRecovery(cameraName, "decoder_input_busy")
+            return null
+        }
         if (decoder.lastDecodeFailed) {
             pendingFrameTimings[cameraName]?.remove(meta.frameSequence)
             handleDecodeFailure(cameraName, decoder, surfaceMode = false)
@@ -1365,7 +1500,8 @@ class StreamClient @Inject constructor(
      */
     fun setRenderFpsLimit(cameraName: String, fps: Int) {
         val clamped = fps.coerceIn(1, 60)
-        renderFpsLimits[cameraName] = clamped
+        val previous = renderFpsLimits.put(cameraName, clamped)
+        if (previous == clamped) return
         glRenderers[cameraName]?.setOutputFpsLimit(clamped)
     }
 
@@ -1373,6 +1509,7 @@ class StreamClient @Inject constructor(
         streamJobs.remove(cameraName)?.cancel()
         udpReceivers.remove(cameraName)?.stop()
         udpWatchdogJobs.remove(cameraName)?.cancel()
+        decoderDispatchers.remove(cameraName)?.close()
         glRenderers.remove(cameraName)?.release()
         renderFpsLimits.remove(cameraName)
         decoders.remove(cameraName)?.release()
@@ -1385,6 +1522,8 @@ class StreamClient @Inject constructor(
         lastIngressFpsTimeMap.remove(cameraName)
         droppedFrameMap.remove(cameraName)
         decodeErrorMap.remove(cameraName)
+        awaitingKeyFrameMap.remove(cameraName)
+        lastKeyFrameRequestAtMap.remove(cameraName)
         latestFrameSentAtWallMsMap.remove(cameraName)
         latestFrameRotationMap.remove(cameraName)
         pendingFrameTimings.remove(cameraName)
@@ -1396,18 +1535,14 @@ class StreamClient @Inject constructor(
         lastExternalLatencySnapshotTimeMap.remove(cameraName)
         latencyTrackers.remove(cameraName)
         lastLatencySnapshotTimeMap.remove(cameraName)
-        val current = _streams.value.toMutableMap()
-        current.remove(cameraName)
-        _streams.value = current
+        _streams.update { current -> current - cameraName }
         if (streamJobs.isEmpty()) {
             wifiLock.release()
         }
     }
 
     private fun updateStream(cameraName: String, state: CameraStreamState) {
-        val current = _streams.value.toMutableMap()
-        current[cameraName] = state
-        _streams.value = current
+        _streams.update { current -> current + (cameraName to state) }
     }
 
     private fun markStreamReconnecting(cameraName: String) {
@@ -1430,6 +1565,8 @@ class StreamClient @Inject constructor(
         udpReceivers.clear()
         udpWatchdogJobs.values.forEach { it.cancel() }
         udpWatchdogJobs.clear()
+        decoderDispatchers.values.forEach { it.close() }
+        decoderDispatchers.clear()
         glRenderers.values.forEach { it.release() }
         glRenderers.clear()
         decoders.values.forEach { it.release() }
@@ -1443,6 +1580,8 @@ class StreamClient @Inject constructor(
         lastIngressFpsTimeMap.clear()
         droppedFrameMap.clear()
         decodeErrorMap.clear()
+        awaitingKeyFrameMap.clear()
+        lastKeyFrameRequestAtMap.clear()
         latestFrameSentAtWallMsMap.clear()
         latestFrameRotationMap.clear()
         pendingFrameTimings.clear()

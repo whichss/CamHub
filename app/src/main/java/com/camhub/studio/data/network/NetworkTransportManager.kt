@@ -138,6 +138,28 @@ class NetworkTransportManager @Inject constructor(
             ?.firstOrNull { !it.isLoopbackAddress }
     }
 
+    fun broadcastIpv4Address(network: Network?): Inet4Address? {
+        if (network == null) return null
+        val linkAddress = connectivityManager.getLinkProperties(network)
+            ?.linkAddresses
+            ?.firstOrNull { it.address is Inet4Address && !it.address.isLoopbackAddress }
+            ?: return null
+        val address = linkAddress.address.address
+        val prefixLength = linkAddress.prefixLength.coerceIn(0, 32)
+        val value = address.fold(0) { result, byte ->
+            (result shl 8) or (byte.toInt() and 0xff)
+        }
+        val mask = if (prefixLength == 0) 0 else -1 shl (32 - prefixLength)
+        val broadcast = value or mask.inv()
+        val bytes = byteArrayOf(
+            (broadcast ushr 24).toByte(),
+            (broadcast ushr 16).toByte(),
+            (broadcast ushr 8).toByte(),
+            broadcast.toByte()
+        )
+        return InetAddress.getByAddress(bytes) as Inet4Address
+    }
+
     fun localIpAddress(): String =
         localIpv4Address(inUseNetwork ?: preferredNetwork())?.hostAddress ?: "0.0.0.0"
 

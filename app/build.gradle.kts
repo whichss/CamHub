@@ -54,6 +54,8 @@ android {
 }
 
 dependencies {
+    implementation(project(":protocol"))
+
     // Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

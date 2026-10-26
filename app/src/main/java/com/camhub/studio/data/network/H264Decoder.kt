@@ -22,6 +22,7 @@ class H264Decoder {
         private const val TAG = "H264Decoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val TIMEOUT_US = 0L
+        private const val INPUT_TIMEOUT_US = 2_000L
         private const val MAX_DRAINED_OUTPUT_BUFFERS = 16
     }
 
@@ -33,6 +34,8 @@ class H264Decoder {
     private var configured = false
     private var usingSurface = false
     var lastDecodeFailed: Boolean = false
+        private set
+    var lastInputAccepted: Boolean = false
         private set
 
     // Double-buffered bitmaps to avoid UI/decode thread contention
@@ -151,10 +154,11 @@ class H264Decoder {
         val dec = decoder ?: return null
         if (!configured) return null
         lastDecodeFailed = false
+        lastInputAccepted = false
 
         try {
             // Queue input
-            val inputIndex = dec.dequeueInputBuffer(TIMEOUT_US)
+            val inputIndex = dec.dequeueInputBuffer(INPUT_TIMEOUT_US)
             if (inputIndex >= 0) {
                 val inputBuffer = dec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
@@ -163,6 +167,7 @@ class H264Decoder {
                     inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     dec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, flags)
+                    lastInputAccepted = true
                 }
             }
 
@@ -235,10 +240,11 @@ class H264Decoder {
         val dec = decoder ?: return false
         if (!configured || !usingSurface) return false
         lastDecodeFailed = false
+        lastInputAccepted = false
 
         return try {
             // Queue input
-            val inputIndex = dec.dequeueInputBuffer(TIMEOUT_US)
+            val inputIndex = dec.dequeueInputBuffer(INPUT_TIMEOUT_US)
             if (inputIndex >= 0) {
                 val inputBuffer = dec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
@@ -247,6 +253,7 @@ class H264Decoder {
                     inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     dec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, flags)
+                    lastInputAccepted = true
                 }
             }
 
@@ -289,7 +296,7 @@ class H264Decoder {
                     surfaceOutputHasData[i] && i == lastRenderableIndex
                 )
             }
-            true
+            lastInputAccepted
         } catch (e: Exception) {
             lastDecodeFailed = true
             Log.e(TAG, "decodeSurface error", e)
@@ -301,6 +308,7 @@ class H264Decoder {
         return try {
             decoder?.flush()
             lastDecodeFailed = false
+            lastInputAccepted = false
             Log.d(TAG, "Decoder flushed after decode error")
             true
         } catch (e: Exception) {
@@ -392,6 +400,7 @@ class H264Decoder {
         configured = false
         usingSurface = false
         lastDecodeFailed = false
+        lastInputAccepted = false
         try { decoder?.stop() } catch (_: Exception) {}
         try { decoder?.release() } catch (_: Exception) {}
         decoder = null
