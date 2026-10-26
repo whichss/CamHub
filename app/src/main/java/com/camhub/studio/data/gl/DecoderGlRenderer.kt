@@ -452,6 +452,7 @@ class DecoderGlRenderer(
                 GLES30.glDeleteSync(fence)
                 pboFences[index] = 0L
                 pboHasPendingRead[index] = false
+                bitmapReadDroppedCount.incrementAndGet()
             }
         }
 
