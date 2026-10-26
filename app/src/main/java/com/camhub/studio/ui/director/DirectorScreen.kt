@@ -15,9 +15,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -26,7 +28,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.camhub.studio.MainActivity
 import com.camhub.studio.ui.audio.AudioMixerPanel
 import com.camhub.studio.ui.director.components.CameraControlPanel
@@ -36,6 +41,9 @@ import com.camhub.studio.ui.director.components.DeviceManagerPanel
 import com.camhub.studio.ui.director.components.StatusBar
 import com.camhub.studio.ui.director.components.ViewportPanel
 import com.camhub.studio.ui.theme.BackgroundDark
+import com.camhub.studio.ui.theme.ElectricRed
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import kotlinx.coroutines.launch
 
 /**
@@ -371,6 +379,23 @@ fun DirectorScreen(
                         viewModel.sendCameraCommand(command, value, stringValue)
                     }
                 }
+            )
+        }
+
+        uiState.recordingError?.takeIf(String::isNotBlank)?.let { error ->
+            Text(
+                text = "녹화 오류: $error",
+                color = ElectricRed,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .fillMaxWidth(0.82f)
+                    .background(BackgroundDark, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
             )
         }
     }
