@@ -1,6 +1,7 @@
 package com.camhub.studio.data
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmGpuTransitionFrame
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
@@ -11,6 +12,7 @@ class PgmRecordingFrameDispatcher(
     private val recorder: DirectorRecorder
 ) {
     private val frameSequenceGate = FrameSequenceGate()
+    private val sourceArbiter = PgmFrameSourceArbiter()
 
     @Synchronized
     fun dispatch(
@@ -21,8 +23,10 @@ class PgmRecordingFrameDispatcher(
         ptzTransform: HubPtzTransform,
         transition: PgmTransitionFrame?
     ) {
-        if (bitmap.isRecycled || !frameSequenceGate.accept(camera, frameSequence)) return
-        if (recording) recorder.onFrame(bitmap, ptzTransform, transition)
+        if (!recording || bitmap.isRecycled) return
+        if (!sourceArbiter.allowBitmapFallback(camera, SystemClock.elapsedRealtime())) return
+        if (!frameSequenceGate.accept(camera, frameSequence)) return
+        recorder.onFrame(bitmap, ptzTransform, transition)
     }
 
     /** Transfers the lease to the recorder only when it accepts the direct GPU path. */
@@ -39,6 +43,13 @@ class PgmRecordingFrameDispatcher(
             return false
         }
         if (!recorder.onSharedGpuFrame(frame, ptzTransform, gpuTransition)) return false
+        sourceArbiter.noteGpuAccepted(camera, SystemClock.elapsedRealtime())
         return true
+    }
+
+    @Synchronized
+    fun reset() {
+        frameSequenceGate.reset()
+        sourceArbiter.reset()
     }
 }

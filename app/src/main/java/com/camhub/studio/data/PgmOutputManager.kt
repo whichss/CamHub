@@ -144,6 +144,7 @@ class PgmOutputManager(
     )
 
     fun release() {
+        recordingFrames.reset()
         latestGpuFrames.values.forEach { runCatching { it.close() } }
         latestGpuFrames.clear()
         externalBitmapSequenceGate.reset()
