@@ -17,6 +17,32 @@ import org.junit.Assume.assumeNoException
 
 class DesktopPgmObsOutputTest {
     @Test
+    fun `OBS output upscales a 720p PGM frame to the 1080p output ceiling`() {
+        val image = BufferedImage(1280, 720, BufferedImage.TYPE_INT_RGB).apply {
+            createGraphics().also { graphics ->
+                try {
+                    graphics.color = Color(30, 140, 220)
+                    graphics.fillRect(0, 0, width, height)
+                } finally {
+                    graphics.dispose()
+                }
+            }
+        }
+        val output = DesktopPgmObsOutput(frameProvider = { DesktopVideoFrame(image) })
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URI(output.start()).resolve("pgm.mjpg").toURL().openConnection() as HttpURLConnection
+            connection.readTimeout = 3_000
+            val frame = readFrame(DataInputStream(connection.inputStream))
+            assertEquals(1920, frame.width)
+            assertEquals(1080, frame.height)
+        } finally {
+            connection?.disconnect()
+            output.close()
+        }
+    }
+
+    @Test
     fun `browser source carries PGM auto transition even when the source frame is unchanged`() {
         val image = BufferedImage(32, 18, BufferedImage.TYPE_INT_RGB)
         image.createGraphics().let { graphics ->

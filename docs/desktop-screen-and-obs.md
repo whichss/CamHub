@@ -10,8 +10,12 @@ region overlapping the visible CamHub control window; minimize or move the contr
 selected region to avoid capturing CamHub's own controls. The desktop capture can also be started as
 a separate network camera source without consuming one of the four camera slots.
 
-The OBS action exposes the current PGM as a loopback-only multipart MJPEG stream capped at
-1920×1080 and 30 fps. CamHub connects to OBS's local WebSocket server (default port 4455) and adds
+The OBS action exposes the current PGM as a loopback-only multipart MJPEG stream sized to fit within
+1920×1080 at up to 30 fps. Lower-resolution landscape PGM frames are spatially upscaled to the
+1080p output size while preserving aspect ratio; higher-resolution and portrait frames fit inside
+the same ceiling. The scaled image buffer is reused while dimensions stay unchanged, and the
+current scaler uses Java2D bicubic interpolation. CamHub connects to OBS's local WebSocket server
+(default port 4455) and adds
 or updates a `CamHub PGM` built-in Media Source in the current program scene. The source reads the
 `mpjpeg` stream through OBS's FFmpeg media input with buffering set to 0 MB and reconnect delay set
 to 1 second; this avoids the Browser Source rendering path and shortens reconnect waits, but actual

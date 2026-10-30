@@ -38,6 +38,7 @@ class DesktopPgmObsOutput(
     private data class CachedJpeg(val frame: DesktopVideoFrame, val alpha: Float, val bytes: ByteArray)
     private val emptyFrame = DesktopVideoFrame(BufferedImage(320, 180, BufferedImage.TYPE_INT_RGB))
     @Volatile private var cachedJpeg: CachedJpeg? = null
+    private var scaledCanvas: BufferedImage? = null
     @Volatile private var executor: ExecutorService? = null
     @Volatile private var server: HttpServer? = null
 
@@ -95,6 +96,7 @@ class DesktopPgmObsOutput(
         executor?.shutdownNow()
         executor = null
         cachedJpeg = null
+        scaledCanvas = null
     }
 
     private fun sourceUrl(port: Int): String = "http://127.0.0.1:$port/"
@@ -209,13 +211,13 @@ class DesktopPgmObsOutput(
         val sourceWidth = if (swapsDimensions) frame.image.height else frame.image.width
         val sourceHeight = if (swapsDimensions) frame.image.width else frame.image.height
         val scale = minOf(
-            1.0,
             maxWidth.toDouble() / sourceWidth,
             maxHeight.toDouble() / sourceHeight
         )
         val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
         val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
-        val outputImage = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        val outputImage = scaledCanvas?.takeIf { it.width == width && it.height == height }
+            ?: BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { scaledCanvas = it }
         val graphics = outputImage.createGraphics()
         try {
             graphics.color = Color.BLACK
@@ -225,7 +227,7 @@ class DesktopPgmObsOutput(
                 frame = frame,
                 targetWidth = width,
                 targetHeight = height,
-                highQualitySpatialScale = false
+                highQualitySpatialScale = true
             )
             if (alpha > 0f) {
                 graphics.color = Color(0, 0, 0, (alpha * 255).toInt())
