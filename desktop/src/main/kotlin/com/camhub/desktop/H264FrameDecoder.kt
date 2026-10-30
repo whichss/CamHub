@@ -5,6 +5,7 @@ import java.awt.image.BufferedImage
 import java.io.InputStream
 import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import org.bytedeco.javacv.FFmpegFrameGrabber
@@ -61,6 +62,12 @@ class H264FrameDecoder(
         var grabber: FFmpegFrameGrabber? = null
         var convertedImage: BufferedImage? = null
         try {
+            // JavaCV's FFmpegFrameGrabber.start() reads from the input while holding
+            // FFmpeg's process-wide avcodec monitor. Do not enter native initialization
+            // until a keyframe is queued, or a disconnected/slow camera can block every
+            // other encoder and recorder in this JVM indefinitely.
+            if (!input.awaitInitialKeyFrame() || !running.get()) return
+
             val activeConverter = Java2DFrameConverter().also { converter = it }
             val activeGrabber = FFmpegFrameGrabber(input, 0).apply {
                 format = "h264"
@@ -135,6 +142,7 @@ internal class LatestAccessUnitInputStream(
     private val queue = LinkedBlockingDeque<UnitChunk>(CAPACITY)
     private val outputMetadata = ConcurrentLinkedDeque<SubmittedMetadata>()
     private val closed = AtomicBoolean(false)
+    private val initialKeyFrame = CountDownLatch(1)
     private val seekingKeyFrame = AtomicBoolean(false)
     private val droppedFrames = AtomicLong(0)
     private var current = ByteArray(0)
@@ -144,6 +152,7 @@ internal class LatestAccessUnitInputStream(
 
     fun submit(payload: CamHubVideoPayload) {
         if (closed.get() || payload.h264Bytes.isEmpty()) return
+        if (payload.isKeyFrame) initialKeyFrame.countDown()
         val chunk = UnitChunk(payload, submittedAtMs = elapsedMs())
         if (payload.isCodecConfig) {
             queue.removeIf { it.payload?.isCodecConfig == true }
@@ -195,6 +204,16 @@ internal class LatestAccessUnitInputStream(
         enterKeyFrameRecovery()
     }
 
+    fun awaitInitialKeyFrame(): Boolean {
+        return try {
+            initialKeyFrame.await()
+            !closed.get()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
     private fun enterKeyFrameRecovery() {
         seekingKeyFrame.set(true)
         queue.removeIf { it.payload?.isCodecConfig != true }
@@ -230,6 +249,7 @@ internal class LatestAccessUnitInputStream(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        initialKeyFrame.countDown()
         queue.clear()
         outputMetadata.clear()
         queue.offerFirst(UnitChunk(null, closed = true))

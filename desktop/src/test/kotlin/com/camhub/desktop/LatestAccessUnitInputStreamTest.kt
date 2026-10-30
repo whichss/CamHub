@@ -1,11 +1,60 @@
 package com.camhub.desktop
 
 import com.camhub.studio.data.network.CamHubVideoPayload
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LatestAccessUnitInputStreamTest {
+    @Test
+    fun `decoder startup waits for key frame and is released by close`() {
+        val input = LatestAccessUnitInputStream()
+        val waiting = CountDownLatch(1)
+        val result = AtomicReference<Boolean>()
+        val worker = Thread {
+            waiting.countDown()
+            result.set(input.awaitInitialKeyFrame())
+        }.apply {
+            isDaemon = true
+            start()
+        }
+
+        assertTrue(waiting.await(1, TimeUnit.SECONDS))
+        worker.join(100)
+        assertTrue("decoder should not initialize FFmpeg without a key frame", worker.isAlive)
+
+        input.close()
+        worker.join(1_000)
+        assertFalse("closing the stream should release the startup wait", worker.isAlive)
+        assertFalse(requireNotNull(result.get()))
+    }
+
+    @Test
+    fun `queued key frame releases decoder startup`() {
+        val input = LatestAccessUnitInputStream()
+        val waiting = CountDownLatch(1)
+        val result = AtomicReference<Boolean>()
+        val worker = Thread {
+            waiting.countDown()
+            result.set(input.awaitInitialKeyFrame())
+        }.apply {
+            isDaemon = true
+            start()
+        }
+
+        assertTrue(waiting.await(1, TimeUnit.SECONDS))
+        input.submit(frame(sequence = 1, capturedAt = 1, keyFrame = true))
+        worker.join(1_000)
+        assertFalse("key frame should release the startup wait", worker.isAlive)
+        assertTrue(requireNotNull(result.get()))
+        input.close()
+    }
+
     @Test
     fun `queue overflow discards delta backlog and resumes at key frame`() {
         val now = 10_000L
