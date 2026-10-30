@@ -22,6 +22,9 @@ class CamHubControlMessageTest {
             type = "hello_ack",
             deviceName = "CamHub iOS",
             sessionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            tcpStreamPort = 50_001,
+            tcpAuthToken = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            supportsAuthenticatedTcp = true,
             udpStreamPort = 50_000
         )
     )
@@ -47,7 +50,10 @@ class CamHubControlMessageTest {
 
     private fun assertFixture(name: String, expected: CamHubControlMessage) {
         val wireJson = WireGoldenVectors.string(name)
-        assertEquals(wireJson, json.encodeToString(expected))
+        assertEquals(
+            json.parseToJsonElement(wireJson),
+            json.parseToJsonElement(json.encodeToString(expected))
+        )
         assertEquals(expected, json.decodeFromString<CamHubControlMessage>(wireJson))
     }
 }

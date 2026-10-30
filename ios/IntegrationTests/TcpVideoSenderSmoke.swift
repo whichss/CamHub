@@ -2,6 +2,66 @@ import CamHubCore
 import Foundation
 import Network
 
+private final class TcpVideoSmokeReceiver: @unchecked Sendable {
+    private let connection: NWConnection
+    private let cipher: CamHubFrameCipher
+    private let stateLock = NSLock()
+    private let configReceived: DispatchSemaphore
+    private let keyFrameReceived: DispatchSemaphore
+    private var receiveBuffer = Data()
+    private var received: [CamHubVideoPayload] = []
+    private var receiveError: Error?
+
+    init(connection: NWConnection, cipher: CamHubFrameCipher,
+         configReceived: DispatchSemaphore, keyFrameReceived: DispatchSemaphore) {
+        self.connection = connection
+        self.cipher = cipher
+        self.configReceived = configReceived
+        self.keyFrameReceived = keyFrameReceived
+    }
+
+    var frames: [CamHubVideoPayload] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return received
+    }
+
+    var failure: Error? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return receiveError
+    }
+
+    func start() { receiveNext() }
+
+    private func receiveNext() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) {
+            [weak self] data, _, complete, error in
+            guard let self else { return }
+            self.stateLock.lock()
+            if let error { self.receiveError = error }
+            if let data, !data.isEmpty { self.receiveBuffer.append(data) }
+            var decodedFrames: [CamHubVideoPayload] = []
+            do {
+                while let framed = try CamHubTcpFrameCodec.decodeNext(from: &self.receiveBuffer) {
+                    guard let payload = try? self.cipher.decrypt(framed),
+                          let frame = CamHubVideoPayloadCodec.decode(payload) else { continue }
+                    self.received.append(frame)
+                    decodedFrames.append(frame)
+                }
+            } catch {
+                self.receiveError = error
+            }
+            self.stateLock.unlock()
+            decodedFrames.forEach { frame in
+                if frame.isCodecConfig { self.configReceived.signal() }
+                if frame.isKeyFrame { self.keyFrameReceived.signal() }
+            }
+            if error == nil && !complete { self.receiveNext() }
+        }
+    }
+}
+
 struct CamHubEncodedAccessUnit {
     let bytes: Data
     let isKeyFrame: Bool
@@ -22,7 +82,6 @@ struct TcpVideoSenderSmoke {
         let keyFrameReceived = DispatchSemaphore(value: 0)
         let errorLock = NSLock()
         var listenerResult: Result<UInt16, Error>?
-        var received: [CamHubVideoPayload] = []
         var receiveError: Error?
 
         sender.onKeyFrameRequired = { }
@@ -79,34 +138,14 @@ struct TcpVideoSenderSmoke {
             throw SmokeError.authorizationTokenNotSent
         }
 
-        var receiveBuffer = Data()
         let receiveCipher = try CamHubFrameCipher(key: key)
-        func receiveNext() {
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) {
-                data, _, complete, error in
-                errorLock.lock()
-                if let error { receiveError = error }
-                if let data, !data.isEmpty { receiveBuffer.append(data) }
-                var decodedFrames: [CamHubVideoPayload] = []
-                do {
-                    while let framed = try CamHubTcpFrameCodec.decodeNext(from: &receiveBuffer) {
-                        guard let payload = try? receiveCipher.decrypt(framed),
-                              let frame = CamHubVideoPayloadCodec.decode(payload) else { continue }
-                        received.append(frame)
-                        decodedFrames.append(frame)
-                    }
-                } catch {
-                    receiveError = error
-                }
-                errorLock.unlock()
-                decodedFrames.forEach { frame in
-                    if frame.isCodecConfig { configReceived.signal() }
-                    if frame.isKeyFrame { keyFrameReceived.signal() }
-                }
-                if error == nil && !complete { receiveNext() }
-            }
-        }
-        receiveNext()
+        let receiver = TcpVideoSmokeReceiver(
+            connection: connection,
+            cipher: receiveCipher,
+            configReceived: configReceived,
+            keyFrameReceived: keyFrameReceived
+        )
+        receiver.start()
 
         guard configReceived.wait(timeout: .now() + 3) == .success else {
             throw SmokeError.codecConfigNotReceived
@@ -124,10 +163,11 @@ struct TcpVideoSenderSmoke {
             throw SmokeError.keyFrameNotReceived
         }
 
+        let finalFrames = receiver.frames
         errorLock.lock()
-        let finalFrames = received
-        let finalError = receiveError
+        let connectionError = receiveError
         errorLock.unlock()
+        let finalError = receiver.failure ?? connectionError
         guard finalError == nil,
               finalFrames.contains(where: { $0.isCodecConfig && $0.h264Bytes == config.bytes }),
               finalFrames.contains(where: { $0.isKeyFrame && $0.frameSequence == 1 &&

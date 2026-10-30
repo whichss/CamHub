@@ -392,7 +392,34 @@ final class CamHubWireProtocolTests: XCTestCase {
         XCTAssertEqual(message.type, "hello_ack")
         XCTAssertEqual(message.deviceName, "CamHub iOS")
         XCTAssertEqual(message.sessionKey, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        XCTAssertEqual(message.tcpStreamPort, 50_001)
+        XCTAssertEqual(message.tcpAuthToken, "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=")
+        XCTAssertTrue(message.supportsAuthenticatedTcp)
         XCTAssertEqual(message.udpStreamPort, 50_000)
+    }
+
+    func testCameraHelloAcknowledgementEncodingMatchesSharedAndroidWireFixture() throws {
+        let message = CamHubControlMessage(
+            type: "hello_ack",
+            deviceName: "CamHub iOS",
+            tcpStreamPort: 50_001,
+            sessionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            tcpAuthToken: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+            udpStreamPort: 50_000,
+            supportsAuthenticatedTcp: true
+        )
+        let expected = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(goldenFixture("control_hello_ack").utf8)) as? NSDictionary
+        )
+        let actual = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(message)) as? NSDictionary
+        )
+        let actualRequiredFields = NSMutableDictionary()
+        for key in expected.allKeys {
+            actualRequiredFields[key] = actual[key]
+        }
+        XCTAssertEqual(actualRequiredFields, expected)
+        XCTAssertEqual(try JSONDecoder().decode(CamHubControlMessage.self, from: JSONSerialization.data(withJSONObject: actual)), message)
     }
 
     func testControlMessageDecodesAndroidUdpSubscription() throws {
