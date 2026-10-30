@@ -17,9 +17,10 @@ a changed fingerprint still requires confirmation. PIN, fingerprint, or initial 
 do not trigger retries; manually disconnecting or backgrounding the app clears the in-memory retry
 credentials and fingerprint trust. The app stops hub connections when
 backgrounded. Landscape places the multiview on the left and camera controls on the right; portrait
-places controls below the video. The iOS app target builds for arm64/iOS 16 in both Debug and
-Release configurations. Discovery, pairing, decoding, rotation, CUT, four-camera load and recovery
-have not been validated on iOS devices or against Android/desktop cameras.
+places controls below the video. The arm64/iOS 16 unsigned Release app target is verified by
+GitHub Actions; a Debug app build is not yet verified in this environment. Discovery, pairing,
+decoding, rotation, CUT, four-camera load and recovery have not been validated on iOS devices or
+against Android/desktop cameras.
 The UDP receiver also has a macOS loopback smoke test in `ios/IntegrationTests/UDPReceiverSmoke.swift`;
 it exercises the same Network.framework receiver with IPv4 and IPv6 loopback, reordered encrypted
 fragments and expiration of an incomplete frame, but does not

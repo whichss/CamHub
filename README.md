@@ -73,7 +73,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 네트워크가 인코더보다 느릴 때 오래된 영상이 쌓이지 않도록 송신 대기열 제한
 - IPv4-mapped/native IPv6 UDP 목적지와 링크 로컬 주소 scope 처리를 구현했고, 공통 wire fixture로 프로토콜 형식을 검증
 - 인증 토큰으로 허브를 확인하는 AES-GCM TCP 영상 폴백 구현 및 loopback 스모크 검증 완료
-- SRT 폴백, 서명·설치 및 실기기 상호운용 검증은 미완료. `8d4c2ba`의 iOS Release 앱 타깃은 GitHub Actions에서 빌드 성공
+- SRT 폴백, 서명·설치 및 실기기 상호운용 검증은 미완료. arm64/iOS 16 unsigned Release 앱 타깃은 GitHub Actions에서 빌드 검증됨
 
 ### 카메라 모드
 
