@@ -175,9 +175,14 @@ class DesktopUdpMultiCameraPathTest {
                 framePackets.forEach { senders[1].send(DatagramPacket(it, it.size, loopback, ports[1])) }
                 Thread.sleep(50)
             }
-            // Give each live decoder time to finish opening its input before a
-            // fresh recovery keyframe arrives, as it would after startup latency.
-            Thread.sleep(250)
+            // Native decoder startup time varies across CI hosts. Wait for both
+            // decoders to finish opening before sending the fresh recovery IDR.
+            decoders.forEachIndexed { camera, decoder ->
+                assertTrue(
+                    "camera $camera decoder did not initialize",
+                    decoder.awaitInitialized(5, TimeUnit.SECONDS)
+                )
+            }
             listOf(0, 1).forEach { camera ->
                 packetSets[camera].last().forEach {
                     senders[camera].send(DatagramPacket(it, it.size, loopback, ports[camera]))

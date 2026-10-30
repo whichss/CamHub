@@ -6,6 +6,7 @@ import java.io.InputStream
 import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import org.bytedeco.javacv.FFmpegFrameGrabber
@@ -23,6 +24,7 @@ class H264FrameDecoder(
     private val input = LatestAccessUnitInputStream()
     private val running = AtomicBoolean(false)
     private val decoderInitialized = AtomicBoolean(false)
+    private val initializationCompleted = CountDownLatch(1)
     private val threadName = "DesktopH264Decode-" + cameraName
         .replace(Regex("[^A-Za-z0-9_-]"), "_")
         .take(30)
@@ -41,6 +43,10 @@ class H264FrameDecoder(
 
     fun submit(payload: CamHubVideoPayload) {
         if (running.get()) input.submit(payload)
+    }
+
+    internal fun awaitInitialized(timeout: Long, unit: TimeUnit): Boolean {
+        return initializationCompleted.await(timeout, unit) && decoderInitialized.get()
     }
 
     fun recoverFromDiscontinuity() {
@@ -84,6 +90,7 @@ class H264FrameDecoder(
             // sample here only consumes frames from the bounded startup queue.
             activeGrabber.start(false)
             decoderInitialized.set(true)
+            initializationCompleted.countDown()
             while (running.get()) {
                 val frame = activeGrabber.grabImage() ?: continue
                 val metadata = input.takeOutputMetadata() ?: continue
@@ -104,6 +111,7 @@ class H264FrameDecoder(
             runCatching { grabber?.release() }
             converter?.close()
             decoderInitialized.set(false)
+            initializationCompleted.countDown()
             running.set(false)
             synchronized(this) {
                 if (thread === Thread.currentThread()) thread = null
