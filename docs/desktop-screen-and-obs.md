@@ -14,8 +14,9 @@ The OBS action exposes the current PGM as a loopback-only multipart MJPEG stream
 1920×1080 at up to 30 fps. Lower-resolution landscape PGM frames are spatially upscaled to the
 1080p output size while preserving aspect ratio; higher-resolution and portrait frames fit inside
 the same ceiling. The scaled image buffer is reused while dimensions stay unchanged, and the
-current scaler uses Java2D bicubic interpolation. CamHub connects to OBS's local WebSocket server
-(default port 4455) and adds
+current scaler uses Java2D bicubic interpolation. The JPEG writer and its growing byte buffer are
+reused while OBS output is running. CamHub connects to OBS's local WebSocket server (default port
+4455) and adds
 or updates a `CamHub PGM` built-in Media Source in the current program scene. The source reads the
 `mpjpeg` stream through OBS's FFmpeg media input with buffering set to 0 MB and reconnect delay set
 to 1 second; this avoids the Browser Source rendering path and shortens reconnect waits, but actual

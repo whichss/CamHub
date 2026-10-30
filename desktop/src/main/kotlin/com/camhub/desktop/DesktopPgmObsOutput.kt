@@ -16,7 +16,10 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import javax.imageio.IIOImage
 import javax.imageio.ImageIO
+import javax.imageio.ImageWriter
+import javax.imageio.stream.MemoryCacheImageOutputStream
 
 /** Local-only OBS PGM output. Frames are sent as bounded-rate multipart MJPEG. */
 class DesktopPgmObsOutput(
@@ -39,6 +42,8 @@ class DesktopPgmObsOutput(
     private val emptyFrame = DesktopVideoFrame(BufferedImage(320, 180, BufferedImage.TYPE_INT_RGB))
     @Volatile private var cachedJpeg: CachedJpeg? = null
     private var scaledCanvas: BufferedImage? = null
+    private val jpegBuffer = ByteArrayOutputStream(512 * 1024)
+    private var jpegWriter: ImageWriter? = null
     @Volatile private var executor: ExecutorService? = null
     @Volatile private var server: HttpServer? = null
 
@@ -97,6 +102,9 @@ class DesktopPgmObsOutput(
         executor = null
         cachedJpeg = null
         scaledCanvas = null
+        jpegWriter?.dispose()
+        jpegWriter = null
+        jpegBuffer.reset()
     }
 
     private fun sourceUrl(port: Int): String = "http://127.0.0.1:$port/"
@@ -236,10 +244,20 @@ class DesktopPgmObsOutput(
         } finally {
             graphics.dispose()
         }
-        val encoded = ByteArrayOutputStream().use { bytes ->
-            check(ImageIO.write(outputImage, "jpg", bytes)) { "JPEG writer unavailable" }
-            bytes.toByteArray()
+        val writer = jpegWriter ?: ImageIO.getImageWritersByFormatName("jpeg").asSequence()
+            .firstOrNull()
+            ?.also { jpegWriter = it }
+            ?: error("JPEG writer unavailable")
+        jpegBuffer.reset()
+        val imageOutput = MemoryCacheImageOutputStream(jpegBuffer)
+        try {
+            writer.output = imageOutput
+            writer.write(null, IIOImage(outputImage, null, null), writer.defaultWriteParam)
+            imageOutput.flush()
+        } finally {
+            imageOutput.close()
         }
+        val encoded = jpegBuffer.toByteArray()
         cachedJpeg = CachedJpeg(frame, alpha, encoded)
         return encoded
     }
