@@ -65,7 +65,21 @@ jobs:
             exit "$result"
           fi
 
-      - name: Build unsigned iOS app target
+      - name: Build unsigned iOS Debug app target
+        run: >-
+          xcodebuild
+          -project ios/CamHubCameraApp.xcodeproj
+          -scheme CamHubCamera
+          -configuration Debug
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/CamHub-iOS-DerivedData"
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/CamHub-iOS-Packages"
+          -packageCachePath "$RUNNER_TEMP/CamHub-iOS-PackageCache"
+          CODE_SIGNING_ALLOWED=NO
+          build
+
+      - name: Build unsigned iOS Release app target
         run: >-
           xcodebuild
           -project ios/CamHubCameraApp.xcodeproj
