@@ -43,6 +43,38 @@ class DesktopPgmObsOutputTest {
     }
 
     @Test
+    fun `OBS output preserves the selected PGM pan and zoom framing`() {
+        val image = BufferedImage(640, 360, BufferedImage.TYPE_INT_RGB).apply {
+            createGraphics().also { graphics ->
+                try {
+                    graphics.color = Color.RED
+                    graphics.fillRect(0, 0, width / 2, height)
+                    graphics.color = Color.BLUE
+                    graphics.fillRect(width / 2, 0, width / 2, height)
+                } finally {
+                    graphics.dispose()
+                }
+            }
+        }
+        val frame = DesktopVideoFrame(
+            image = image,
+            framing = DesktopFraming(zoom = 2.0, centerX = 0.75, centerY = 0.5)
+        )
+        val output = DesktopPgmObsOutput(frameProvider = { frame })
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URI(output.start()).resolve("pgm.mjpg").toURL().openConnection() as HttpURLConnection
+            connection.readTimeout = 3_000
+            val outputFrame = readFrame(DataInputStream(connection.inputStream))
+            val center = Color(outputFrame.getRGB(outputFrame.width / 2, outputFrame.height / 2))
+            assertTrue("PGM zoom/pan was not applied before OBS output: $center", center.blue > center.red + 100)
+        } finally {
+            connection?.disconnect()
+            output.close()
+        }
+    }
+
+    @Test
     fun `browser source carries PGM auto transition even when the source frame is unchanged`() {
         val image = BufferedImage(32, 18, BufferedImage.TYPE_INT_RGB)
         image.createGraphics().let { graphics ->
