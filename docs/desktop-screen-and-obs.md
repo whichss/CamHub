@@ -34,10 +34,12 @@ OBS plugin is not included. This path does not change the Android or shared vide
 
 Local integrations can poll `/healthz` for `status`, `pgm` (`active` or `no_signal`),
 `transitionAlpha`, `activeClients`, `framesSent`, and `lastFrameAgeMs` (`null` before the first
-frame). The desktop UI distinguishes waiting for a stream, an active stream, no PGM signal, and a
-stream stalled for more than two seconds. These counters show local HTTP delivery; they do not
-measure OBS rendering or end-to-end presentation latency. The endpoint is served by the same
-loopback-only HTTP server and does not expose camera or network details.
+frame). It also exposes the rolling P50/P95/P99 in microseconds for local PGM scaling, compositing,
+and JPEG encoding, plus the sample count. Cached-frame deliveries do not add encoding samples. This
+processing duration excludes socket writes, OBS rendering, and display presentation, so it is not an
+end-to-end latency measurement. The desktop UI distinguishes waiting for a stream, an active
+stream, no PGM signal, and a stream stalled for more than two seconds. The endpoint is served by the
+same loopback-only HTTP server and does not expose camera or network details.
 
 PVW selection does not change the live program source. CUT switches immediately. AUTO performs a
 300 ms fade to black, switches at black, and fades the new source in. The same transition is applied

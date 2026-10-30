@@ -38,6 +38,7 @@ class DesktopPgmObsOutput(
     private val activeStreamClients = AtomicInteger(0)
     private val framesSent = AtomicLong(0)
     private val lastFrameSentAtNanos = AtomicLong(0)
+    private val jpegProcessingDuration = DesktopDurationWindow()
     private data class CachedJpeg(val frame: DesktopVideoFrame, val alpha: Float, val bytes: ByteArray)
     private val emptyFrame = DesktopVideoFrame(BufferedImage(320, 180, BufferedImage.TYPE_INT_RGB))
     @Volatile private var cachedJpeg: CachedJpeg? = null
@@ -49,6 +50,7 @@ class DesktopPgmObsOutput(
 
     val isRunning: Boolean get() = running?.get() == true
     val activeStreamClientCount: Int get() = activeStreamClients.get()
+    val jpegProcessingPercentiles: DesktopDurationPercentiles get() = jpegProcessingDuration.snapshot()
     val hasProgramSignal: Boolean get() = frameProvider() != null
     val lastFrameAgeMs: Long?
         get() = lastFrameSentAtNanos.get().takeIf { it > 0L }?.let {
@@ -144,9 +146,10 @@ class DesktopPgmObsOutput(
         val activeClients = activeStreamClients.get()
         val frames = framesSent.get()
         val lastSentAt = lastFrameSentAtNanos.get()
+        val jpegTiming = jpegProcessingDuration.snapshot()
         val lastFrameAgeMs = if (lastSentAt == 0L) "null" else
             ((System.nanoTime() - lastSentAt).coerceAtLeast(0L) / 1_000_000L).toString()
-        val payload = """{"status":"ok","pgm":"${if (hasProgram) "active" else "no_signal"}","transitionAlpha":$transitionAlpha,"activeClients":$activeClients,"framesSent":$frames,"lastFrameAgeMs":$lastFrameAgeMs}"""
+        val payload = """{"status":"ok","pgm":"${if (hasProgram) "active" else "no_signal"}","transitionAlpha":$transitionAlpha,"activeClients":$activeClients,"framesSent":$frames,"lastFrameAgeMs":$lastFrameAgeMs,"jpegRenderEncodeSamples":${jpegTiming.sampleCount},"jpegRenderEncodeLatestMicros":${jpegTiming.latestMicros ?: "null"},"jpegRenderEncodeP50Micros":${jpegTiming.p50Micros ?: "null"},"jpegRenderEncodeP95Micros":${jpegTiming.p95Micros ?: "null"},"jpegRenderEncodeP99Micros":${jpegTiming.p99Micros ?: "null"}}"""
             .toByteArray(Charsets.UTF_8)
         exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
         exchange.responseHeaders.set("Cache-Control", "no-store")
@@ -214,6 +217,7 @@ class DesktopPgmObsOutput(
     @Synchronized
     private fun encodeJpeg(frame: DesktopVideoFrame, alpha: Float): ByteArray {
         cachedJpeg?.takeIf { it.frame === frame && it.alpha == alpha }?.let { return it.bytes }
+        val processingStartedAtNanos = System.nanoTime()
         val rotation = ((frame.rotationDegrees % 360) + 360) % 360
         val swapsDimensions = rotation == 90 || rotation == 270
         val sourceWidth = if (swapsDimensions) frame.image.height else frame.image.width
@@ -258,6 +262,7 @@ class DesktopPgmObsOutput(
             imageOutput.close()
         }
         val encoded = jpegBuffer.toByteArray()
+        jpegProcessingDuration.recordNanos((System.nanoTime() - processingStartedAtNanos).coerceAtLeast(0L))
         cachedJpeg = CachedJpeg(frame, alpha, encoded)
         return encoded
     }

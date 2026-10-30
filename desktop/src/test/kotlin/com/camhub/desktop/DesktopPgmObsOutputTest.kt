@@ -316,6 +316,8 @@ class DesktopPgmObsOutputTest {
             assertTrue(idle.contains("\"activeClients\":0"))
             assertTrue(idle.contains("\"framesSent\":0"))
             assertTrue(idle.contains("\"lastFrameAgeMs\":null"))
+            assertTrue(idle.contains("\"jpegRenderEncodeSamples\":0"))
+            assertTrue(idle.contains("\"jpegRenderEncodeP95Micros\":null"))
 
             connection = URI(baseUrl).resolve("pgm.mjpg").toURL()
                 .openConnection() as HttpURLConnection
@@ -328,6 +330,10 @@ class DesktopPgmObsOutputTest {
                 !connected.contains("\"framesSent\":0"))
             assertTrue(connected.contains("\"lastFrameAgeMs\":") &&
                 !connected.contains("\"lastFrameAgeMs\":null"))
+            assertTrue(connected.contains("\"jpegRenderEncodeSamples\":") &&
+                !connected.contains("\"jpegRenderEncodeSamples\":0"))
+            assertTrue(connected.contains("\"jpegRenderEncodeP95Micros\":") &&
+                !connected.contains("\"jpegRenderEncodeP95Micros\":null"))
 
             input.close()
             connection.disconnect()
