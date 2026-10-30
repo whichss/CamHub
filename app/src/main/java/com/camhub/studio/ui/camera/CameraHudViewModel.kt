@@ -208,10 +208,15 @@ class CameraHudViewModel @Inject constructor(
                     _uiState.update { ui ->
                         ui.copy(
                             isCameraBound = hw.isBound,
+                            isExternalCamera = hw.isExternalCamera,
                             isRecording = hw.isRecording,
                             isManualExposureSupported = hw.isManualExposureSupported,
                             cameraError = hw.error,
-                            format = if (hw.isBound) "Camera Active" else "No Camera",
+                            format = when {
+                                !hw.isBound -> "No Camera"
+                                hw.isExternalCamera -> "External Camera"
+                                else -> "Camera Active"
+                            },
                             codec = if (hw.isBound) "H.264" else "",
                             isoValues = if (hw.isoRange != null) {
                                 CameraValueMapper.generateIsoStops(hw.isoRange.lower, hw.isoRange.upper)

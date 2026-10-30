@@ -41,6 +41,7 @@ data class CameraUiState(
     val cameraError: String? = null,
     // Phase 6 additions
     val isFrontCamera: Boolean = false,
+    val isExternalCamera: Boolean = false,
     // Unified toolbar
     val activeToolMode: ToolMode = ToolMode.NONE,
     val micDirection: MicDirection = MicDirection.BACK,

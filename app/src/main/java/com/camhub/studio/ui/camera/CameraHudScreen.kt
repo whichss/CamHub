@@ -352,7 +352,11 @@ private fun PortraitLayout(
                 // Left: camera switch
                 Icon(
                     imageVector = if (uiState.isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
-                    contentDescription = "Switch Camera",
+                    contentDescription = if (uiState.isExternalCamera) {
+                        "Switch Camera, current source external"
+                    } else {
+                        "Switch Camera"
+                    },
                     tint = TextSecondary,
                     modifier = Modifier
                         .size(22.dp)
@@ -611,7 +615,7 @@ private fun LandscapeLayout(
                 // Camera switch
                 HudCircleButton(
                     icon = if (uiState.isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
-                    label = "",
+                    label = if (uiState.isExternalCamera) "Switch camera, external" else "Switch camera",
                     onClick = { viewModel.switchCamera() }
                 )
 
@@ -1360,6 +1364,7 @@ private fun AutoBadge() {
 @Composable
 private fun ToolIconsRow(
     isFrontCamera: Boolean,
+    isExternalCamera: Boolean = false,
     showExposure: Boolean,
     showFocus: Boolean,
     showSettings: Boolean = false,
@@ -1379,7 +1384,11 @@ private fun ToolIconsRow(
         // Switch camera
         Icon(
             imageVector = if (isFrontCamera) Icons.Default.CameraFront else Icons.Default.CameraRear,
-            contentDescription = "Switch Camera",
+            contentDescription = if (isExternalCamera) {
+                "Switch Camera, current source external"
+            } else {
+                "Switch Camera"
+            },
             tint = TextSecondary,
             modifier = Modifier
                 .size(20.dp)

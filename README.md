@@ -78,6 +78,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 ### 카메라 모드
 
 - CameraX + Camera2 Interop 기반 촬영
+- Android가 Camera2 외부 렌즈로 노출하는 USB/UVC 카메라를 카메라 전환 버튼에서 선택
 - 연속 AF, 탭 포커스, 자동/수동 ISO·셔터·포커스
 - 전면/후면 카메라 전환
 - 가로 16:9 및 세로 9:16 스트림 방향 처리
@@ -288,10 +289,11 @@ CAMHUB_KEY_PASSWORD
 ## 현재 제한사항과 다음 검증
 
 - 다양한 제조사 조합에서 4대 동시 스트림 장시간 실기기 검증 필요
+- Android 외부 카메라 경로는 제조사 OS의 Camera2 external provider가 장치를 노출하는 경우에만 동작하며, 직접 libusb/UVC 드라이버가 필요한 장치 호환성은 미완료
 - Wi-Fi AP별 혼잡, 절전 정책, 멀티캐스트 제한 차이 검증 필요
 - 50ms 목표는 촬영부터 실제 패널 표시까지 고속 카메라/LED 기준 검증 필요
 - Opus는 송수신 코덱 협상과 기기 호환성 검증 후 기본 활성화 예정
-- 외부 입력(USB/UVC, 캡처 카드)은 [docs/external-input-plan.md](docs/external-input-plan.md)의 계획 단계
+- 직접 UVC/libusb 입력, 캡처 카드 호환성과 장치 연결·분리 실기기 검증은 [docs/external-input-plan.md](docs/external-input-plan.md)의 후속 단계
 - 현재 영상 코덱은 Android 하드웨어 H.264/HEVC이며 자체 영상 코덱은 구현하지 않음
 - 데스크톱 VideoToolbox/D3D11VA 하드웨어 디코더 요청과 소프트웨어 폴백 구현, GPU 업스케일링은 후속 단계
 - 카메라 TLS 인증서는 앱 내부에 보존되고, 최초 연결 시 카메라와 허브 화면의 SHA-256 지문을 직접 비교해 신뢰를 고정함

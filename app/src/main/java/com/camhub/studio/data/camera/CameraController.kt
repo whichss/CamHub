@@ -20,6 +20,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ExperimentalLensFacing
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -49,6 +50,7 @@ import javax.inject.Singleton
 
 data class CameraHardwareState(
     val isBound: Boolean = false,
+    val isExternalCamera: Boolean = false,
     val isRecording: Boolean = false,
     val recordingStartTimeMs: Long = 0L,
     val isoRange: Range<Int>? = null,
@@ -99,6 +101,11 @@ class CameraController @Inject constructor(
 
     var selectedCameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
         private set
+    private var selectedCameraFacing = CameraInputFacing.BACK
+    @OptIn(ExperimentalLensFacing::class)
+    private val externalCameraSelector = CameraSelector.Builder()
+        .requireLensFacing(CameraSelector.LENS_FACING_EXTERNAL)
+        .build()
 
     private var currentCameraSurface: Surface? = null
     private var currentSurfaceResolution: Size? = null
@@ -137,6 +144,14 @@ class CameraController @Inject constructor(
 
                 val provider = providerFuture.get()
                 cameraProvider = provider
+
+                val cameraSelector = selectedCameraSelector
+                if (!provider.hasCamera(cameraSelector)) {
+                    _hardwareState.value = CameraHardwareState(
+                        error = unavailableCameraMessage(selectedCameraFacing)
+                    )
+                    return@addListener
+                }
 
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
@@ -177,8 +192,6 @@ class CameraController @Inject constructor(
                 }.also { it.enable() }
 
                 provider.unbindAll()
-                val cameraSelector = selectedCameraSelector
-
                 camera = provider.bindToLifecycle(
                     lifecycleOwner,
                     cameraSelector,
@@ -235,6 +248,7 @@ class CameraController @Inject constructor(
 
                     _hardwareState.value = CameraHardwareState(
                         isBound = true,
+                        isExternalCamera = selectedCameraFacing == CameraInputFacing.EXTERNAL,
                         isoRange = isoRange,
                         exposureTimeRange = exposureRange,
                         minFocusDistance = minFocusDist,
@@ -248,6 +262,8 @@ class CameraController @Inject constructor(
                 }
             } catch (e: Exception) {
                 _hardwareState.value = _hardwareState.value.copy(
+                    isBound = false,
+                    isExternalCamera = false,
                     error = e.message ?: "Failed to bind camera with surface"
                 )
             }
@@ -273,6 +289,14 @@ class CameraController @Inject constructor(
 
                 val provider = providerFuture.get()
                 cameraProvider = provider
+
+                val cameraSelector = selectedCameraSelector
+                if (!provider.hasCamera(cameraSelector)) {
+                    _hardwareState.value = CameraHardwareState(
+                        error = unavailableCameraMessage(selectedCameraFacing)
+                    )
+                    return@addListener
+                }
 
                 val preview = Preview.Builder().build().also {
                     it.surfaceProvider = previewView.surfaceProvider
@@ -311,8 +335,6 @@ class CameraController @Inject constructor(
                 }.also { it.enable() }
 
                 provider.unbindAll()
-
-                val cameraSelector = selectedCameraSelector
 
                 // Bind Preview + ImageAnalysis first (2 use cases for broad device compatibility)
                 camera = provider.bindToLifecycle(
@@ -366,6 +388,7 @@ class CameraController @Inject constructor(
 
                     _hardwareState.value = CameraHardwareState(
                         isBound = true,
+                        isExternalCamera = selectedCameraFacing == CameraInputFacing.EXTERNAL,
                         isoRange = isoRange,
                         exposureTimeRange = exposureRange,
                         minFocusDistance = minFocusDist,
@@ -379,6 +402,8 @@ class CameraController @Inject constructor(
                 }
             } catch (e: Exception) {
                 _hardwareState.value = _hardwareState.value.copy(
+                    isBound = false,
+                    isExternalCamera = false,
                     error = e.message ?: "Failed to bind camera"
                 )
             }
@@ -387,11 +412,11 @@ class CameraController @Inject constructor(
 
     @androidx.camera.camera2.interop.ExperimentalCamera2Interop
     fun switchCamera() {
-        selectedCameraSelector = if (selectedCameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
+        val externalAvailable = runCatching {
+            cameraProvider?.hasCamera(externalCameraSelector) == true
+        }.getOrDefault(false)
+        selectedCameraFacing = CameraFacingCycle.next(selectedCameraFacing, externalAvailable)
+        selectedCameraSelector = selectorFor(selectedCameraFacing)
         // Rebind with new selector — handle both PreviewView and Surface modes
         val lifecycle = currentLifecycleOwner ?: return
         val preview = currentPreviewView
@@ -404,7 +429,20 @@ class CameraController @Inject constructor(
         }
     }
 
-    fun isFrontCamera(): Boolean = selectedCameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
+    fun isFrontCamera(): Boolean = selectedCameraFacing == CameraInputFacing.FRONT
+
+    private fun selectorFor(facing: CameraInputFacing): CameraSelector = when (facing) {
+        CameraInputFacing.BACK -> CameraSelector.DEFAULT_BACK_CAMERA
+        CameraInputFacing.FRONT -> CameraSelector.DEFAULT_FRONT_CAMERA
+        CameraInputFacing.EXTERNAL -> externalCameraSelector
+    }
+
+    private fun unavailableCameraMessage(facing: CameraInputFacing): String =
+        if (facing == CameraInputFacing.EXTERNAL) {
+            "No external camera exposed by Android's CameraX provider"
+        } else {
+            "Selected camera is unavailable"
+        }
 
     fun invalidatePendingCameraBind() {
         bindGeneration.incrementAndGet()
