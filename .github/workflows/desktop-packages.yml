@@ -90,7 +90,7 @@ jobs:
           ditto -x -k "$package" "$verification_dir"
           codesign --verify --deep --strict "$verification_dir/CamHub Desktop.app"
           plutil -lint "$verification_dir/CamHub Desktop.app/Contents/Info.plist"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: CamHub-Desktop-macOS-arm64
           path: desktop/build/package/CamHub-Desktop-macOS-arm64.zip
@@ -179,7 +179,7 @@ jobs:
             throw "Expected one non-empty Windows installer, found $($installers.Count)."
           }
           Write-Host "Installer: $($installers[0].FullName) ($($installers[0].Length) bytes)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: CamHub-Desktop-Windows-x64
           path: desktop/build/package/windows/*.exe
