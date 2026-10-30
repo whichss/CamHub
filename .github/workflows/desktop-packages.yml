@@ -41,8 +41,8 @@ jobs:
           ./gradlew :protocol:test :desktop:test :desktop:verifyDesktopRuntimeModules :desktop:packageMacApp --stacktrace 2>&1 | tee "$RUNNER_TEMP/camhub-desktop-build.log"
           result=${PIPESTATUS[0]}
           if [ "$result" -ne 0 ]; then
-            tail -n 80 "$RUNNER_TEMP/camhub-desktop-build.log" >> "$GITHUB_STEP_SUMMARY"
-            detail="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text(errors="replace")[-6000:].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$RUNNER_TEMP/camhub-desktop-build.log")"
+            detail="$(python3 -c 'import pathlib,sys; lines=pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines(); marker="FAILURE: Build failed with an exception."; starts=[i for i,line in enumerate(lines) if marker in line]; start=starts[-1] if starts else max(0,len(lines)-120); excerpt="\n".join(lines[start:start+120]); pathlib.Path(sys.argv[2]).write_text(excerpt+"\n"); print(excerpt[:12000].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$RUNNER_TEMP/camhub-desktop-build.log" "$RUNNER_TEMP/camhub-desktop-failure.txt")"
+            cat "$RUNNER_TEMP/camhub-desktop-failure.txt" >> "$GITHUB_STEP_SUMMARY"
             echo "::error title=Desktop package failure::$detail"
             exit "$result"
           fi
@@ -110,9 +110,18 @@ jobs:
           & .\gradlew.bat :protocol:test :desktop:test :desktop:verifyDesktopRuntimeModules :desktop:packageWindowsExe --stacktrace 2>&1 | Tee-Object -FilePath $log
           $result = $LASTEXITCODE
           if ($result -ne 0) {
-            $tail = (Get-Content $log -Tail 80) -join "`n"
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $tail
-            $detail = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            $lines = Get-Content $log
+            $failureIndex = -1
+            for ($index = 0; $index -lt $lines.Count; $index++) {
+              if ($lines[$index] -like '*FAILURE: Build failed with an exception.*') {
+                $failureIndex = $index
+              }
+            }
+            if ($failureIndex -lt 0) { $failureIndex = [Math]::Max(0, $lines.Count - 120) }
+            $endIndex = [Math]::Min($lines.Count - 1, $failureIndex + 119)
+            $excerpt = ($lines[$failureIndex..$endIndex] -join "`n")
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $excerpt
+            $detail = $excerpt.Substring(0, [Math]::Min(12000, $excerpt.Length)).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error title=Windows package failure::$detail"
             exit $result
           }

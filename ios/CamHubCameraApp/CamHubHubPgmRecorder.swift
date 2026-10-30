@@ -560,8 +560,14 @@ final class CamHubHubPgmRecorder: ObservableObject {
         let fittedHeight = extent.height * fit
         let zoom = frame.framing.zoom
         let scale = fit * zoom
-        let tx = (canvas.width - fittedWidth * zoom) / 2 + frame.framing.x * fittedWidth - extent.minX * scale
-        let ty = (canvas.height - fittedHeight * zoom) / 2 - frame.framing.y * fittedHeight - extent.minY * scale
+        let centeredX = (canvas.width - fittedWidth * zoom) / 2
+        let offsetX = frame.framing.x * fittedWidth
+        let originX = extent.minX * scale
+        let tx = centeredX + offsetX - originX
+        let centeredY = (canvas.height - fittedHeight * zoom) / 2
+        let offsetY = frame.framing.y * fittedHeight
+        let originY = extent.minY * scale
+        let ty = centeredY - offsetY - originY
         let transform = CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: tx, ty: ty)
         let transformed = image.transformed(by: transform).cropped(to: canvas)
         return transformed.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
