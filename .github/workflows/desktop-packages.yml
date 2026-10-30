@@ -42,6 +42,32 @@ jobs:
           result=${PIPESTATUS[0]}
           if [ "$result" -ne 0 ]; then
             detail="$(python3 -c 'import pathlib,sys; lines=pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines(); marker="FAILURE: Build failed with an exception."; starts=[i for i,line in enumerate(lines) if marker in line]; start=starts[-1] if starts else max(0,len(lines)-120); excerpt="\n".join(lines[start:start+120]); pathlib.Path(sys.argv[2]).write_text(excerpt+"\n"); print(excerpt[:12000].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$RUNNER_TEMP/camhub-desktop-build.log" "$RUNNER_TEMP/camhub-desktop-failure.txt")"
+            if [ -d desktop/build/test-results/test ]; then
+              python3 - "$RUNNER_TEMP/camhub-desktop-test-failures.txt" <<'PY'
+          import glob
+          import pathlib
+          import sys
+          import xml.etree.ElementTree as ET
+
+          failures = []
+          for report_path in glob.glob("desktop/build/test-results/test/TEST-*.xml"):
+              for case in ET.parse(report_path).getroot().iter("testcase"):
+                  for kind in ("failure", "error"):
+                      failure = case.find(kind)
+                      if failure is not None:
+                          details = (failure.text or "")[:3000]
+                          failures.append(
+                              f"{case.get('classname')}::{case.get('name')} [{kind}] "
+                              f"{failure.get('message', '')}\n{details}"
+                          )
+
+          summary = "\n\n".join(failures) if failures else "No JUnit failure entries were found."
+          pathlib.Path(sys.argv[1]).write_text(summary + "\n")
+          PY
+              cat "$RUNNER_TEMP/camhub-desktop-test-failures.txt" >> "$GITHUB_STEP_SUMMARY"
+              test_detail="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text(errors="replace")[:10000].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$RUNNER_TEMP/camhub-desktop-test-failures.txt")"
+              detail="$detail%0A$test_detail"
+            fi
             cat "$RUNNER_TEMP/camhub-desktop-failure.txt" >> "$GITHUB_STEP_SUMMARY"
             echo "::error title=Desktop package failure::$detail"
             exit "$result"
@@ -121,7 +147,20 @@ jobs:
             $endIndex = [Math]::Min($lines.Count - 1, $failureIndex + 119)
             $excerpt = ($lines[$failureIndex..$endIndex] -join "`n")
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $excerpt
-            $detail = $excerpt.Substring(0, [Math]::Min(12000, $excerpt.Length)).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            $testFailures = [System.Collections.Generic.List[string]]::new()
+            $testReports = Get-ChildItem "desktop/build/test-results/test" -Filter "TEST-*.xml" -File -ErrorAction SilentlyContinue
+            foreach ($testReport in $testReports) {
+              [xml]$report = Get-Content $testReport.FullName -Raw
+              foreach ($testCase in $report.SelectNodes("//testcase[failure or error]")) {
+                foreach ($failure in $testCase.SelectNodes("failure | error")) {
+                  $testFailures.Add("$($testCase.classname)::$($testCase.name) [$($failure.LocalName)] $($failure.message)`n$($failure.InnerText)")
+                }
+              }
+            }
+            $testDetail = if ($testFailures.Count -gt 0) { $testFailures -join "`n`n" } else { "No JUnit failure entries were found." }
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $testDetail
+            $fullDetail = "$excerpt`n$testDetail"
+            $detail = $fullDetail.Substring(0, [Math]::Min(16000, $fullDetail.Length)).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error title=Windows package failure::$detail"
             exit $result
           }
