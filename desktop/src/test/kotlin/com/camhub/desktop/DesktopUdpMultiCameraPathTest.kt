@@ -40,16 +40,26 @@ class DesktopUdpMultiCameraPathTest {
         val encodedFrames = try {
             buildList {
                 for (index in 0 until 4) {
-                    encoder.requestKeyFrame()
-                    add(requireNotNull(encoder.encode(
-                        source(7L + index),
-                        captureAtWallMs = 1_700_000_000_000L + index * 33L
-                    )))
+                    var encodedKeyFrame: DesktopScreenH264Encoder.EncodedAccessUnit? = null
+                    var attempt = 0
+                    while (encodedKeyFrame == null && attempt < 20) {
+                        encoder.requestKeyFrame()
+                        val encoded = encoder.encode(
+                            source(7L + index * 20L + attempt),
+                            captureAtWallMs = 1_700_000_000_000L + (index * 20L + attempt) * 33L
+                        )
+                        if (encoded?.isKeyFrame == true) encodedKeyFrame = encoded
+                        attempt++
+                    }
+                    add(requireNotNull(encodedKeyFrame) {
+                        "encoder did not produce an IDR keyframe for test sample $index"
+                    })
                 }
             }
         } finally {
             encoder.close()
         }
+        assertTrue("all recovery samples must be independent IDR keyframes", encodedFrames.all { it.isKeyFrame })
         val encodedStream = encodedFrames.fold(ByteArray(0)) { bytes, frame -> bytes + frame.bytes }
         val directGrabber = FFmpegFrameGrabber(ByteArrayInputStream(encodedStream)).apply {
             format = "h264"
