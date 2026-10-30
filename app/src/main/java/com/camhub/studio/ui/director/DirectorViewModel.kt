@@ -140,6 +140,7 @@ class DirectorViewModel @Inject constructor(
     private val connectedAudioNames = mutableSetOf<String>()
     private val connectedStreamNetworkHandles = mutableMapOf<String, Long>()
     private val connectedAudioNetworkHandles = mutableMapOf<String, Long>()
+    private val streamConnectionEpochs = StreamConnectionEpochs()
     private val desiredCameraIps = mutableSetOf<String>()
     private val reconnectJobs = mutableMapOf<String, Job>()
     private val offlineMarkJobs = mutableMapOf<String, Job>()
@@ -246,6 +247,7 @@ class DirectorViewModel @Inject constructor(
                 for (name in activeStreams) {
                     if (name !in currentPeerNames) {
                         connectedStreamNames.remove(name)
+                        streamConnectionEpochs.invalidate(name)
                         connectedAudioNames.remove(name)
                         connectedStreamNetworkHandles.remove(name)
                         connectedAudioNetworkHandles.remove(name)
@@ -1016,6 +1018,7 @@ class DirectorViewModel @Inject constructor(
             ) {
                 connectedStreamNames.add(peer.name)
                 connectedStreamNetworkHandles[peer.name] = networkHandle
+                val streamEpoch = streamConnectionEpochs.begin(peer.name)
                 if (canUseUdp) {
                     viewModelScope.launch(Dispatchers.IO) {
                         try {
@@ -1027,7 +1030,7 @@ class DirectorViewModel @Inject constructor(
                                 network = peer.network,
                                 onFallbackRequired = { reason ->
                                     viewModelScope.launch {
-                                        fallbackToReliableVideo(peer, networkHandle, reason)
+                                        fallbackToReliableVideo(peer, networkHandle, streamEpoch, reason)
                                     }
                                 }
                             )
@@ -1035,7 +1038,7 @@ class DirectorViewModel @Inject constructor(
                         } catch (error: Throwable) {
                             Log.w(TAG, "UDP setup failed for ${peer.name}", error)
                             viewModelScope.launch {
-                                fallbackToReliableVideo(peer, networkHandle, "setup_failed")
+                                fallbackToReliableVideo(peer, networkHandle, streamEpoch, "setup_failed")
                             }
                         }
                     }
@@ -1064,14 +1067,17 @@ class DirectorViewModel @Inject constructor(
     private fun fallbackToReliableVideo(
         attemptedPeer: ConnectedPeer,
         expectedNetworkHandle: Long,
+        expectedStreamEpoch: Long,
         reason: String
     ) {
+        if (!streamConnectionEpochs.isCurrent(attemptedPeer.name, expectedStreamEpoch)) return
         val currentPeer = connectionManager.connectedPeers.value.firstOrNull {
             it.name == attemptedPeer.name &&
                 (it.network?.networkHandle ?: 0L) == expectedNetworkHandle
         } ?: return
         if (currentPeer.streamPort <= 0) return
 
+        streamConnectionEpochs.invalidate(currentPeer.name)
         Log.w(TAG, "UDP unavailable for ${currentPeer.name} ($reason); using SRT/TCP")
         connectionManager.sendUdpUnsubscribe(currentPeer.name)
         connectReliableVideo(currentPeer, fallbackReason = reason)
@@ -1212,6 +1218,7 @@ class DirectorViewModel @Inject constructor(
         reconnectJobs.remove(camera.label)?.cancel()
         offlineMarkJobs.remove(camera.label)?.cancel()
         connectedStreamNames.remove(cameraName)
+        streamConnectionEpochs.invalidate(cameraName)
         connectedAudioNames.remove(cameraName)
         connectedStreamNetworkHandles.remove(cameraName)
         connectedAudioNetworkHandles.remove(cameraName)
@@ -1471,6 +1478,7 @@ class DirectorViewModel @Inject constructor(
         reconnectJobs.remove(cameraIp)?.cancel()
         offlineMarkJobs.remove(cameraIp)?.cancel()
         connectedStreamNames.remove(cameraName)
+        streamConnectionEpochs.invalidate(cameraName)
         connectedAudioNames.remove(cameraName)
         connectedStreamNetworkHandles.remove(cameraName)
         connectedAudioNetworkHandles.remove(cameraName)
@@ -1631,6 +1639,7 @@ class DirectorViewModel @Inject constructor(
             try { recorder.stopRecording() } catch (_: Exception) {}
         }
         connectedStreamNames.clear()
+        streamConnectionEpochs.clear()
         connectedAudioNames.clear()
         connectedStreamNetworkHandles.clear()
         connectedAudioNetworkHandles.clear()
