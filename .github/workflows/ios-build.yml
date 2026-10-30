@@ -53,7 +53,17 @@ jobs:
         run: sh ios/IntegrationTests/run-camera-audio-server-smoke.sh
 
       - name: Test PGM audio and video recording when H.264 is available
-        run: sh ios/IntegrationTests/run-pgm-recorder-smoke.sh
+        shell: bash
+        run: |
+          set +e
+          sh ios/IntegrationTests/run-pgm-recorder-smoke.sh 2>&1 | tee "$RUNNER_TEMP/camhub-pgm-recorder.log"
+          result=${PIPESTATUS[0]}
+          if [ "$result" -ne 0 ]; then
+            tail -n 60 "$RUNNER_TEMP/camhub-pgm-recorder.log" >> "$GITHUB_STEP_SUMMARY"
+            detail="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text(errors="replace")[-6000:].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$RUNNER_TEMP/camhub-pgm-recorder.log")"
+            echo "::error title=PGM recorder smoke failure::$detail"
+            exit "$result"
+          fi
 
       - name: Build unsigned iOS app target
         run: >-

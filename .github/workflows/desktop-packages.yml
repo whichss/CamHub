@@ -34,7 +34,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - name: Verify macOS arm64 runner
         run: test "$(uname -m)" = "arm64"
-      - run: ./gradlew :protocol:test :desktop:test :desktop:verifyDesktopRuntimeModules :desktop:packageMacApp
+      - name: Test and package desktop app
+        shell: bash
+        run: |
+          set +e
+          ./gradlew :protocol:test :desktop:test :desktop:verifyDesktopRuntimeModules :desktop:packageMacApp --stacktrace 2>&1 | tee "$RUNNER_TEMP/camhub-desktop-build.log"
+          result=${PIPESTATUS[0]}
+          if [ "$result" -ne 0 ]; then
+            tail -n 80 "$RUNNER_TEMP/camhub-desktop-build.log" >> "$GITHUB_STEP_SUMMARY"
+            detail="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text(errors="replace")[-6000:].replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$RUNNER_TEMP/camhub-desktop-build.log")"
+            echo "::error title=Desktop package failure::$detail"
+            exit "$result"
+          fi
       - name: Verify macOS arm64 package contents
         shell: bash
         run: |
@@ -92,7 +103,19 @@ jobs:
             }
             Write-Host "$tool => $($resolved.Source)"
           }
-      - run: .\gradlew.bat :protocol:test :desktop:test :desktop:verifyDesktopRuntimeModules :desktop:packageWindowsExe
+      - name: Test and package Windows installer
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "camhub-windows-build.log"
+          & .\gradlew.bat :protocol:test :desktop:test :desktop:verifyDesktopRuntimeModules :desktop:packageWindowsExe --stacktrace 2>&1 | Tee-Object -FilePath $log
+          $result = $LASTEXITCODE
+          if ($result -ne 0) {
+            $tail = (Get-Content $log -Tail 80) -join "`n"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $tail
+            $detail = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows package failure::$detail"
+            exit $result
+          }
       - name: Verify Windows installer artifact
         shell: pwsh
         run: |
