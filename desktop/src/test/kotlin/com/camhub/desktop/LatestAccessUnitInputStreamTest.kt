@@ -12,6 +12,13 @@ import org.junit.Test
 
 class LatestAccessUnitInputStreamTest {
     @Test
+    fun `decoder output expires only after the 100ms freshness budget`() {
+        assertFalse(DesktopDecodeFrameBudget.isExpired(0L))
+        assertFalse(DesktopDecodeFrameBudget.isExpired(100L))
+        assertTrue(DesktopDecodeFrameBudget.isExpired(101L))
+    }
+
+    @Test
     fun `decoder startup waits for key frame and is released by close`() {
         val input = LatestAccessUnitInputStream()
         val waiting = CountDownLatch(1)

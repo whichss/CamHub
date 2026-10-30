@@ -87,7 +87,7 @@ class H264FrameDecoder(
             while (running.get()) {
                 val frame = activeGrabber.grabImage() ?: continue
                 val metadata = input.takeOutputMetadata() ?: continue
-                if (metadata.decoderResidenceMs > LatestAccessUnitInputStream.MAX_FRAME_AGE_MS) {
+                if (DesktopDecodeFrameBudget.isExpired(metadata.decoderResidenceMs)) {
                     input.recoverFromLateDecode()
                     continue
                 }
@@ -113,6 +113,13 @@ class H264FrameDecoder(
 
 }
 
+internal object DesktopDecodeFrameBudget {
+    // Prefer fresh video over output that has fallen more than three 30 fps frames behind.
+    const val MAX_RESIDENCE_MS = 100L
+
+    fun isExpired(decoderResidenceMs: Long): Boolean = decoderResidenceMs > MAX_RESIDENCE_MS
+}
+
 internal class LatestAccessUnitInputStream(
     private val elapsedMs: () -> Long = { System.nanoTime() / 1_000_000L }
 ) : InputStream() {
@@ -120,7 +127,6 @@ internal class LatestAccessUnitInputStream(
         // Two frames cap the application-side queue to about 67 ms at 30 fps.
         // If that budget is exceeded, recovery starts at the next independent frame.
         internal const val CAPACITY = 2
-        internal const val MAX_FRAME_AGE_MS = 180L
     }
 
     private data class UnitChunk(
