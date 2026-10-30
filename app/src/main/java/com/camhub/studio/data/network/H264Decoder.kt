@@ -21,6 +21,7 @@ class H264Decoder {
     companion object {
         private const val TAG = "H264Decoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
+        private const val MAX_ACCESS_UNIT_BYTES = H264DecoderInputPolicy.MAX_ACCESS_UNIT_BYTES
         private const val TIMEOUT_US = 0L
         private const val INPUT_TIMEOUT_US = 2_000L
         private const val MAX_DRAINED_OUTPUT_BUFFERS = 16
@@ -69,6 +70,7 @@ class H264Decoder {
             val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
                 setByteBuffer("csd-0", sps)
                 setByteBuffer("csd-1", pps)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_ACCESS_UNIT_BYTES)
                 setInteger(
                     MediaFormat.KEY_COLOR_FORMAT,
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
@@ -116,6 +118,7 @@ class H264Decoder {
             val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
                 setByteBuffer("csd-0", sps)
                 setByteBuffer("csd-1", pps)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_ACCESS_UNIT_BYTES)
                 if (lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
@@ -163,7 +166,18 @@ class H264Decoder {
                 val inputBuffer = dec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    val size = minOf(length, inputBuffer.capacity())
+                    val size = H264DecoderInputPolicy.acceptedByteCount(
+                        sourceSize = nalUnit.size,
+                        offset = offset,
+                        length = length,
+                        bufferCapacity = inputBuffer.capacity()
+                    )
+                    if (size == null) {
+                        // Never decode a truncated access unit. Flush to return this
+                        // dequeued input buffer and let the caller request an IDR.
+                        dec.flush()
+                        return null
+                    }
                     inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     dec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, flags)
@@ -249,7 +263,18 @@ class H264Decoder {
                 val inputBuffer = dec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    val size = minOf(length, inputBuffer.capacity())
+                    val size = H264DecoderInputPolicy.acceptedByteCount(
+                        sourceSize = nalUnit.size,
+                        offset = offset,
+                        length = length,
+                        bufferCapacity = inputBuffer.capacity()
+                    )
+                    if (size == null) {
+                        // Flush returns the oversized access unit's dequeued buffer;
+                        // decoding resumes when the stream supplies a fresh keyframe.
+                        dec.flush()
+                        return false
+                    }
                     inputBuffer.put(nalUnit, offset, size)
                     val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     dec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, flags)
@@ -411,5 +436,22 @@ class H264Decoder {
         pixelBuffer = null
         yuvBuffer = null
         Log.d(TAG, "Decoder released")
+    }
+}
+
+/** Input limits follow the shared UDP reassembler's maximum complete-frame size. */
+internal object H264DecoderInputPolicy {
+    const val MAX_ACCESS_UNIT_BYTES = DeadlineFrameReassembler.DEFAULT_MAX_FRAME_BYTES
+
+    fun acceptedByteCount(
+        sourceSize: Int,
+        offset: Int,
+        length: Int,
+        bufferCapacity: Int
+    ): Int? {
+        if (sourceSize < 0 || offset < 0 || length <= 0 || bufferCapacity < 0) return null
+        if (length > MAX_ACCESS_UNIT_BYTES || length > bufferCapacity) return null
+        if (offset > sourceSize - length) return null
+        return length
     }
 }
