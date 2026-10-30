@@ -67,13 +67,13 @@ AES-GCM format and requests an IDR after queue loss or a new subscription. It al
 authenticated `request_key_frame` commands from the hub so decoding can recover promptly after
 packet loss. Encoding and network I/O do not run on the Swing UI or screen-capture worker.
 
-The current macOS arm64 `.app` bundle and ZIP have been built; bundle signature and ZIP integrity
-were verified without launching the app. Windows packaging is configured in CI but has not yet been
-verified as an artifact. Building the Windows EXE requires a Windows host, a full JDK and WiX 3
-available to jpackage; a non-Windows host cannot produce that installer. Screen-capture permissions and camera-to-hub interoperability still need
-runtime verification on each platform. The OBS path remains a loopback Browser Source, not a native
-OBS plugin. A platform hardware encoder (VideoToolbox / Media Foundation) should be evaluated after
-the software H.264 sender is verified.
+The macOS arm64 app ZIP and Windows x64 installer have both been generated and verified by the
+`Desktop packages` GitHub Actions workflow. The Windows installer is produced on a Windows host with
+the JDK and WiX toolchain; the macOS bundle is produced on an arm64 macOS host. Neither packaged app
+was launched. Screen-capture permissions, installation behavior, and camera-to-hub interoperability
+still need runtime verification on each platform. The OBS path remains a loopback Browser Source,
+not a native OBS plugin. Platform hardware decoding and GPU upscaling remain future work; they need
+cross-platform frame-transfer and fallback validation before replacing the current software path.
 
 The Windows package derives its modular Java runtime from the installed distribution with `jdeps`
 instead of relying on a hand-maintained module list. The `verifyDesktopRuntimeModules` Gradle task
