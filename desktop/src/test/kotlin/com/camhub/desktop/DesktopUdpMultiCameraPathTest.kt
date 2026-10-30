@@ -42,7 +42,7 @@ class DesktopUdpMultiCameraPathTest {
                 for (index in 0 until 4) {
                     encoder.requestKeyFrame()
                     add(requireNotNull(encoder.encode(
-                        source(if (index == 0) 7L else 8L),
+                        source(7L + index),
                         captureAtWallMs = 1_700_000_000_000L + index * 33L
                     )))
                 }

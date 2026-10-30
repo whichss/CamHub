@@ -59,7 +59,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 
 현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다.
 
-화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 연결은 네이티브 플러그인이 아니라 기본 Browser Source용 로컬 MJPEG URL입니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Debug·Release `.app` 빌드가 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
+화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 연결은 네이티브 플러그인이 아니라 기본 Browser Source용 로컬 MJPEG URL입니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Debug·Release `.app` 빌드가 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
 
 ### iOS 카메라 소스 (arm64 기기용 unsigned Debug/Release 빌드 확인)
 
@@ -292,7 +292,7 @@ CAMHUB_KEY_PASSWORD
 - Opus는 송수신 코덱 협상과 기기 호환성 검증 후 기본 활성화 예정
 - 외부 입력(USB/UVC, 캡처 카드)은 [docs/external-input-plan.md](docs/external-input-plan.md)의 계획 단계
 - 현재 영상 코덱은 Android 하드웨어 H.264/HEVC이며 자체 영상 코덱은 구현하지 않음
-- 데스크톱 VideoToolbox/Media Foundation 하드웨어 디코더 선택은 후속 구현 단계
+- 데스크톱 VideoToolbox/Media Foundation 하드웨어 디코더와 GPU 업스케일링은 후속 구현 단계
 - 카메라 TLS 인증서는 앱 내부에 보존되고, 최초 연결 시 카메라와 허브 화면의 SHA-256 지문을 직접 비교해 신뢰를 고정함
 - 카메라의 8자리 페어링 PIN은 TLS 인증서 지문 확인 뒤 전송되며, PIN이 맞기 전에는 카메라가 영상 세션 키를 보내지 않음
 

@@ -65,7 +65,11 @@ feeds a latest-frame-only encoder worker; the H.264 encoder defaults to 720p30, 
 GOP, and repeated SPS/PPS headers. A bounded UDP/RTP publisher uses the existing CamHub payload and
 AES-GCM format and requests an IDR after queue loss or a new subscription. It also honors
 authenticated `request_key_frame` commands from the hub so decoding can recover promptly after
-packet loss. Encoding and network I/O do not run on the Swing UI or screen-capture worker.
+packet loss. Encoding and network I/O do not run on the Swing UI or screen-capture worker. The
+sender tries the platform H.264 hardware encoder (VideoToolbox on macOS, Media Foundation on
+Windows), verifies that it emits consecutive Annex-B access units with SPS/PPS/IDR for the live
+RTP path, and falls back to libx264 or OpenH264 if that runtime check fails. The result is cached
+per process and stream format so reconnects do not repeat the probe.
 
 The macOS arm64 app ZIP and Windows x64 installer have both been generated and verified by the
 `Desktop packages` GitHub Actions workflow. The Windows installer is produced on a Windows host with

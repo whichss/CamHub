@@ -30,6 +30,15 @@ class DesktopScreenH264EncoderTest {
         )
 
         try {
+            assertTrue(
+                "Unexpected H.264 encoder: ${encoder.selectedCodecName}",
+                encoder.selectedCodecName in setOf(
+                    "h264_videotoolbox",
+                    "h264_mf",
+                    "libx264",
+                    "libopenh264"
+                )
+            )
             val first = encoder.encode(image, captureAtWallMs = 1_700_000_000_000L)
             assertNotNull("No H.264 access unit was emitted", first)
             assertTrue("The first access unit must contain an IDR", first!!.isKeyFrame)
@@ -40,7 +49,17 @@ class DesktopScreenH264EncoderTest {
             assertTrue("The first access unit must include SPS", 7 in firstNalTypes)
             assertTrue("The first access unit must include PPS", 8 in firstNalTypes)
 
-            val second = encoder.encode(image, captureAtWallMs = 1_700_000_000_033L)
+            val changedImage = BufferedImage(160, 90, BufferedImage.TYPE_INT_RGB).apply {
+                createGraphics().also { graphics ->
+                    try {
+                        graphics.color = Color(220, 64, 32)
+                        graphics.fillRect(0, 0, width, height)
+                    } finally {
+                        graphics.dispose()
+                    }
+                }
+            }
+            val second = encoder.encode(changedImage, captureAtWallMs = 1_700_000_000_033L)
             assertNotNull("The second H.264 access unit was not emitted", second)
             assertEquals(2L, second!!.sequence)
 
