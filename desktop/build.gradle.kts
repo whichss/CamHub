@@ -41,6 +41,14 @@ dependencies {
 tasks.test {
     // Unit tests render images offscreen and must not initialize a native desktop session.
     systemProperty("java.awt.headless", "true")
+    val nativeCache = layout.buildDirectory.dir("tmp/javacpp-test-cache").get().asFile
+    systemProperty("org.bytedeco.javacpp.cachedir", nativeCache.absolutePath)
+    doFirst {
+        nativeCache.deleteRecursively()
+        check(nativeCache.mkdirs() || nativeCache.isDirectory) {
+            "Could not prepare the isolated JavaCPP test cache: ${nativeCache.absolutePath}"
+        }
+    }
 }
 
 fun desktopNativePlatform(): String {
