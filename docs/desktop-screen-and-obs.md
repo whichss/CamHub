@@ -11,14 +11,16 @@ selected region to avoid capturing CamHub's own controls. The desktop capture ca
 a separate network camera source without consuming one of the four camera slots.
 
 The OBS action exposes the current PGM using a loopback-only HTTP Browser Source page. It serves
-15 fps multipart MJPEG, capped at 1920×1080, and copies its local URL for pasting into OBS's built-in
-Browser source. The source prefers `http://127.0.0.1:48765/` so the OBS URL can remain stable across
-restarts. If that port is occupied, it uses another local port and copies the actual URL; update OBS
-in that case. Up to two simultaneous video connections are supported; further connections
-receive HTTP 503 until a slot is available. JPEG encoding is shared across clients for an unchanged
-PGM frame. This is an
-interoperability bridge, not a native OBS plugin. It does not change the Android or shared video wire
-protocol.
+15 fps multipart MJPEG, capped at 1920×1080. After starting the output, CamHub can connect to OBS's
+local WebSocket server (default port 4455) and add or update a `CamHub PGM` Browser source in the
+current program scene. The WebSocket password is used for that connection only and is not saved. If
+OBS is unavailable or the connection fails, CamHub copies the source URL for manual setup in OBS's
+built-in Browser source. The source prefers `http://127.0.0.1:48765/` so the URL can remain stable
+across restarts. If that port is occupied, it uses another local port and exposes the actual URL.
+Up to two simultaneous video connections are supported; further connections receive HTTP 503 until
+a slot is available. JPEG encoding is shared across clients for an unchanged PGM frame. The OBS
+control path uses OBS WebSocket to configure its built-in Browser source; it is not a native OBS
+plugin and does not change the Android or shared video wire protocol.
 
 Local integrations can poll `/healthz` for a small JSON status payload containing `status`, `pgm`
 (`active` or `no_signal`), and the current `transitionAlpha`. The endpoint is served by the same
@@ -75,9 +77,10 @@ The macOS arm64 app ZIP and Windows x64 installer have both been generated and v
 `Desktop packages` GitHub Actions workflow. The Windows installer is produced on a Windows host with
 the JDK and WiX toolchain; the macOS bundle is produced on an arm64 macOS host. Neither packaged app
 was launched. Screen-capture permissions, installation behavior, and camera-to-hub interoperability
-still need runtime verification on each platform. The OBS path remains a loopback Browser Source,
-not a native OBS plugin. Platform hardware decoding and GPU upscaling remain future work; they need
-cross-platform frame-transfer and fallback validation before replacing the current software path.
+still need runtime verification on each platform. The OBS path uses local WebSocket control plus a
+loopback Browser Source, not a native OBS plugin. Platform hardware decoding and GPU upscaling remain
+future work; they need cross-platform frame-transfer and fallback validation before replacing the
+current software path.
 
 The Windows package derives its modular Java runtime from the installed distribution with `jdeps`
 instead of relying on a hand-maintained module list. The `verifyDesktopRuntimeModules` Gradle task

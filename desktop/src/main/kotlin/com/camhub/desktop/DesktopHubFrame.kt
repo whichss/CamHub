@@ -34,6 +34,7 @@ import javax.swing.JFrame
 import javax.swing.JFileChooser
 import javax.swing.JLabel
 import javax.swing.JOptionPane
+import javax.swing.JPasswordField
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JScrollPane
@@ -44,6 +45,7 @@ import javax.swing.SwingUtilities
 import javax.swing.Timer
 import javax.swing.JTextField
 import javax.swing.JToggleButton
+import javax.swing.SwingWorker
 
 class DesktopHubFrame(
     private val displayManager: DesktopDisplayManager = DesktopDisplayManager(),
@@ -58,7 +60,7 @@ class DesktopHubFrame(
     private val livePtzLockButton = JToggleButton("LIVE PTZ LOCK · OFF")
     private val screenInputButton = JButton("SCREEN INPUT")
     private val desktopCameraSourceButton = JButton("START CAMERA SOURCE")
-    private val obsSourceButton = JButton("OBS SOURCE URL")
+    private val obsSourceButton = JButton("ADD PGM TO OBS")
     private val obsStopButton = JButton("STOP OBS OUTPUT").apply { isEnabled = false }
     private val pgmRecordButton = JButton("RECORD PGM")
     private val displayStatus = JLabel()
@@ -325,17 +327,9 @@ class DesktopHubFrame(
             runCatching { obsOutput.start() }
                 .onSuccess { url ->
                     obsStopButton.isEnabled = true
-                    val copied = runCatching {
-                        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(url), null)
-                    }.isSuccess
-                    obsStatus.text = "Local MJPEG · 15 fps · " + if (copied) "URL copied" else "URL shown"
+                    obsStatus.text = "Local PGM source ready · connecting to OBS…"
                     obsStatus.toolTipText = url
-                    JOptionPane.showMessageDialog(
-                        this,
-                        "OBS → Sources → Browser → URL\n$url\n\nThe source is available only on this computer. The current PGM output is sent as 15 fps MJPEG.",
-                        "CamHub OBS Browser Source",
-                        JOptionPane.INFORMATION_MESSAGE
-                    )
+                    connectPgmToObs(url)
                 }
                 .onFailure { error ->
                     obsStatus.text = "OBS output unavailable"
@@ -419,6 +413,71 @@ class DesktopHubFrame(
         displayPollTimer.start()
         screenPgmRefreshTimer.start()
         hubController.start()
+    }
+
+    private fun connectPgmToObs(url: String) {
+        val portField = JTextField("4455", 7)
+        val passwordField = JPasswordField(18)
+        val fields = JPanel(GridLayout(0, 1, 0, 6)).apply {
+            add(JLabel("OBS WebSocket port (default 4455)"))
+            add(portField)
+            add(JLabel("OBS WebSocket password (leave empty if authentication is disabled)"))
+            add(passwordField)
+            add(JLabel("CamHub connects to OBS on this computer and adds a Browser source to the current scene."))
+        }
+        if (JOptionPane.showConfirmDialog(
+                this,
+                fields,
+                "Add CamHub PGM to OBS",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.PLAIN_MESSAGE
+            ) != JOptionPane.OK_OPTION
+        ) return
+
+        val port = portField.text.trim().toIntOrNull()?.takeIf { it in 1..65_535 }
+        if (port == null) {
+            JOptionPane.showMessageDialog(this, "Enter a valid OBS WebSocket port.", "OBS connection", JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        val password = passwordField.password
+        obsSourceButton.isEnabled = false
+        obsStatus.text = "Connecting to OBS WebSocket…"
+        object : SwingWorker<String, Void>() {
+            override fun doInBackground(): String = try {
+                ObsWebSocketClient(port, password).use { client ->
+                    client.addPgmBrowserSource(url)
+                }
+            } finally {
+                password.fill('\u0000')
+            }
+
+            override fun done() {
+                obsSourceButton.isEnabled = true
+                runCatching { get() }
+                    .onSuccess { message ->
+                        obsStatus.text = "OBS connected · CamHub PGM source active"
+                        JOptionPane.showMessageDialog(
+                            this@DesktopHubFrame,
+                            "$message\n\nOBS uses the local 15 fps MJPEG PGM feed.",
+                            "CamHub added to OBS",
+                            JOptionPane.INFORMATION_MESSAGE
+                        )
+                    }
+                    .onFailure { error ->
+                        val detail = error.cause?.message ?: error.message ?: "Unknown OBS connection error."
+                        val copied = runCatching {
+                            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(url), null)
+                        }.isSuccess
+                        obsStatus.text = "OBS connection failed · " + if (copied) "manual URL copied" else "manual URL available"
+                        JOptionPane.showMessageDialog(
+                            this@DesktopHubFrame,
+                            "Could not add the source through OBS WebSocket. Check that OBS is open, WebSocket is enabled, and the port/password are correct.\n\n$detail\n\nManual fallback: OBS → Sources → Browser → URL\n$url",
+                            "OBS connection failed",
+                            JOptionPane.WARNING_MESSAGE
+                        )
+                    }
+            }
+        }.execute()
     }
 
     private fun buildContent(): JPanel = JPanel(BorderLayout(12, 12)).apply {
