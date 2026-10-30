@@ -57,26 +57,28 @@ class H264FrameDecoder(
     }
 
     private fun decodeLoop() {
-        val converter = Java2DFrameConverter()
+        var converter: Java2DFrameConverter? = null
+        var grabber: FFmpegFrameGrabber? = null
         var convertedImage: BufferedImage? = null
-        val grabber = FFmpegFrameGrabber(input, 0).apply {
-            format = "h264"
-            setOption("fflags", "nobuffer")
-            setOption("avioflags", "direct")
-            setOption("probesize", "2048")
-            setOption("analyzeduration", "0")
-            setOption("fpsprobesize", "0")
-            setVideoOption("flags", "low_delay")
-            setVideoOption("threads", "1")
-        }
         try {
+            val activeConverter = Java2DFrameConverter().also { converter = it }
+            val activeGrabber = FFmpegFrameGrabber(input, 0).apply {
+                format = "h264"
+                setOption("fflags", "nobuffer")
+                setOption("avioflags", "direct")
+                setOption("probesize", "2048")
+                setOption("analyzeduration", "0")
+                setOption("fpsprobesize", "0")
+                setVideoOption("flags", "low_delay")
+                setVideoOption("threads", "1")
+            }.also { grabber = it }
             // This is a live Annex-B stream that stays open. SPS/PPS arrives as
             // a separate config access unit before video, so probing a finite
             // sample here only consumes frames from the bounded startup queue.
-            grabber.start(false)
+            activeGrabber.start(false)
             decoderInitialized.set(true)
             while (running.get()) {
-                val frame = grabber.grabImage() ?: continue
+                val frame = activeGrabber.grabImage() ?: continue
                 val metadata = input.takeOutputMetadata() ?: continue
                 if (metadata.decoderResidenceMs > LatestAccessUnitInputStream.MAX_FRAME_AGE_MS) {
                     input.recoverFromLateDecode()
@@ -84,16 +86,16 @@ class H264FrameDecoder(
                 }
                 convertedImage = DesktopVideoImageGuard.convertAndPublish(
                     previousImage = convertedImage,
-                    convert = { converter.convert(frame) },
+                    convert = { activeConverter.convert(frame) },
                     onPublished = { image -> onImage(image, metadata.payload) }
                 ) ?: convertedImage
             }
         } catch (error: Throwable) {
             if (running.get()) onError(error)
         } finally {
-            runCatching { grabber.stop() }
-            runCatching { grabber.release() }
-            converter.close()
+            runCatching { grabber?.stop() }
+            runCatching { grabber?.release() }
+            converter?.close()
             decoderInitialized.set(false)
             running.set(false)
             synchronized(this) {
