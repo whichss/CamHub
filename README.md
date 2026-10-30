@@ -57,7 +57,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 핑/퐁 시계 보정 이후에만 카메라 촬영부터 데스크톱 표시까지의 지연 계산
 - 카메라 연결 단절 감지와 지수 백오프 자동 재연결
 
-현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다. 포함된 macOS FFmpeg 빌드는 VideoToolbox 하드웨어 가속을 제공하고 H.264 디코더도 해당 가속 방식을 지원하지만, 현재 JavaCV 디코딩 경로는 하드웨어 장치 연결과 GPU 프레임 전달을 사용하지 않습니다. 번들 FFmpeg CLI로 샘플 H.264를 VideoToolbox 디코딩해 본 결과 이 Mac에서는 IOSurface 설정이 실패했고 FFmpeg가 소프트웨어 디코딩으로 폴백했습니다. 그러므로 앱의 하드웨어 디코딩은 아직 구현·검증되지 않았습니다. Windows 번들에서 실제 사용 가능한 디코더와 장치 초기화 여부도 별도로 확인해야 합니다.
+현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. 데스크톱 카메라 디코더는 포함된 FFmpeg H.264 바인딩에서 macOS VideoToolbox 또는 Windows D3D11VA 장치를 사용할 수 있으면 요청하고, GPU 프레임을 CPU 메모리로 옮겨 기존 Java2D 표시 경로에 전달합니다. 하드웨어 장치·세션 초기화가 안 되면 FFmpeg 소프트웨어 포맷으로 폴백하며, 하드웨어 프레임 전송 자체가 실패하면 소프트웨어 디코더를 다시 열고 다음 키프레임에서 복구합니다. 카메라 연결 상세 정보에 현재 실제 디코딩 경로를 표시합니다. 현재 데스크톱 렌더링과 확대는 CPU/Java2D 경로이며 GPU FSR 스타일 업스케일링은 아직 후속 작업입니다. 통합 테스트는 실제 영상 디코딩 경로를 확인하지만, 최종 사용 기기에서 하드웨어 가속이 선택되는지와 처리량 이득은 장치별 실측이 필요합니다.
 
 화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 버튼은 OBS WebSocket으로 현재 프로그램 장면에 CamHub Media Source를 자동 추가하고, 연결할 수 없으면 로컬 MJPEG 스트림 URL을 수동 입력용으로 제공합니다. 새 소스는 OBS 내장 FFmpeg 입력을 사용하며, 별도 설치형 네이티브 OBS 플러그인은 아직 없습니다. 기존 Browser Source는 호환 유지합니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Release `.app` 빌드가 GitHub Actions에서 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 이제 CI에서 iOS Simulator Debug 타깃을 실행 없이 컴파일합니다. 이 Mac에서는 CoreSimulator 버전이 Xcode와 맞지 않아 시뮬레이터 앱 실행 검증은 하지 못했습니다.
 
@@ -292,7 +292,7 @@ CAMHUB_KEY_PASSWORD
 - Opus는 송수신 코덱 협상과 기기 호환성 검증 후 기본 활성화 예정
 - 외부 입력(USB/UVC, 캡처 카드)은 [docs/external-input-plan.md](docs/external-input-plan.md)의 계획 단계
 - 현재 영상 코덱은 Android 하드웨어 H.264/HEVC이며 자체 영상 코덱은 구현하지 않음
-- 데스크톱 VideoToolbox/Media Foundation 하드웨어 디코더와 GPU 업스케일링은 후속 구현 단계
+- 데스크톱 VideoToolbox/D3D11VA 하드웨어 디코더 요청과 소프트웨어 폴백 구현, GPU 업스케일링은 후속 단계
 - 카메라 TLS 인증서는 앱 내부에 보존되고, 최초 연결 시 카메라와 허브 화면의 SHA-256 지문을 직접 비교해 신뢰를 고정함
 - 카메라의 8자리 페어링 PIN은 TLS 인증서 지문 확인 뒤 전송되며, PIN이 맞기 전에는 카메라가 영상 세션 키를 보내지 않음
 

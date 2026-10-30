@@ -16,6 +16,7 @@ import java.security.cert.X509Certificate
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509TrustManager
@@ -254,6 +255,9 @@ class DesktopCameraConnection(
         val lastVideoInputAtMs = AtomicLong(System.currentTimeMillis())
         val tcpFallbackStarted = AtomicBoolean(false)
         val usingTcpVideo = AtomicBoolean(!udpAvailable)
+        val decoderPath = AtomicReference("detecting decoder")
+        fun videoDetail(): String =
+            "${if (usingTcpVideo.get()) "Authenticated TCP" else "UDP/RTP"} · H.264 · ${decoderPath.get()}"
         val frameSession = synchronized(frameSessionLock) { ++frameSessionGeneration }
         fun ifCurrentSession(action: () -> Unit) = synchronized(frameSessionLock) {
             if (frameSession == frameSessionGeneration && running.get()) action()
@@ -278,7 +282,7 @@ class DesktopCameraConnection(
                 val latencyPercentiles = if (publishState) captureToDecodeLatency.snapshot() else null
                 updateSnapshot(
                     status = DesktopCameraStatus.STREAMING,
-                    detail = if (usingTcpVideo.get()) "Authenticated TCP · H.264" else "UDP/RTP · H.264",
+                    detail = videoDetail(),
                     captureToDecodeP50Ms = latencyPercentiles?.p50Ms,
                     captureToDecodeP95Ms = latencyPercentiles?.p95Ms,
                     captureToDecodeP99Ms = latencyPercentiles?.p99Ms,
@@ -293,6 +297,10 @@ class DesktopCameraConnection(
             },
             onError = { error ->
                 ifCurrentSession { updateSnapshot(detail = "Decoder: ${error.message?.take(80) ?: "error"}") }
+            },
+            onDecodePath = { path ->
+                decoderPath.set(path)
+                ifCurrentSession { updateSnapshot(detail = videoDetail()) }
             }
         )
         synchronized(resourceLock) {

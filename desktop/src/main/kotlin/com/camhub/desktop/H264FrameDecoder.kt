@@ -9,8 +9,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import org.bytedeco.javacv.FFmpegFrameGrabber
-import org.bytedeco.javacv.Java2DFrameConverter
+import org.bytedeco.ffmpeg.avutil.AVFrame
 
 /**
  * Per-camera H.264 decoder. Network reception never waits for decoding: access
@@ -19,7 +18,8 @@ import org.bytedeco.javacv.Java2DFrameConverter
 class H264FrameDecoder(
     cameraName: String,
     private val onImage: (BufferedImage, CamHubVideoPayload) -> Unit,
-    private val onError: (Throwable) -> Unit
+    private val onError: (Throwable) -> Unit,
+    private val onDecodePath: (String) -> Unit = {}
 ) : AutoCloseable {
     private val input = LatestAccessUnitInputStream()
     private val running = AtomicBoolean(false)
@@ -64,52 +64,61 @@ class H264FrameDecoder(
     }
 
     private fun decodeLoop() {
-        var converter: Java2DFrameConverter? = null
-        var grabber: FFmpegFrameGrabber? = null
+        var decoder: FfmpegLowLatencyDecoder? = null
         var convertedImage: BufferedImage? = null
+        val pendingMetadata = ArrayDeque<LatestAccessUnitInputStream.QueuedAccessUnit>()
+        var fallbackPts = 0L
+        var reportedDecodePath: String? = null
         try {
-            // JavaCV's FFmpegFrameGrabber.start() reads from the input while holding
-            // FFmpeg's process-wide avcodec monitor. Do not enter native initialization
-            // until a keyframe is queued, or a disconnected/slow camera can block every
-            // other encoder and recorder in this JVM indefinitely.
+            // Wait for an IDR before allocating native decoder state. A disconnected camera
+            // must not delay decoder initialization for the other camera slots.
             if (!input.awaitInitialKeyFrame() || !running.get()) return
 
-            val activeConverter = Java2DFrameConverter().also { converter = it }
-            val activeGrabber = FFmpegFrameGrabber(input, 0).apply {
-                format = "h264"
-                setOption("fflags", "nobuffer")
-                setOption("avioflags", "direct")
-                setOption("probesize", "2048")
-                setOption("analyzeduration", "0")
-                setOption("fpsprobesize", "0")
-                setVideoOption("flags", "low_delay")
-                setVideoOption("threads", "1")
-            }.also { grabber = it }
-            // This is a live Annex-B stream that stays open. SPS/PPS arrives as
-            // a separate config access unit before video, so probing a finite
-            // sample here only consumes frames from the bounded startup queue.
-            activeGrabber.start(false)
+            val activeDecoder = FfmpegLowLatencyDecoder().also { decoder = it }
             decoderInitialized.set(true)
             initializationCompleted.countDown()
             while (running.get()) {
-                val frame = activeGrabber.grabImage() ?: continue
-                val metadata = input.takeOutputMetadata() ?: continue
-                if (DesktopDecodeFrameBudget.isExpired(metadata.decoderResidenceMs)) {
-                    input.recoverFromLateDecode()
-                    continue
+                val accessUnit = input.takeAccessUnit() ?: break
+                val payload = accessUnit.payload
+                // CamHub sources repeat SPS/PPS in every IDR. The separate codec-config
+                // envelope is for stream consumers that parse concatenated Annex-B bytes;
+                // avcodec_send_packet expects decodable access units and may reject SPS/PPS-only
+                // packets, so wait for the following IDR instead.
+                if (payload.isCodecConfig) continue
+                pendingMetadata.addLast(accessUnit)
+                val pts = payload.frameSequence.takeIf { it > 0 } ?: ++fallbackPts
+                try {
+                    activeDecoder.decode(payload.h264Bytes, pts, payload.isKeyFrame) { frame: AVFrame ->
+                        val metadata = pendingMetadata.removeFirstOrNull() ?: return@decode
+                        val decodePath = activeDecoder.activePathLabel
+                        if (decodePath != reportedDecodePath) {
+                            reportedDecodePath = decodePath
+                            onDecodePath(decodePath)
+                        }
+                        val decoderResidenceMs = (System.nanoTime() / 1_000_000L - metadata.submittedAtMs)
+                            .coerceAtLeast(0L)
+                        if (DesktopDecodeFrameBudget.isExpired(decoderResidenceMs)) {
+                            pendingMetadata.clear()
+                            input.recoverFromLateDecode()
+                            activeDecoder.flush()
+                            return@decode
+                        }
+                        convertedImage = DesktopVideoImageGuard.convertAndPublish(
+                            previousImage = convertedImage,
+                            convert = { activeDecoder.toBufferedImage(frame, convertedImage) },
+                            onPublished = { image -> onImage(image, metadata.payload) }
+                        ) ?: convertedImage
+                    }
+                } catch (_: FfmpegLowLatencyDecoder.SoftwareFallbackNeedsKeyFrame) {
+                    pendingMetadata.clear()
+                    input.recoverFromDiscontinuity()
+                    activeDecoder.flush()
                 }
-                convertedImage = DesktopVideoImageGuard.convertAndPublish(
-                    previousImage = convertedImage,
-                    convert = { activeConverter.convert(frame) },
-                    onPublished = { image -> onImage(image, metadata.payload) }
-                ) ?: convertedImage
             }
         } catch (error: Throwable) {
             if (running.get()) onError(error)
         } finally {
-            runCatching { grabber?.stop() }
-            runCatching { grabber?.release() }
-            converter?.close()
+            runCatching { decoder?.close() }
             decoderInitialized.set(false)
             initializationCompleted.countDown()
             running.set(false)
@@ -149,6 +158,11 @@ internal class LatestAccessUnitInputStream(
     )
 
     private data class SubmittedMetadata(
+        val payload: CamHubVideoPayload,
+        val submittedAtMs: Long
+    )
+
+    data class QueuedAccessUnit(
         val payload: CamHubVideoPayload,
         val submittedAtMs: Long
     )
@@ -225,6 +239,20 @@ internal class LatestAccessUnitInputStream(
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             false
+        }
+    }
+
+    fun takeAccessUnit(): QueuedAccessUnit? {
+        while (true) {
+            val chunk = try {
+                queue.takeFirst()
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+            if (chunk.closed) return null
+            val payload = chunk.payload ?: continue
+            return QueuedAccessUnit(payload, chunk.submittedAtMs)
         }
     }
 

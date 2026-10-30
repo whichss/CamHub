@@ -189,7 +189,7 @@ class DesktopUdpMultiCameraPathTest {
             // decoders to finish opening before sending the fresh recovery IDR.
             decoders.forEachIndexed { camera, decoder ->
                 assertTrue(
-                    "camera $camera decoder did not initialize",
+                    "camera $camera decoder did not initialize: ${failure.get()?.message}",
                     decoder.awaitInitialized(5, TimeUnit.SECONDS)
                 )
             }

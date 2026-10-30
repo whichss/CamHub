@@ -85,10 +85,15 @@ The macOS arm64 app ZIP and Windows x64 installer have both been generated and v
 `Desktop packages` GitHub Actions workflow. The Windows installer is produced on a Windows host with
 the JDK and WiX toolchain; the macOS bundle is produced on an arm64 macOS host. Neither packaged app
 was launched. Screen-capture permissions, installation behavior, and camera-to-hub interoperability
-still need runtime verification on each platform. The OBS path uses local WebSocket control plus a
-loopback FFmpeg Media Source, not a separately installed native OBS plugin. Platform hardware
-decoding and GPU upscaling remain future work; they need cross-platform frame-transfer and fallback
-validation before replacing the current software path.
+still need runtime verification on each platform. The camera decoder now requests VideoToolbox on
+macOS or D3D11VA on Windows when the bundled FFmpeg H.264 decoder advertises that hardware device.
+Decoded GPU frames transfer to host memory before Java2D rendering. Missing hardware support or a
+failed device setup selects FFmpeg's software format; a failed hardware-frame transfer reopens the
+software decoder and waits for a new keyframe. The camera connection detail shows which path
+produced the latest frame. Integration tests cover the decoder, transfer-compatible output,
+software fallback, and multi-camera recovery, but they do not prove hardware acceleration or a
+throughput gain on every user's GPU. GPU upscaling remains future work. The OBS path uses local
+WebSocket control plus a loopback FFmpeg Media Source, not a separately installed native OBS plugin.
 
 The Windows package derives its modular Java runtime from the installed distribution with `jdeps`
 instead of relying on a hand-maintained module list. The `verifyDesktopRuntimeModules` Gradle task
