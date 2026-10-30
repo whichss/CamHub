@@ -14,6 +14,34 @@ struct CamHubEncodedAccessUnit {
 
 @main
 struct UdpVideoSenderSmoke {
+    private final class DatagramFailurePlan {
+        private let lock = NSLock()
+        private var targetPort: UInt16?
+        private var remainingFailures = 0
+        private var failureSignal: DispatchSemaphore?
+
+        func failNextDatagram(to port: UInt16) -> DispatchSemaphore {
+            lock.lock()
+            defer { lock.unlock() }
+            let signal = DispatchSemaphore(value: 0)
+            targetPort = port
+            remainingFailures = 1
+            failureSignal = signal
+            return signal
+        }
+
+        func shouldFail(_ address: sockaddr_in6) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard remainingFailures > 0,
+                  targetPort == UInt16(bigEndian: address.sin6_port) else { return false }
+            remainingFailures -= 1
+            failureSignal?.signal()
+            failureSignal = nil
+            return true
+        }
+    }
+
     private struct Hub {
         let socket: Int32
         let port: UInt16
@@ -23,7 +51,11 @@ struct UdpVideoSenderSmoke {
     }
 
     static func main() throws {
-        let sender = CamHubUdpVideoSender()
+        let failurePlan = DatagramFailurePlan()
+        let sender = CamHubUdpVideoSender { fd, packet, address in
+            if failurePlan.shouldFail(address) { return false }
+            return CamHubUdpVideoSender.writeDatagram(fd, packet, address)
+        }
         let senderPort = try sender.start()
         precondition(senderPort > 0)
         defer { sender.stop() }
@@ -90,7 +122,60 @@ struct UdpVideoSenderSmoke {
             precondition(complete?.frameSequence == 2, "A hub did not recover on the next keyframe")
             precondition(complete?.h264Bytes == recovery.bytes)
         }
-        print("Dual-hub UDP sender smoke passed: per-hub encryption, isolated loss, keyframe recovery")
+
+        // A local send failure for one hub must not stall P-frames to the healthy hub.
+        let failedHubSignal = failurePlan.failNextDatagram(to: hubs[1].port)
+        let afterLocalFailure = accessUnit(bytes: Data(repeating: 0x67, count: 3_000),
+                                           keyFrame: true, config: false, time: 3_000)
+        sender.publish(afterLocalFailure)
+        guard failedHubSignal.wait(timeout: .now() + 3) == .success else {
+            fatalError("The injected hub-specific send failure did not occur")
+        }
+        let afterLocalFailureCount = try expectedPacketCount(afterLocalFailure, sequence: 3)
+        var healthyFrame: CamHubVideoPayload?
+        for _ in 0..<afterLocalFailureCount {
+            if case let .frame(frame) = hubs[0].ingress.offer(try receive(hubs[0].socket), nowMs: 300) {
+                healthyFrame = frame
+            }
+        }
+        precondition(healthyFrame?.frameSequence == 3,
+                     "A failed write to one hub interrupted the healthy hub's keyframe")
+
+        let delta = accessUnit(bytes: Data(repeating: 0x41, count: 3_000),
+                               keyFrame: false, config: false, time: 3_033)
+        sender.publish(delta)
+        let deltaCount = try expectedPacketCount(delta, sequence: 4)
+        for _ in 0..<deltaCount {
+            if case let .frame(frame) = hubs[0].ingress.offer(try receive(hubs[0].socket), nowMs: 333) {
+                healthyFrame = frame
+            }
+        }
+        precondition(healthyFrame?.frameSequence == 4,
+                     "A local write failure stalled subsequent frames for the healthy hub")
+        var otherHubDelta: CamHubVideoPayload?
+        for _ in 0..<deltaCount {
+            if case let .frame(frame) = hubs[1].ingress.offer(try receive(hubs[1].socket), nowMs: 333) {
+                otherHubDelta = frame
+            }
+        }
+        precondition(otherHubDelta?.frameSequence == 4,
+                     "The other hub did not continue receiving after its local write failure")
+
+        let finalKeyFrame = accessUnit(bytes: Data(repeating: 0x68, count: 3_000),
+                                       keyFrame: true, config: false, time: 3_066)
+        sender.publish(finalKeyFrame)
+        let finalKeyFrameCount = try expectedPacketCount(finalKeyFrame, sequence: 5)
+        for hub in hubs {
+            var complete: CamHubVideoPayload?
+            for _ in 0..<finalKeyFrameCount {
+                if case let .frame(frame) = hub.ingress.offer(try receive(hub.socket), nowMs: 366) {
+                    complete = frame
+                }
+            }
+            precondition(complete?.frameSequence == 5,
+                         "A hub did not receive the next keyframe after an isolated local failure")
+        }
+        print("Dual-hub UDP sender smoke passed: per-hub encryption, isolated loss, keyframe recovery and local send failure isolation")
     }
 
     private static func accessUnit(bytes: Data, keyFrame: Bool, config: Bool,

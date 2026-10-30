@@ -97,10 +97,12 @@ prediction chain, it drops deltas until requesting and receiving a fresh keyfram
 The authenticated control channel also honors the hub's `request_key_frame` command, allowing the
 decoder recovery path to force a new IDR instead of waiting for the normal GOP interval. The sender
 includes SPS/PPS in each IDR and resends cached configuration to the requesting hub. Local UDP
-send failures trigger keyframe recovery; recovery requests are limited per hub. The macOS
+send failures request a rate-limited IDR while allowing the other hubs' P-frame queues to continue;
+they no longer put every subscription into a global wait-for-keyframe state. The macOS
 `ios/IntegrationTests/run-udp-video-sender-smoke.sh` loopback test compiles this sender and checks
 one IPv6 and one IPv4-mapped hub endpoint with separate session keys, one hub losing a media
-fragment, deadline expiry without a partial frame, and recovery when the next keyframe arrives.
+fragment, deadline expiry without a partial frame, recovery when the next keyframe arrives, and a
+destination-specific local send failure while the healthy hub continues receiving P-frames.
 It verifies the sender and shared ingress path, not feedback-control delivery or behavior on real
 Wi-Fi/iPhones.
 An authenticated hub can request an encoder bitrate between 1 and 20 Mbps. If multiple hubs

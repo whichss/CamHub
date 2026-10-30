@@ -28,9 +28,15 @@ final class CamHubUdpVideoSender {
     private var waitingForKeyFrame = false
     private var frameID: UInt64 = 0
     private var videoSequence: UInt64 = 0
+    private var lastLocalFailureKeyFrameRequestNanos: UInt64 = 0
     private var rtpSequence = UInt16.random(in: .min ... .max)
     private let ssrc = UInt32.random(in: .min ... .max)
+    private let datagramWriter: (Int32, Data, sockaddr_in6) -> Bool
     var onKeyFrameRequired: (() -> Void)?
+
+    init(datagramWriter: @escaping (Int32, Data, sockaddr_in6) -> Bool = CamHubUdpVideoSender.writeDatagram) {
+        self.datagramWriter = datagramWriter
+    }
 
     func start() throws -> UInt16 {
         return try queue.sync { () throws -> UInt16 in
@@ -168,6 +174,7 @@ final class CamHubUdpVideoSender {
             port = 0
             frameID = 0
             videoSequence = 0
+            lastLocalFailureKeyFrameRequestNanos = 0
         }
         pendingLock.lock()
         cachedCodecConfig = nil
@@ -222,12 +229,15 @@ final class CamHubUdpVideoSender {
                 }
             }
             if sendFailed {
-                requestRecovery()
+                // A local write failure affects only the destination whose datagram was
+                // rejected. Keep other hubs' prediction chains flowing and ask the shared
+                // encoder for an IDR so the affected hub can recover independently.
+                requestKeyFrameAfterLocalFailure()
                 return false
             }
             return true
         } catch {
-            requestRecovery()
+            requestKeyFrameAfterLocalFailure()
             return false
         }
     }
@@ -289,24 +299,27 @@ final class CamHubUdpVideoSender {
         return address
     }
 
-    private func requestRecovery() {
-        pendingLock.lock()
-        pendingAccessUnit = nil
-        pendingKeyFrame = nil
-        waitingForKeyFrame = true
-        pendingLock.unlock()
+    private func requestKeyFrameAfterLocalFailure() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let minimumInterval: UInt64 = 250_000_000
+        guard now &- lastLocalFailureKeyFrameRequestNanos >= minimumInterval else { return }
+        lastLocalFailureKeyFrameRequestNanos = now
         onKeyFrameRequired?()
     }
 
     private func send(_ packet: Data, to address: sockaddr_in6) -> Bool {
         guard socketFD >= 0 else { return false }
+        return datagramWriter(socketFD, packet, address)
+    }
+
+    static func writeDatagram(_ fd: Int32, _ packet: Data, _ address: sockaddr_in6) -> Bool {
         var remoteAddress = address
         return packet.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return false }
             return withUnsafePointer(to: &remoteAddress) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                     sendto(
-                        socketFD,
+                        fd,
                         base,
                         packet.count,
                         0,
