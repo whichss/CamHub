@@ -1,6 +1,7 @@
 package com.camhub.desktop
 
 import com.camhub.studio.data.network.FrameCipher
+import com.camhub.studio.data.network.DeadlineFrameReassembler
 import com.camhub.studio.data.network.RtpVideoPacketCodec
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -16,6 +17,46 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DesktopUdpVideoReceiverTest {
+    @Test
+    fun `reports pending frame capacity evictions for decoder recovery`() {
+        val sender = DatagramSocket(0, InetAddress.getLoopbackAddress())
+        val dropped = AtomicInteger(0)
+        val latch = CountDownLatch(1)
+        val receiver = DesktopUdpVideoReceiver(
+            cameraName = "capacity recovery",
+            expectedHost = InetAddress.getLoopbackAddress().hostAddress,
+            expectedSourcePort = sender.localPort,
+            sessionKey = ByteArray(32),
+            onFrame = {},
+            onStats = {},
+            onError = { throw AssertionError(it) },
+            onDroppedFrames = { count ->
+                dropped.addAndGet(count)
+                latch.countDown()
+            }
+        )
+
+        try {
+            val receivePort = receiver.start()
+            (1L..DeadlineFrameReassembler.DEFAULT_MAX_PENDING_FRAMES + 1L).forEach { frameId ->
+                val packet = RtpVideoPacketCodec.packetize(
+                    frame = ByteArray(3_000),
+                    transportFrameId = frameId,
+                    rtpTimestamp = frameId,
+                    ssrc = 1,
+                    firstRtpSequence = frameId.toInt()
+                ).first()
+                sender.send(DatagramPacket(packet, packet.size, InetAddress.getLoopbackAddress(), receivePort))
+            }
+
+            assertTrue("capacity eviction did not reach recovery callback", latch.await(1, TimeUnit.SECONDS))
+            assertEquals(1, dropped.get())
+        } finally {
+            receiver.close()
+            sender.close()
+        }
+    }
+
     @Test
     fun `concurrent start and close leave no listening socket`() {
         repeat(30) {

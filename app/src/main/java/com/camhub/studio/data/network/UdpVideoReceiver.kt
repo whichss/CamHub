@@ -50,12 +50,6 @@ class UdpVideoReceiver(
     }
 
     private val expectedAddress = InetAddress.getByName(expectedHost)
-    private val reassembler = DeadlineFrameReassembler(
-        frameDeadlineMs = frameDeadlineMs,
-        maxFrameBytes = DeadlineFrameReassembler.DEFAULT_MAX_FRAME_BYTES +
-            ENCRYPTION_OVERHEAD_BYTES
-    )
-    private val running = AtomicBoolean(false)
     private val lifecycleLock = Any()
     private val threadName = "HubUdpVideoReceive-" + cameraName
         .replace(Regex("[^A-Za-z0-9_-]"), "_")
@@ -63,14 +57,15 @@ class UdpVideoReceiver(
 
     @Volatile private var socket: DatagramSocket? = null
     @Volatile private var receiverThread: Thread? = null
+    @Volatile private var running: AtomicBoolean? = null
 
     val localPort: Int get() = socket?.localPort ?: 0
-    val isRunning: Boolean get() = running.get()
+    val isRunning: Boolean get() = running?.get() == true
 
     /** The binder is used by Android to pin this socket to Wi-Fi or Ethernet. */
     fun start(socketBinder: ((DatagramSocket) -> Unit)? = null): Int =
         synchronized(lifecycleLock) {
-            if (running.get()) return@synchronized localPort
+            if (running?.get() == true) return@synchronized localPort
 
             val newSocket = socketFactory().apply {
                 reuseAddress = true
@@ -86,8 +81,9 @@ class UdpVideoReceiver(
             }
 
             socket = newSocket
-            running.set(true)
-            receiverThread = Thread({ receiveLoop(newSocket) }, threadName).apply {
+            val activeRun = AtomicBoolean(true)
+            running = activeRun
+            receiverThread = Thread({ receiveLoop(newSocket, activeRun) }, threadName).apply {
                 isDaemon = true
                 start()
             }
@@ -95,15 +91,21 @@ class UdpVideoReceiver(
         }
 
     fun stop() = synchronized(lifecycleLock) {
-        running.set(false)
-        try { socket?.close() } catch (_: Exception) {}
+        running?.set(false)
+        running = null
+        val activeSocket = socket
         socket = null
+        try { activeSocket?.close() } catch (_: Exception) {}
         receiverThread?.interrupt()
         receiverThread = null
-        reassembler.clear()
     }
 
-    private fun receiveLoop(activeSocket: DatagramSocket) {
+    private fun receiveLoop(activeSocket: DatagramSocket, activeRun: AtomicBoolean) {
+        val reassembler = DeadlineFrameReassembler(
+            frameDeadlineMs = frameDeadlineMs,
+            maxFrameBytes = DeadlineFrameReassembler.DEFAULT_MAX_FRAME_BYTES +
+                ENCRYPTION_OVERHEAD_BYTES
+        )
         val buffer = ByteArray(RtpVideoPacketCodec.MAX_DATAGRAM_BYTES)
         val datagram = DatagramPacket(buffer, buffer.size)
         var packetsReceived = 0L
@@ -139,7 +141,7 @@ class UdpVideoReceiver(
             publishStats(nowMs)
         }
         try {
-            while (running.get()) {
+            while (activeRun.get()) {
                 try {
                     datagram.length = buffer.size
                     activeSocket.receive(datagram)
@@ -150,11 +152,17 @@ class UdpVideoReceiver(
                     packetsReceived++
                     datagramBytesReceived += datagram.length
                     onPacketBytes(datagram.length, receivedAtElapsedMs)
-                    when (val result = reassembler.offer(
+                    val result = reassembler.offer(
                         datagram = buffer,
                         length = datagram.length,
                         nowMs = receivedAtElapsedMs
-                    )) {
+                    )
+                    val capacityDrops = reassembler.takeCapacityDropStats()
+                    if (capacityDrops.frameCount > 0) {
+                        estimatedMissingPackets += capacityDrops.missingFragmentCount
+                        onDroppedFrames(capacityDrops.frameCount)
+                    }
+                    when (result) {
                         is DeadlineFrameReassembler.OfferResult.Complete -> {
                             completedFrames++
                             onFrame(
@@ -182,12 +190,18 @@ class UdpVideoReceiver(
                 }
             }
         } catch (error: SocketException) {
-            if (running.get()) onError(error)
+            if (activeRun.get()) onError(error)
         } catch (error: Throwable) {
-            if (running.get()) onError(error)
+            if (activeRun.get()) onError(error)
         } finally {
-            running.set(false)
+            activeRun.set(false)
             try { activeSocket.close() } catch (_: Exception) {}
+            synchronized(lifecycleLock) {
+                if (running === activeRun) running = null
+                if (socket === activeSocket) socket = null
+                if (receiverThread === Thread.currentThread()) receiverThread = null
+            }
+            reassembler.clear()
         }
     }
 

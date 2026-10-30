@@ -124,7 +124,14 @@ class DesktopUdpVideoReceiver(
                     if (expectedSourcePort != 0 && datagram.port != expectedSourcePort) continue
                     packets++
 
-                    when (val result = reassembler.offer(buffer, now, datagram.length)) {
+                    val result = reassembler.offer(buffer, now, datagram.length)
+                    val capacityDrops = reassembler.takeCapacityDropStats()
+                    if (capacityDrops.frameCount > 0) {
+                        dropped += capacityDrops.frameCount
+                        missing += capacityDrops.missingFragmentCount
+                        onDroppedFrames(capacityDrops.frameCount)
+                    }
+                    when (result) {
                         is DeadlineFrameReassembler.OfferResult.Complete -> {
                             val payload = try {
                                 CamHubVideoPayloadCodec.decode(cipher.decrypt(result.frame.bytes))

@@ -55,6 +55,11 @@ class DeadlineFrameReassembler(
         val missingFragmentCount: Int
     )
 
+    data class CapacityDropStats(
+        val frameCount: Int,
+        val missingFragmentCount: Int
+    )
+
     sealed interface OfferResult {
         data object Accepted : OfferResult
         data object Duplicate : OfferResult
@@ -74,6 +79,8 @@ class DeadlineFrameReassembler(
     private val pending = LinkedHashMap<Long, PendingFrame>()
     private val terminalFrameIds = LinkedHashSet<Long>()
     private val packetScratch = RtpVideoPacketCodec.ReusablePacketView()
+    private var capacityDroppedFrames = 0
+    private var capacityDroppedFragments = 0
 
     fun offer(
         datagram: ByteArray,
@@ -97,7 +104,10 @@ class DeadlineFrameReassembler(
         if (assembly == null) {
             if (pending.size >= maxPendingFrames) {
                 val oldestFrameId = pending.entries.first().key
-                pending.remove(oldestFrameId)
+                pending.remove(oldestFrameId)?.let { evicted ->
+                    capacityDroppedFrames++
+                    capacityDroppedFragments += evicted.packet.fragmentCount - evicted.receivedFragments
+                }
                 rememberTerminal(oldestFrameId)
             }
             // Retain metadata only, never the receiver's reusable datagram buffer.
@@ -170,9 +180,19 @@ class DeadlineFrameReassembler(
     fun clear() {
         pending.clear()
         terminalFrameIds.clear()
+        capacityDroppedFrames = 0
+        capacityDroppedFragments = 0
     }
 
     fun pendingFrameCount(): Int = pending.size
+
+    /** Returns and clears partial frames evicted to enforce [maxPendingFrames]. */
+    fun takeCapacityDropStats(): CapacityDropStats {
+        val result = CapacityDropStats(capacityDroppedFrames, capacityDroppedFragments)
+        capacityDroppedFrames = 0
+        capacityDroppedFragments = 0
+        return result
+    }
 
     private fun metadataMatches(
         first: RtpVideoPacketCodec.Packet,

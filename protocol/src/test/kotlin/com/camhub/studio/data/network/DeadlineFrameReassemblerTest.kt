@@ -19,6 +19,8 @@ class DeadlineFrameReassemblerTest {
         }
 
         assertEquals(DeadlineFrameReassembler.DEFAULT_MAX_PENDING_FRAMES, assembler.pendingFrameCount())
+        assertEquals(DeadlineFrameReassembler.CapacityDropStats(1, 2), assembler.takeCapacityDropStats())
+        assertEquals(DeadlineFrameReassembler.CapacityDropStats(0, 0), assembler.takeCapacityDropStats())
         assertEquals(
             DeadlineFrameReassembler.OfferResult.Dropped(DeadlineFrameReassembler.DropReason.ALREADY_FINISHED),
             assembler.offer(

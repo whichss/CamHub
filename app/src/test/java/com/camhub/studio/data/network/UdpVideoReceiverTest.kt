@@ -15,6 +15,83 @@ import org.junit.Test
 class UdpVideoReceiverTest {
 
     @Test
+    fun `stopping and restarting creates an isolated receiver run`() {
+        val loopback = InetAddress.getLoopbackAddress()
+        val senderSocket = DatagramSocket(0, loopback)
+        val received = CountDownLatch(1)
+        val error = AtomicReference<Throwable?>()
+        val receiver = UdpVideoReceiver(
+            cameraName = "Restarting Camera",
+            expectedHost = loopback.hostAddress ?: "127.0.0.1",
+            expectedSourcePort = senderSocket.localPort,
+            frameDeadlineMs = 500,
+            onFrame = { _, _, _ -> received.countDown() },
+            onError = { error.set(it) }
+        )
+
+        try {
+            receiver.start()
+            receiver.stop()
+            val restartedPort = receiver.start()
+            val frame = ByteArray(800) { (it % 239).toByte() }
+            val packet = RtpVideoPacketCodec.packetize(
+                frame = frame,
+                transportFrameId = 1,
+                rtpTimestamp = 90_000,
+                ssrc = 12,
+                firstRtpSequence = 1,
+                isKeyFrame = true
+            ).single()
+            senderSocket.send(DatagramPacket(packet, packet.size, loopback, restartedPort))
+
+            assertTrue("restarted receiver did not deliver the frame", received.await(1, TimeUnit.SECONDS))
+            assertEquals(null, error.get())
+        } finally {
+            receiver.stop()
+            senderSocket.close()
+        }
+    }
+
+    @Test
+    fun `receiver reports a capacity eviction so decoder recovery can start`() {
+        val loopback = InetAddress.getLoopbackAddress()
+        val senderSocket = DatagramSocket(0, loopback)
+        val dropped = AtomicInteger(0)
+        val dropObserved = CountDownLatch(1)
+        val receiver = UdpVideoReceiver(
+            cameraName = "Camera Capacity",
+            expectedHost = loopback.hostAddress ?: "127.0.0.1",
+            expectedSourcePort = senderSocket.localPort,
+            frameDeadlineMs = 1_000,
+            onFrame = { _, _, _ -> },
+            onDroppedFrames = { count ->
+                dropped.addAndGet(count)
+                dropObserved.countDown()
+            }
+        )
+
+        try {
+            val port = receiver.start()
+            (1L..DeadlineFrameReassembler.DEFAULT_MAX_PENDING_FRAMES + 1L).forEach { frameId ->
+                val firstPacket = RtpVideoPacketCodec.packetize(
+                    frame = ByteArray(3_000),
+                    transportFrameId = frameId,
+                    rtpTimestamp = frameId,
+                    ssrc = 1,
+                    firstRtpSequence = frameId.toInt()
+                ).first()
+                senderSocket.send(DatagramPacket(firstPacket, firstPacket.size, loopback, port))
+            }
+
+            assertTrue("capacity eviction did not reach recovery callback", dropObserved.await(1, TimeUnit.SECONDS))
+            assertEquals(1, dropped.get())
+        } finally {
+            receiver.stop()
+            senderSocket.close()
+        }
+    }
+
+    @Test
     fun `receiver accepts native IPv6 source address`() {
         val loopback = InetAddress.getByName("::1")
         val senderSocket = DatagramSocket(0, loopback)
