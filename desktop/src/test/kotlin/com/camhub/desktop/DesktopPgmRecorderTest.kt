@@ -32,8 +32,14 @@ class DesktopPgmRecorderTest {
         try {
             recorder.start(output)
             assertTrue(
-                "Recorder did not start: ${snapshot.get()}",
-                await { snapshot.get()?.state == DesktopRecordingState.RECORDING }
+                "Recorder startup timed out: ${snapshot.get()}",
+                await(timeoutMs = 30_000) {
+                    snapshot.get()?.state in setOf(DesktopRecordingState.RECORDING, DesktopRecordingState.FAILED)
+                }
+            )
+            assertTrue(
+                "Recorder failed to start: ${snapshot.get()}",
+                snapshot.get()?.state == DesktopRecordingState.RECORDING
             )
             repeat(8) {
                 recorder.offerFrame(DesktopVideoFrame(redImage))
