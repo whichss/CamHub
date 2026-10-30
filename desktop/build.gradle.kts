@@ -38,6 +38,11 @@ dependencies {
     testImplementation(libs.junit)
 }
 
+tasks.test {
+    // Unit tests render images offscreen and must not initialize a native desktop session.
+    systemProperty("java.awt.headless", "true")
+}
+
 fun desktopNativePlatform(): String {
     val os = System.getProperty("os.name").lowercase()
     val architecture = System.getProperty("os.arch").lowercase()
@@ -52,14 +57,17 @@ fun desktopNativePlatform(): String {
 
 val macAppName = "CamHub Desktop"
 val macAppDirectory = layout.buildDirectory.dir("package/macos/$macAppName.app")
+val macRuntimeStagingDirectory = layout.buildDirectory.dir("package/macos/runtime-staging")
 
 tasks.register("packageMacApp") {
     group = "distribution"
     description = "Builds a self-contained macOS .app bundle."
     dependsOn(tasks.named("installDist"))
 
-    onlyIf {
-        System.getProperty("os.name").startsWith("Mac", ignoreCase = true)
+    doFirst {
+        require(System.getProperty("os.name").startsWith("Mac", ignoreCase = true)) {
+            "macOS app packaging requires a macOS host."
+        }
     }
 
     doLast {
@@ -73,6 +81,16 @@ tasks.register("packageMacApp") {
 
         require(javaHome.resolve("bin/java").isFile) {
             "Java was not found in the Gradle runtime: ${javaHome.absolutePath}"
+        }
+
+        // Gradle may itself be running from the previous app bundle's embedded runtime. Stage the
+        // runtime outside the bundle before replacing it, otherwise deleting appDirectory also
+        // deletes the Java installation that this task is about to copy.
+        val stagedRuntime = macRuntimeStagingDirectory.get().asFile
+        delete(stagedRuntime)
+        copy {
+            from(javaHome)
+            into(stagedRuntime)
         }
 
         delete(appDirectory)
@@ -93,9 +111,10 @@ tasks.register("packageMacApp") {
             into(executableDirectory)
         }
         copy {
-            from(javaHome)
+            from(stagedRuntime)
             into(runtimeDirectory)
         }
+        delete(stagedRuntime)
 
         executableDirectory.resolve(macAppName).setExecutable(true)
         runtimeDirectory.resolve("bin/java").setExecutable(true)
@@ -115,14 +134,61 @@ tasks.register("packageMacApp") {
 }
 
 val windowsInstallerDirectory = layout.buildDirectory.dir("package/windows")
+val detectDesktopRuntimeModules: (File) -> String = { inputDirectory ->
+    val jdepsName = if (System.getProperty("os.name").contains("Windows", ignoreCase = true)) {
+        "jdeps.exe"
+    } else {
+        "jdeps"
+    }
+    val jdeps = file(System.getProperty("java.home")).resolve("bin/$jdepsName")
+    require(jdeps.isFile) { "$jdepsName was not found. Build with a full JDK 17 or newer." }
+    val execution = providers.exec {
+        commandLine(
+            jdeps.absolutePath,
+            "--recursive",
+            "--print-module-deps",
+            "--multi-release", "17",
+            "--ignore-missing-deps",
+            "--class-path", "${inputDirectory.absolutePath}/*",
+            inputDirectory.resolve("desktop.jar").absolutePath,
+        )
+    }
+    execution.result.get().assertNormalExitValue()
+    execution.standardOutput.asText.get().trim().also { modules ->
+        require(modules.matches(Regex("[A-Za-z0-9_.]+(,[A-Za-z0-9_.]+)*"))) {
+            "jdeps returned an invalid runtime module list: $modules"
+        }
+    }
+}
+
+tasks.register("verifyDesktopRuntimeModules") {
+    group = "verification"
+    description = "Checks that the packaged desktop runtime includes every module used by the app."
+    dependsOn(tasks.named("installDist"))
+    doLast {
+        val inputDirectory = layout.buildDirectory
+            .dir("install/$macAppName/lib")
+            .get()
+            .asFile
+        val modules = detectDesktopRuntimeModules(inputDirectory).split(',').toSet()
+        val requiredModules = setOf("java.prefs", "jdk.httpserver", "jdk.unsupported")
+        val missing = requiredModules - modules
+        check(missing.isEmpty()) {
+            "Runtime module analysis missed expected modules: ${missing.joinToString()}; found ${modules.joinToString()}"
+        }
+        logger.lifecycle("Desktop runtime modules: ${modules.sorted().joinToString()}")
+    }
+}
 
 tasks.register("packageWindowsExe") {
     group = "distribution"
     description = "Builds a self-contained Windows .exe installer."
     dependsOn(tasks.named("installDist"))
 
-    onlyIf {
-        System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+    doFirst {
+        require(System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+            "Windows installer packaging requires a Windows host with WiX."
+        }
     }
 
     doLast {
@@ -136,6 +202,7 @@ tasks.register("packageWindowsExe") {
         require(jpackage.isFile) {
             "jpackage.exe was not found. Build with a full Windows JDK 17 or newer."
         }
+        val requiredModules = detectDesktopRuntimeModules(inputDirectory)
 
         delete(outputDirectory)
         outputDirectory.mkdirs()
@@ -151,7 +218,7 @@ tasks.register("packageWindowsExe") {
                 "--input", inputDirectory.absolutePath,
                 "--main-jar", "desktop.jar",
                 "--main-class", "com.camhub.desktop.MainKt",
-                "--add-modules", "java.desktop,java.logging,java.management,jdk.unsupported",
+                "--add-modules", requiredModules,
                 "--win-dir-chooser",
                 "--win-menu",
                 "--win-shortcut",

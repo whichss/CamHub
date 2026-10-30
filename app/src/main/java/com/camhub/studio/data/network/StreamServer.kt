@@ -34,10 +34,6 @@ class StreamServer @Inject constructor(
     companion object {
         private const val TAG = "StreamServer"
         private const val MAX_CLIENTS = 4
-        private const val META_HEADER_V4: Byte = 4
-        private const val META_HEADER_V4_SIZE = 31
-        private const val FLAG_KEYFRAME: Byte = 0x01
-        private const val FLAG_CODEC_CONFIG: Byte = 0x02
         private const val MAX_BLOCKED_SEND_MS = 750L
     }
 
@@ -47,8 +43,11 @@ class StreamServer @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var serverSocket: ServerSocket? = null
+    private var tcpFallbackServerSocket: ServerSocket? = null
     private var srtServerSocket: SrtSocket? = null
     private var serverJob: Job? = null
+    private var tcpFallbackJob: Job? = null
+    @Volatile private var tcpFallbackPort: Int = 0
     private val clients = CopyOnWriteArrayList<ClientConnection>()
     private val _clientCount = MutableStateFlow(0)
     val clientCount: StateFlow<Int> = _clientCount.asStateFlow()
@@ -159,6 +158,8 @@ class StreamServer @Inject constructor(
         srtServerSocket = srtSocket
         usingSrt = true
         val port = srtSocket.localPort
+        runCatching { startTcpFallbackListener() }
+            .onFailure { Log.w(TAG, "Authenticated TCP fallback listener unavailable", it) }
 
         serverJob = scope.launch {
             Log.d(TAG, "SRT stream server started on port $port")
@@ -201,6 +202,7 @@ class StreamServer @Inject constructor(
     private fun startTcp(): Int {
         serverSocket = ServerSocket(0)
         val port = serverSocket!!.localPort
+        tcpFallbackPort = port
         usingSrt = false
 
         serverJob = scope.launch {
@@ -334,8 +336,7 @@ class StreamServer @Inject constructor(
         val spsPps = encoder?.cachedSpsPps ?: return
         try {
             val payload = buildH264Payload(spsPps, encoderWidth, encoderHeight, 0, false, true)
-            val dataToSend = if (usingSrt) payload
-                             else frameCipher?.encrypt(payload) ?: payload
+            val dataToSend = frameForClient(client, payload)
             client.sendFrame(dataToSend)
             client.needsConfig = false
             Log.d(TAG, "Sent SPS/PPS config to new client")
@@ -357,8 +358,7 @@ class StreamServer @Inject constructor(
                 false,
                 true
             )
-            val dataToSend = if (usingSrt) payload
-                             else frameCipher?.encrypt(payload) ?: payload
+            val dataToSend = frameForClient(client, payload)
             client.sendFrame(dataToSend)
             client.needsConfig = false
             Log.d(TAG, "Sent cached surface SPS/PPS config to new client")
@@ -379,16 +379,13 @@ class StreamServer @Inject constructor(
             }
             return
         }
-        val dataToSend = if (usingSrt) payload
-                         else frameCipher?.encrypt(payload) ?: payload
-
         val dimensionsChanged = width != encoderWidth || height != encoderHeight
         val disconnected = mutableListOf<ClientConnection>()
         for (client in clients) {
             // Send config to new clients OR all clients when dimensions changed (rotation)
             if (client.needsConfig || dimensionsChanged) {
                 try {
-                    client.sendFrame(dataToSend)
+                    client.sendFrame(frameForClient(client, payload))
                     client.needsConfig = false
                 } catch (e: Exception) {
                     disconnected.add(client)
@@ -412,27 +409,34 @@ class StreamServer @Inject constructor(
         isConfig: Boolean,
         captureAtWallMs: Long? = null
     ): ByteArray {
-        val rotationCode: Byte = when (rotationDegrees) {
-            90 -> 1; 180 -> 2; 270 -> 3; else -> 0
-        }
-        var flags: Int = 0
-        if (isKeyFrame) flags = flags or FLAG_KEYFRAME.toInt()
-        if (isConfig) flags = flags or FLAG_CODEC_CONFIG.toInt()
-
         val payloadReadyAtWallMs = System.currentTimeMillis()
         val sequence = if (isConfig) 0L else videoFrameSequence.incrementAndGet()
         val captureWallMs = captureAtWallMs ?: payloadReadyAtWallMs
+        return CamHubVideoPayloadCodec.encode(
+            width, height, rotationDegrees, isKeyFrame, isConfig,
+            sequence, captureWallMs, payloadReadyAtWallMs, data
+        )
+    }
 
-        val header = ByteBuffer.allocate(META_HEADER_V4_SIZE)
-        header.put(META_HEADER_V4)
-        header.putShort(width.toShort())
-        header.putShort(height.toShort())
-        header.put(rotationCode)
-        header.put(flags.toByte())
-        header.putLong(sequence)
-        header.putLong(captureWallMs)
-        header.putLong(payloadReadyAtWallMs)
-        return header.array() + data
+    /** Copies codec bytes directly into the final CamHub payload array. */
+    private fun buildH264Payload(
+        buffer: ByteBuffer,
+        offset: Int,
+        size: Int,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        isKeyFrame: Boolean,
+        isConfig: Boolean,
+        captureAtWallMs: Long? = null
+    ): ByteArray {
+        val payloadReadyAtWallMs = System.currentTimeMillis()
+        val sequence = if (isConfig) 0L else videoFrameSequence.incrementAndGet()
+        val captureWallMs = captureAtWallMs ?: payloadReadyAtWallMs
+        return CamHubVideoPayloadCodec.encodeFromBuffer(
+            width, height, rotationDegrees, isKeyFrame, isConfig,
+            sequence, captureWallMs, payloadReadyAtWallMs, buffer, offset, size
+        )
     }
 
     private fun cameraTimestampToWallMs(timestampNs: Long): Long {
@@ -510,11 +514,10 @@ class StreamServer @Inject constructor(
     private fun broadcastFrame(payload: ByteArray, isKeyFrame: Boolean = false) {
         udpSender.enqueueFrame(payload, isKeyFrame = isKeyFrame)
         if (clients.isEmpty()) return
-        val dataToSend = if (usingSrt) payload  // SRT handles encryption via passphrase
-                         else frameCipher?.encrypt(payload) ?: payload
 
         val now = System.currentTimeMillis()
         for (client in clients) {
+            val dataToSend = frameForClient(client, payload)
             if (client.isSending) {
                 if (now - client.sendStartedAtMs > MAX_BLOCKED_SEND_MS) {
                     clientsToRemove.add(client)
@@ -629,6 +632,27 @@ class StreamServer @Inject constructor(
 
     fun getUdpPort(): Int = udpSender.localPort
 
+    fun udpSendMetrics(): UdpVideoSender.SendMetrics = udpSender.sendMetrics()
+
+    /** Consumes a codec-owned output buffer synchronously without an intermediate AU array. */
+    fun broadcastEncodedBuffer(
+        buffer: ByteBuffer,
+        offset: Int,
+        size: Int,
+        width: Int,
+        height: Int,
+        rotation: Int,
+        isKeyFrame: Boolean,
+        captureAtWallMs: Long?
+    ) {
+        if (!hasVideoClients() || size <= 0) return
+        val payload = buildH264Payload(
+            buffer, offset, size, width, height, rotation,
+            isKeyFrame, isConfig = false, captureAtWallMs = captureAtWallMs
+        )
+        broadcastFrame(payload, isKeyFrame)
+    }
+
     fun broadcastEncodedFrame(frame: EncodedFrame, width: Int, height: Int, rotation: Int) {
         if (frame.isConfig) {
             latestSurfaceConfig = frame.data
@@ -641,12 +665,10 @@ class StreamServer @Inject constructor(
             val payload = buildH264Payload(frame.data, width, height, rotation, false, true)
             udpSender.enqueueFrame(payload, isCodecConfig = true)
             if (clients.isNotEmpty()) {
-                val dataToSend = if (usingSrt) payload
-                                 else frameCipher?.encrypt(payload) ?: payload
                 val disconnected = mutableListOf<ClientConnection>()
                 for (client in clients) {
                     try {
-                        client.sendFrame(dataToSend)
+                        client.sendFrame(frameForClient(client, payload))
                         client.needsConfig = false
                     } catch (e: Exception) {
                         disconnected.add(client)
@@ -689,6 +711,8 @@ class StreamServer @Inject constructor(
     fun stop() {
         serverJob?.cancel()
         serverJob = null
+        tcpFallbackJob?.cancel()
+        tcpFallbackJob = null
         clients.forEach {
             try { it.close() } catch (_: Exception) {}
         }
@@ -699,6 +723,9 @@ class StreamServer @Inject constructor(
         srtServerSocket = null
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
+        try { tcpFallbackServerSocket?.close() } catch (_: Exception) {}
+        tcpFallbackServerSocket = null
+        tcpFallbackPort = 0
         usingSrt = false
         frameCipher = null
         srtPassphrase = null
@@ -725,5 +752,49 @@ class StreamServer @Inject constructor(
     fun getPort(): Int {
         if (usingSrt) return srtServerSocket?.localPort ?: 0
         return serverSocket?.localPort ?: 0
+    }
+
+    private fun frameForClient(client: ClientConnection, payload: ByteArray): ByteArray =
+        if (client is ClientConnection.SrtConnection) payload
+        else frameCipher?.encrypt(payload) ?: payload
+
+    fun getTcpPort(): Int = tcpFallbackPort
+
+    private fun startTcpFallbackListener() {
+        if (tcpFallbackServerSocket != null) return
+        val socket = ServerSocket(0)
+        tcpFallbackServerSocket = socket
+        tcpFallbackPort = socket.localPort
+        tcpFallbackJob = scope.launch {
+            Log.d(TAG, "Authenticated TCP fallback server started on port $tcpFallbackPort")
+            while (isActive) {
+                try {
+                    val clientSocket = socket.accept()
+                    if (clients.size >= MAX_CLIENTS) {
+                        runCatching { clientSocket.close() }
+                        continue
+                    }
+                    clientSocket.keepAlive = true
+                    clientSocket.tcpNoDelay = true
+                    val client = ClientConnection.TcpConnection(
+                        clientSocket,
+                        DataOutputStream(clientSocket.getOutputStream()),
+                        needsConfig = true
+                    )
+                    clients.add(client)
+                    updateClientCount()
+                    if (useH264) {
+                        sendConfigToClient(client)
+                        encoder?.requestKeyFrame()
+                    } else {
+                        sendLatestSurfaceConfigToClient(client)
+                        keyFrameRequester?.invoke()
+                    }
+                } catch (error: Exception) {
+                    if (isActive) Log.e(TAG, "TCP fallback accept error", error)
+                    break
+                }
+            }
+        }
     }
 }

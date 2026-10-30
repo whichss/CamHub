@@ -3,6 +3,7 @@ package com.camhub.studio.data.metrics
 data class PipelineLatencyBreakdown(
     val frameSequence: Long,
     val captureToEncodeMs: Int,
+    /** Starts at sender payload construction after encoding; includes send queue, transport and frame reassembly. */
     val encodeToReceiveMs: Int,
     val receiveToDecodeMs: Int,
     val decodeToReadyMs: Int,
@@ -14,6 +15,7 @@ data class PipelineLatencyBreakdown(
 data class PipelineTimingPoints(
     val frameSequence: Long,
     val captureAtRemoteWallMs: Long,
+    /** Stream metadata records this after encoding while constructing the payload, before UDP enqueue/send. */
     val encodedAtRemoteWallMs: Long,
     val receivedAtLocalWallMs: Long,
     val receivedAtLocalElapsedMs: Long,

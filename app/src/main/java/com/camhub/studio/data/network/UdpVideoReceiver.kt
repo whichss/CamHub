@@ -39,7 +39,7 @@ class UdpVideoReceiver(
     private val statsIntervalMs: Long = 1_000L,
     private val socketFactory: () -> DatagramSocket = { DatagramSocket(null) },
     private val onFrame: (bytes: ByteArray, receivedAtWallMs: Long, receivedAtElapsedMs: Long) -> Unit,
-    private val onPacketBytes: (Int) -> Unit = {},
+    private val onPacketBytes: (bytes: Int, receivedAtElapsedMs: Long) -> Unit = { _, _ -> },
     private val onDroppedFrames: (Int) -> Unit = {},
     private val onStats: (UdpReceiverStats) -> Unit = {},
     private val onError: (Throwable) -> Unit = {}
@@ -149,7 +149,7 @@ class UdpVideoReceiver(
 
                     packetsReceived++
                     datagramBytesReceived += datagram.length
-                    onPacketBytes(datagram.length)
+                    onPacketBytes(datagram.length, receivedAtElapsedMs)
                     when (val result = reassembler.offer(
                         datagram = buffer,
                         length = datagram.length,
@@ -192,7 +192,7 @@ class UdpVideoReceiver(
     }
 
     private fun sourceMatches(datagram: DatagramPacket): Boolean =
-        datagram.address == expectedAddress &&
+        IpAddressMatcher.matches(expectedAddress, datagram.address) &&
             (expectedSourcePort == 0 || datagram.port == expectedSourcePort)
 
     private fun elapsedRealtimeMs(): Long = System.nanoTime() / 1_000_000L

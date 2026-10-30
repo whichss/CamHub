@@ -88,7 +88,11 @@ class AudioStreamClient @Inject constructor(
     private var currentPlaybackRate: Int = SAMPLE_RATE_PCM
     private var consecutiveZeroWrites = 0
 
-    /** Non-blocking program-mix tap used by the director's A/V recorder. */
+    /**
+     * Synchronous program-mix tap. The callback must consume the samples before
+     * returning and must not retain the array; the recorder copies into its own
+     * bounded queue when it accepts a chunk.
+     */
     @Volatile
     var onMixedPcm: ((ShortArray, Long) -> Unit)? = null
 
@@ -222,7 +226,7 @@ class AudioStreamClient @Inject constructor(
 
                     // Non-blocking write keeps live monitoring from growing latency.
                     // If the audio device dies or becomes invalid, rebuild it in-place.
-                    onMixedPcm?.invoke(outputBuffer.copyOf(), System.nanoTime())
+                    onMixedPcm?.invoke(outputBuffer, System.nanoTime())
                     writeOutputBuffer(outputBuffer, sampleRate, bytesPerChunk)
                 } else {
                     _masterLevel.value = 0f

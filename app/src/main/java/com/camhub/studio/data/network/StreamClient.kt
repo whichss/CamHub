@@ -148,6 +148,7 @@ class StreamClient @Inject constructor(
     private val streamJobs = ConcurrentHashMap<String, Job>()
     private val udpReceivers = ConcurrentHashMap<String, UdpVideoReceiver>()
     private val udpWatchdogJobs = ConcurrentHashMap<String, Job>()
+    private val udpIngressBurstTracker = UdpIngressBurstTracker()
     private val bytesReceivedMap = ConcurrentHashMap<String, AtomicLong>()
     private val lastBitrateTimeMap = ConcurrentHashMap<String, AtomicLong>()
     private val frameSequenceMap = ConcurrentHashMap<String, AtomicLong>()
@@ -170,6 +171,8 @@ class StreamClient @Inject constructor(
     private val lastExternalLatencySnapshotTimeMap = ConcurrentHashMap<String, AtomicLong>()
     private val latencyTrackers = ConcurrentHashMap<String, RollingLatencyTracker>()
     private val lastLatencySnapshotTimeMap = ConcurrentHashMap<String, AtomicLong>()
+    private data class DecoderConfig(val width: Int, val height: Int, val bytes: ByteArray)
+    private val decoderConfigs = ConcurrentHashMap<String, DecoderConfig>()
     private val decoders = ConcurrentHashMap<String, H264Decoder>()
     private val glRenderers = ConcurrentHashMap<String, DecoderGlRenderer>()
     private data class RendererMetricBaseline(val renderedFrames: Long, val sampledAtMs: Long)
@@ -185,20 +188,26 @@ class StreamClient @Inject constructor(
         cameraName: String,
         ip: String,
         streamPort: Int,
+        tcpStreamPort: Int = streamPort,
+        tcpAuthToken: ByteArray? = null,
         sessionKey: ByteArray? = null,
         network: Network? = null,
         fallbackReason: String = ""
     ) {
         val previousUdpState = _streams.value[cameraName]
             ?.takeIf { fallbackReason.isNotBlank() }
+        val reliableTcpPort = tcpStreamPort.takeIf { it in 1..65_535 } ?: streamPort
+        val reliableTcpAuthToken = tcpAuthToken?.copyOf()
         wifiLock.acquire()
         // Cancel existing stream for this camera
         streamJobs.remove(cameraName)?.cancel()
         udpReceivers.remove(cameraName)?.stop()
+        udpIngressBurstTracker.remove(cameraName)
         udpWatchdogJobs.remove(cameraName)?.cancel()
         decoderDispatchers.remove(cameraName)?.close()
         glRenderers.remove(cameraName)?.release()
         decoders.remove(cameraName)?.release()
+        decoderConfigs.remove(cameraName)
 
         bytesReceivedMap[cameraName] = AtomicLong(0)
         lastBitrateTimeMap[cameraName] = AtomicLong(System.currentTimeMillis())
@@ -254,8 +263,9 @@ class StreamClient @Inject constructor(
                     // clear it before waiting for the next config frame.
                     resetDecoderStateForReconnect(cameraName)
 
-                    // Try SRT first, fall back to TCP on failure
-                    if (SrtTransport.isAvailable() && sessionKey != null) {
+                    // An advertised authenticated TCP endpoint is an explicit fallback for sources
+                    // such as iOS that do not expose SRT. Avoid waiting on an SRT handshake there.
+                    if (reliableTcpAuthToken == null && SrtTransport.isAvailable() && sessionKey != null) {
                         try {
                             connectSrt(cameraName, ip, streamPort, sessionKey, network)
                             // A completed receive loop means the socket closed.
@@ -268,7 +278,7 @@ class StreamClient @Inject constructor(
                         }
                     }
 
-                    connectTcp(cameraName, ip, streamPort, sessionKey, network)
+                    connectTcp(cameraName, ip, reliableTcpPort, reliableTcpAuthToken, sessionKey, network)
                     attempt = 1
                 } catch (e: Exception) {
                     if (isActive) {
@@ -283,9 +293,11 @@ class StreamClient @Inject constructor(
             if (streamJobs[cameraName] == currentJob) {
                 streamJobs.remove(cameraName)
                 glRenderers.remove(cameraName)?.release()
+                udpIngressBurstTracker.remove(cameraName)
                 renderFpsLimits.remove(cameraName)
                 decoderDispatchers.remove(cameraName)?.close()
                 decoders.remove(cameraName)?.release()
+                decoderConfigs.remove(cameraName)
                 bytesReceivedMap.remove(cameraName)
                 lastBitrateTimeMap.remove(cameraName)
                 frameSequenceMap.remove(cameraName)
@@ -341,6 +353,7 @@ class StreamClient @Inject constructor(
         decoderDispatchers.remove(cameraName)?.close()
         glRenderers.remove(cameraName)?.release()
         decoders.remove(cameraName)?.release()
+        decoderConfigs.remove(cameraName)
         initializeTracking(cameraName)
 
         val frameQueue = Channel<ReceivedFrame>(capacity = FRAME_QUEUE_CAPACITY)
@@ -394,11 +407,15 @@ class StreamClient @Inject constructor(
                     ReceivedFrame(bytes, receivedAtWallMs, receivedAtElapsedMs)
                 )
             },
-            onPacketBytes = { bytes ->
+            onPacketBytes = { bytes, receivedAtElapsedMs ->
                 bytesReceivedMap[cameraName]?.addAndGet(bytes.toLong())
+                udpIngressBurstTracker.record(cameraName, bytes, receivedAtElapsedMs)
             },
             onDroppedFrames = { count ->
-                repeat(count) { noteDroppedFrame(cameraName) }
+                if (count > 0) {
+                    repeat(count) { noteDroppedFrame(cameraName) }
+                    enterKeyFrameRecovery(cameraName, "udp_incomplete_frame")
+                }
             },
             onStats = { stats ->
                 val current = _streams.value[cameraName]
@@ -553,6 +570,7 @@ class StreamClient @Inject constructor(
     private fun resetDecoderStateForReconnect(cameraName: String) {
         glRenderers.remove(cameraName)?.release()
         decoders.remove(cameraName)?.release()
+        decoderConfigs.remove(cameraName)
         decodeErrorMap[cameraName]?.set(0)
         awaitingKeyFrameMap[cameraName]?.set(false)
         lastKeyFrameRequestAtMap[cameraName]?.set(0L)
@@ -630,6 +648,7 @@ class StreamClient @Inject constructor(
         cameraName: String,
         ip: String,
         port: Int,
+        authToken: ByteArray?,
         sessionKey: ByteArray?,
         network: Network?
     ) {
@@ -641,6 +660,7 @@ class StreamClient @Inject constructor(
             socket.keepAlive = true
             socket.tcpNoDelay = true
             socket.receiveBufferSize = 64 * 1024
+            writeTcpStreamAuthToken(socket.getOutputStream(), authToken)
             val input = DataInputStream(socket.getInputStream())
 
             Log.d(TAG, "TCP connected to stream $cameraName at $ip:$port")
@@ -737,9 +757,15 @@ class StreamClient @Inject constructor(
     }
 
     private fun dropQueuedFrames(cameraName: String, frameQueue: Channel<ReceivedFrame>) {
-        while (frameQueue.tryReceive().getOrNull() != null) {
-            noteDroppedFrame(cameraName)
+        var droppedVideo = false
+        while (true) {
+            val dropped = frameQueue.tryReceive().getOrNull() ?: break
+            if (!isConfigFrame(dropped.bytes)) {
+                noteDroppedFrame(cameraName)
+                droppedVideo = true
+            }
         }
+        if (droppedVideo) enterKeyFrameRecovery(cameraName, "config_queue_reset")
     }
 
     private fun noteDroppedFrame(cameraName: String) {
@@ -755,7 +781,7 @@ class StreamClient @Inject constructor(
         return parseH264FrameMeta(frameBytes)?.isConfig == true
     }
 
-    private fun processFrame(cameraName: String, receivedFrame: ReceivedFrame) {
+    private suspend fun processFrame(cameraName: String, receivedFrame: ReceivedFrame) {
         val decrypted = receivedFrame.bytes
         val meta = parseH264FrameMeta(decrypted) ?: return
         if (!meta.isConfig) {
@@ -946,7 +972,7 @@ class StreamClient @Inject constructor(
         return value
     }
 
-    private fun decodeH264(
+    private suspend fun decodeH264(
         cameraName: String,
         receivedFrame: ReceivedFrame,
         meta: H264FrameMeta
@@ -957,35 +983,41 @@ class StreamClient @Inject constructor(
         if (h264Length <= 0) return null
         val h264Data = decrypted  // use offset-based access to avoid copy
 
+        if (!meta.isConfig && meta.isKeyFrame && decoders[cameraName] == null) {
+            val config = H264ParameterSets.extract(decrypted, h264Offset)
+            if (config != null) {
+                val configFrame = receivedFrame.copy(bytes = decrypted.copyOfRange(0, h264Offset) + config)
+                decodeH264(cameraName, configFrame, meta.copy(flags = meta.flags or FLAG_CODEC_CONFIG))
+            }
+        }
+
         if (meta.isConfig) {
-            // SPS/PPS config frame — configure decoder with GL Surface mode
+            // Ignore identical late or repeated configuration while the decoder is active.
+            val configData = decrypted.copyOfRange(h264Offset, decrypted.size)
+            val existing = decoderConfigs[cameraName]
+            if (decoders[cameraName] != null && existing != null &&
+                existing.width == meta.width && existing.height == meta.height &&
+                H264ParameterSets.equivalent(existing.bytes, configData)) return null
+            decoderConfigs.remove(cameraName)
             decoders.remove(cameraName)?.release()
             glRenderers.remove(cameraName)?.release()
             decodeErrorMap[cameraName]?.set(0)
 
-            // Config data needs a copy since decoder stores reference
-            val configData = decrypted.copyOfRange(h264Offset, decrypted.size)
-
             val decoder = H264Decoder()
             var surfaceConfigured = false
+            var initializingRenderer: DecoderGlRenderer? = null
 
             try {
                 val glRenderer = DecoderGlRenderer(
                     width = meta.width,
                     height = meta.height,
                     threadName = "DecoderGL-$cameraName"
-                )
+                ).also { initializingRenderer = it }
                 glRenderer.setOutputFpsLimit(
                     renderFpsLimits[cameraName] ?: DEFAULT_MULTIVIEW_FPS
                 )
                 glRenderer.start()
-                // Wait for GL thread to initialize surface (poll instead of fixed sleep)
-                var waitMs = 0
-                while (glRenderer.surface == null && waitMs < 200) {
-                    Thread.sleep(5)
-                    waitMs += 5
-                }
-                val surface = glRenderer.surface
+                val surface = glRenderer.awaitSurface(timeoutMs = 200L)
                 if (surface != null && decoder.configureSurface(meta.width, meta.height, configData, surface, streamingConfig.lowLatencyDecode)) {
                     glRenderer.onGpuFrameReady = { gpuFrame ->
                         val frameTiming = pendingFrameTimings[cameraName]?.get(gpuFrame.presentationTimeUs)
@@ -1078,11 +1110,19 @@ class StreamClient @Inject constructor(
                     )
                     decoders[cameraName] = decoder
                     surfaceConfigured = true
+                    initializingRenderer = null
                     Log.d(TAG, "H.264 decoder configured (GPU surface) for $cameraName: ${meta.width}x${meta.height}")
                 } else {
                     glRenderer.release()
+                    initializingRenderer = null
                 }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                initializingRenderer?.release()
+                decoder.release()
+                throw cancelled
             } catch (e: Exception) {
+                initializingRenderer?.release()
+                initializingRenderer = null
                 Log.w(TAG, "GL surface decoder setup failed for $cameraName, falling back to buffer mode", e)
             }
 
@@ -1096,12 +1136,15 @@ class StreamClient @Inject constructor(
                     Log.w(TAG, "Failed to configure H.264 decoder for $cameraName")
                 }
             }
+            if (decoders[cameraName] != null) {
+                decoderConfigs[cameraName] = DecoderConfig(meta.width, meta.height, configData)
+            }
             return null
         }
 
         val decoder = decoders[cameraName]
         if (decoder == null) {
-            Log.w(TAG, "No decoder for $cameraName, waiting for config frame")
+            requestKeyFrameIfDue(cameraName, "decoder_not_configured")
             return null
         }
 
@@ -1198,6 +1241,7 @@ class StreamClient @Inject constructor(
         decodeErrorMap[cameraName]?.set(0)
         if (!decoder.flushAfterError()) {
             decoders.remove(cameraName)?.release()
+            decoderConfigs.remove(cameraName)
             if (surfaceMode) {
                 glRenderers.remove(cameraName)?.release()
             }
@@ -1503,6 +1547,10 @@ class StreamClient @Inject constructor(
             .sumOf { it.bitrateKbps }
     }
 
+    fun udpIngressBurstMetrics(
+        nowElapsedMs: Long = SystemClock.elapsedRealtime()
+    ): UdpIngressBurstMetrics = udpIngressBurstTracker.snapshot(nowElapsedMs)
+
     fun getTotalDroppedFrames(): Int {
         return droppedFrameMap.values
             .sumOf { it.get() }
@@ -1569,11 +1617,13 @@ class StreamClient @Inject constructor(
     fun disconnectStream(cameraName: String) {
         streamJobs.remove(cameraName)?.cancel()
         udpReceivers.remove(cameraName)?.stop()
+        udpIngressBurstTracker.remove(cameraName)
         udpWatchdogJobs.remove(cameraName)?.cancel()
         decoderDispatchers.remove(cameraName)?.close()
         glRenderers.remove(cameraName)?.release()
         renderFpsLimits.remove(cameraName)
         decoders.remove(cameraName)?.release()
+        decoderConfigs.remove(cameraName)
         bytesReceivedMap.remove(cameraName)
         lastBitrateTimeMap.remove(cameraName)
         frameSequenceMap.remove(cameraName)
@@ -1624,6 +1674,7 @@ class StreamClient @Inject constructor(
         streamJobs.clear()
         udpReceivers.values.forEach { it.stop() }
         udpReceivers.clear()
+        udpIngressBurstTracker.clear()
         udpWatchdogJobs.values.forEach { it.cancel() }
         udpWatchdogJobs.clear()
         decoderDispatchers.values.forEach { it.close() }
@@ -1632,6 +1683,7 @@ class StreamClient @Inject constructor(
         glRenderers.clear()
         decoders.values.forEach { it.release() }
         decoders.clear()
+        decoderConfigs.clear()
         bytesReceivedMap.clear()
         lastBitrateTimeMap.clear()
         frameSequenceMap.clear()

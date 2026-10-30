@@ -103,12 +103,13 @@ class OpusEncoder {
         }
         val inBuf = c.getInputBuffer(inIdx) ?: return null
         inBuf.clear()
-        val pcmBytes = ByteBuffer.allocate(samples.size * 2)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .apply { asShortBuffer().put(samples) }
-            .array()
-        inBuf.put(pcmBytes)
-        c.queueInputBuffer(inIdx, 0, pcmBytes.size, 0, 0)
+        val pcmByteCount = samples.size * 2
+        if (inBuf.remaining() < pcmByteCount) {
+            c.queueInputBuffer(inIdx, 0, 0, 0, 0)
+            return null
+        }
+        inBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(samples)
+        c.queueInputBuffer(inIdx, 0, pcmByteCount, 0, 0)
 
         // --- Drain output ---
         val outIdx = c.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)

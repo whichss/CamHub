@@ -1,5 +1,6 @@
 package com.camhub.studio.data.camera
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Rect
@@ -15,6 +16,7 @@ import android.view.Surface
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -41,6 +43,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -72,7 +75,9 @@ class CameraController @Inject constructor(
     val hardwareState: StateFlow<CameraHardwareState> = _hardwareState.asStateFlow()
 
     private var cameraProvider: ProcessCameraProvider? = null
+    private val bindGeneration = AtomicLong()
     private var camera: Camera? = null
+    @ExperimentalCamera2Interop
     private var camera2Control: Camera2CameraControl? = null
     private var activeRecording: Recording? = null
     private var videoCapture: VideoCapture<Recorder>? = null
@@ -115,6 +120,7 @@ class CameraController @Inject constructor(
         resolution: Size,
         targetRotation: Int
     ) {
+        val generation = bindGeneration.incrementAndGet()
         currentLifecycleOwner = lifecycleOwner
         currentCameraSurface = cameraSurface
         currentSurfaceResolution = resolution
@@ -124,6 +130,7 @@ class CameraController @Inject constructor(
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             try {
+                if (generation != bindGeneration.get()) return@addListener
                 if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                     return@addListener
                 }
@@ -232,7 +239,9 @@ class CameraController @Inject constructor(
                         exposureTimeRange = exposureRange,
                         minFocusDistance = minFocusDist,
                         isManualExposureSupported = isoRange != null && exposureRange != null,
-                        supportsRemotePtz = activeSensorArray != null && maxZoom > minZoom,
+                        supportsRemotePtz = activeSensorArray != null && maxZoom > 1f &&
+                            camera2Info.getCameraCharacteristic(CameraCharacteristics.SCALER_CROPPING_TYPE) ==
+                            CameraCharacteristics.SCALER_CROPPING_TYPE_FREEFORM,
                         minZoomRatio = minZoom,
                         maxZoomRatio = maxZoom
                     )
@@ -250,11 +259,13 @@ class CameraController @Inject constructor(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView
     ) {
+        val generation = bindGeneration.incrementAndGet()
         currentLifecycleOwner = lifecycleOwner
         currentPreviewView = previewView
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             try {
+                if (generation != bindGeneration.get()) return@addListener
                 // Check lifecycle is still valid before binding
                 if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                     return@addListener
@@ -359,7 +370,9 @@ class CameraController @Inject constructor(
                         exposureTimeRange = exposureRange,
                         minFocusDistance = minFocusDist,
                         isManualExposureSupported = isoRange != null && exposureRange != null,
-                        supportsRemotePtz = activeSensorArray != null && maxZoom > minZoom,
+                        supportsRemotePtz = activeSensorArray != null && maxZoom > 1f &&
+                            camera2Info.getCameraCharacteristic(CameraCharacteristics.SCALER_CROPPING_TYPE) ==
+                            CameraCharacteristics.SCALER_CROPPING_TYPE_FREEFORM,
                         minZoomRatio = minZoom,
                         maxZoomRatio = maxZoom
                     )
@@ -393,7 +406,13 @@ class CameraController @Inject constructor(
 
     fun isFrontCamera(): Boolean = selectedCameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
 
+    fun invalidatePendingCameraBind() {
+        bindGeneration.incrementAndGet()
+    }
+
+    @SuppressLint("UnsafeOptInUsageError")
     fun unbindCamera() {
+        invalidatePendingCameraBind()
         stopRecording()
         onFrameCallback = null
         onRotationChanged = null
@@ -610,13 +629,22 @@ class CameraController @Inject constructor(
     }
 
     @androidx.camera.camera2.interop.ExperimentalCamera2Interop
-    fun setPtz(zoomRatio: Float, centerX: Float, centerY: Float): AppliedCameraPtz? {
-        val sensor = activeSensorArray ?: return null
-        val control = camera2Control ?: return null
+    fun setPtz(
+        zoomRatio: Float,
+        centerX: Float,
+        centerY: Float,
+        onResult: (AppliedCameraPtz?) -> Unit
+    ) {
+        if (!_hardwareState.value.supportsRemotePtz) {
+            onResult(null)
+            return
+        }
+        val sensor = activeSensorArray ?: return onResult(null)
+        val control = camera2Control ?: return onResult(null)
         val minZoom = getMinZoomRatio()
         val maxZoom = getMaxZoomRatio()
-        if (maxZoom <= minZoom) return null
-        val zoom = zoomRatio.coerceIn(minZoom, maxZoom)
+        if (maxZoom <= minZoom || maxZoom <= 1f) return onResult(null)
+        val zoom = zoomRatio.coerceIn(1f, maxZoom)
         val cropWidth = (sensor.width() / zoom).toInt().coerceAtLeast(2)
         val cropHeight = (sensor.height() / zoom).toInt().coerceAtLeast(2)
         val targetCenterX = sensor.left + centerX.coerceIn(0f, 1f) * sensor.width()
@@ -626,17 +654,27 @@ class CameraController @Inject constructor(
         val top = (targetCenterY - cropHeight / 2f).toInt()
             .coerceIn(sensor.top, sensor.bottom - cropHeight)
         val crop = Rect(left, top, left + cropWidth, top + cropHeight)
-        val options = CaptureRequestOptions.Builder()
+        val optionsBuilder = CaptureRequestOptions.Builder()
             .setCaptureRequestOption(CaptureRequest.SCALER_CROP_REGION, crop)
-            .build()
-        control.addCaptureRequestOptions(options)
-        return AppliedCameraPtz(
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            optionsBuilder.setCaptureRequestOption(CaptureRequest.CONTROL_ZOOM_RATIO, 1f)
+        }
+        val options = optionsBuilder.build()
+        val applied = AppliedCameraPtz(
             zoomRatio = sensor.width().toFloat() / crop.width().coerceAtLeast(1),
             centerX = ((crop.exactCenterX() - sensor.left) / sensor.width())
                 .coerceIn(0f, 1f),
             centerY = ((crop.exactCenterY() - sensor.top) / sensor.height())
                 .coerceIn(0f, 1f)
         )
+        val future = control.addCaptureRequestOptions(options)
+        future.addListener({
+            val success = runCatching { future.get() }.isSuccess
+            if (!success) {
+                Log.w("CameraController", "Camera rejected remote PTZ request")
+            }
+            onResult(if (success) applied else null)
+        }, ContextCompat.getMainExecutor(context))
     }
 
     fun getMinZoomRatio(): Float =

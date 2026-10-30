@@ -9,6 +9,7 @@
 /build
 /app/build
 **/build/
+.build/
 /captures
 .externalNativeBuild
 .cxx

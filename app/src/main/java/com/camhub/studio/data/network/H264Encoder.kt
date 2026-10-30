@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 
 data class EncodedFrame(
@@ -49,6 +50,13 @@ class H264Encoder(
     /** Async callback for surface mode — called on codec thread when output is available */
     var onEncodedFrame: ((EncodedFrame) -> Unit)? = null
 
+    /**
+     * Optional zero-intermediate-copy callback for non-config surface output.
+     * The buffer is MediaCodec-owned and valid only until this callback returns.
+     */
+    var onEncodedBuffer: ((buffer: ByteBuffer, offset: Int, size: Int, isKeyFrame: Boolean,
+        presentationTimeUs: Long, captureAtWallMs: Long?) -> Unit)? = null
+
     @Suppress("DEPRECATION")
     fun start(): Boolean {
         return try {
@@ -72,12 +80,13 @@ class H264Encoder(
     }
 
     fun startSurface(): Boolean {
+        var createdCodec: MediaCodec? = null
         return try {
             val format = createFormat(
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
             )
 
-            val codec = MediaCodec.createEncoderByType(MIME_TYPE)
+            val codec = MediaCodec.createEncoderByType(MIME_TYPE).also { createdCodec = it }
 
             // Set async callback before configure for zero-latency output
             val thread = HandlerThread("EncoderCallback").also { it.start() }
@@ -96,36 +105,54 @@ class H264Encoder(
                         if (info.size > 0) {
                             val outputBuffer = mc.getOutputBuffer(index)
                             if (outputBuffer != null) {
-                                val data = ByteArray(info.size)
-                                outputBuffer.position(info.offset)
-                                outputBuffer.limit(info.offset + info.size)
-                                outputBuffer.get(data)
-
                                 val isKeyFrame =
                                     (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
                                 val isConfig =
                                     (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-
-                                if (isConfig) {
-                                    cachedSpsPps = data
-                                    Log.d(TAG, "SPS/PPS from async callback: ${data.size} bytes")
+                                val captureAtWallMs = if (isConfig) null else {
+                                    captureWallByPresentationUs.remove(info.presentationTimeUs)
                                 }
 
-                                val frame = EncodedFrame(
-                                    data = data,
-                                    isKeyFrame = isKeyFrame,
-                                    isConfig = isConfig,
-                                    presentationTimeUs = info.presentationTimeUs,
-                                    captureAtWallMs = if (isConfig) null else {
-                                        captureWallByPresentationUs.remove(info.presentationTimeUs)
+                                val bufferCallback = onEncodedBuffer
+                                if (!isConfig && bufferCallback != null) {
+                                    bufferCallback(
+                                        outputBuffer,
+                                        info.offset,
+                                        info.size,
+                                        isKeyFrame,
+                                        info.presentationTimeUs,
+                                        captureAtWallMs
+                                    )
+                                } else {
+                                    val data = ByteArray(info.size)
+                                    outputBuffer.position(info.offset)
+                                    outputBuffer.limit(info.offset + info.size)
+                                    outputBuffer.get(data)
+
+                                    if (isConfig) {
+                                        cachedSpsPps = data
+                                        Log.d(TAG, "SPS/PPS from async callback: ${data.size} bytes")
                                     }
-                                )
-                                onEncodedFrame?.invoke(frame)
+
+                                    val frame = EncodedFrame(
+                                        data = data,
+                                        isKeyFrame = isKeyFrame,
+                                        isConfig = isConfig,
+                                        presentationTimeUs = info.presentationTimeUs,
+                                        captureAtWallMs = captureAtWallMs
+                                    )
+                                    onEncodedFrame?.invoke(frame)
+                                }
                             }
                         }
-                        mc.releaseOutputBuffer(index, false)
                     } catch (e: Exception) {
                         Log.e(TAG, "Async output error", e)
+                    } finally {
+                        try {
+                            mc.releaseOutputBuffer(index, false)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to release encoder output buffer", e)
+                        }
                     }
                 }
 
@@ -164,7 +191,10 @@ class H264Encoder(
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start surface encoder", e)
+            runCatching { inputSurface?.release() }
             inputSurface = null
+            runCatching { createdCodec?.stop() }
+            runCatching { createdCodec?.release() }
             encoder = null
             callbackThread?.quitSafely()
             callbackThread = null
@@ -376,6 +406,7 @@ class H264Encoder(
 
     fun release() {
         onEncodedFrame = null
+        onEncodedBuffer = null
         captureWallByPresentationUs.clear()
         try {
             inputSurface?.release()

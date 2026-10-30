@@ -1,0 +1,70 @@
+name: iOS build and verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "desktop/**"
+      - "ios/**"
+      - "protocol/**"
+      - ".github/workflows/ios-build.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "desktop/**"
+      - "ios/**"
+      - "protocol/**"
+      - ".github/workflows/ios-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ios-camera:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Test shared iOS protocol
+        run: >-
+          swift test
+          --package-path ios/CamHubCore
+          --scratch-path "$RUNNER_TEMP/CamHubCoreTests"
+          --cache-path "$RUNNER_TEMP/SwiftPMCache"
+
+      - name: Test UDP receive and deadline recovery
+        run: sh ios/IntegrationTests/run-udp-receiver-smoke.sh
+
+      - name: Test UDP sender with multiple hubs and packet loss
+        run: sh ios/IntegrationTests/run-udp-video-sender-smoke.sh
+
+      - name: Test authenticated TCP video fallback sender
+        run: sh ios/IntegrationTests/run-tcp-video-sender-smoke.sh
+
+      - name: Test TLS fingerprint and PIN handshake
+        run: sh ios/IntegrationTests/run-control-smoke.sh
+
+      - name: Test audio payload compatibility
+        run: sh ios/IntegrationTests/run-audio-payload-smoke.sh
+
+      - name: Test encrypted camera audio stream
+        run: sh ios/IntegrationTests/run-camera-audio-server-smoke.sh
+
+      - name: Test PGM audio and video recording when H.264 is available
+        run: sh ios/IntegrationTests/run-pgm-recorder-smoke.sh
+
+      - name: Build unsigned iOS app target
+        run: >-
+          xcodebuild
+          -project ios/CamHubCameraApp.xcodeproj
+          -scheme CamHubCamera
+          -configuration Release
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/CamHub-iOS-DerivedData"
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/CamHub-iOS-Packages"
+          -packageCachePath "$RUNNER_TEMP/CamHub-iOS-PackageCache"
+          CODE_SIGNING_ALLOWED=NO
+          build

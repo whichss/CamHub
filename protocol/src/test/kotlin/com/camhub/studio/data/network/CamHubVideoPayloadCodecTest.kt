@@ -10,6 +10,67 @@ import org.junit.Test
 
 class CamHubVideoPayloadCodecTest {
     @Test
+    fun `v4 payload matches cross-platform golden vector`() {
+        val encoded = CamHubVideoPayloadCodec.encode(
+            width = 2,
+            height = 3,
+            rotationDegrees = 270,
+            isKeyFrame = true,
+            isCodecConfig = true,
+            frameSequence = 1,
+            captureAtWallMs = 2,
+            encodedAtWallMs = 3,
+            h264Bytes = byteArrayOf(0xaa.toByte(), 0xbb.toByte())
+        )
+
+        assertArrayEquals(
+            WireGoldenVectors.bytes("payload_v4"),
+            encoded
+        )
+    }
+
+    @Test
+    fun `encodes borrowed buffer range identically to owned array without changing source position`() {
+        val encoded = byteArrayOf(9, 8, 7, 6, 5)
+        val source = ByteBuffer.allocate(12).apply {
+            position(3)
+            put(encoded)
+            position(1)
+        }
+
+        val fromBuffer = CamHubVideoPayloadCodec.encodeFromBuffer(
+            width = 1920,
+            height = 1080,
+            rotationDegrees = 270,
+            isKeyFrame = true,
+            isCodecConfig = false,
+            frameSequence = 987L,
+            captureAtWallMs = 1_000L,
+            encodedAtWallMs = 1_015L,
+            source = source,
+            offset = 3,
+            length = encoded.size
+        )
+        val fromArray = CamHubVideoPayloadCodec.encode(
+            width = 1920,
+            height = 1080,
+            rotationDegrees = 270,
+            isKeyFrame = true,
+            isCodecConfig = false,
+            frameSequence = 987L,
+            captureAtWallMs = 1_000L,
+            encodedAtWallMs = 1_015L,
+            h264Bytes = encoded
+        )
+
+        assertArrayEquals(fromArray, fromBuffer)
+        assertEquals(1, source.position())
+        val decoded = requireNotNull(CamHubVideoPayloadCodec.decode(fromBuffer))
+        assertArrayEquals(encoded, decoded.h264Bytes)
+        assertEquals(987L, decoded.frameSequence)
+    }
+
+    @Test
     fun `decodes current v4 camera payload`() {
         val h264 = byteArrayOf(0, 0, 0, 1, 0x65, 1, 2, 3)
         val payload = ByteBuffer.allocate(31 + h264.size).apply {

@@ -1,5 +1,6 @@
 package com.camhub.desktop
 
+import com.camhub.studio.data.network.CamHubControlMessage
 import kotlinx.serialization.Serializable
 
 data class CameraEndpoint(
@@ -17,31 +18,11 @@ data class CameraEndpoint(
 data class CameraAnnouncement(
     val service: String = "",
     val ip: String = "",
-    val port: Int = 0
+    val port: Int = 0,
+    val deviceName: String = ""
 )
 
-@Serializable
-internal data class ControlMessage(
-    val type: String,
-    val deviceName: String = "",
-    val streamPort: Int = 0,
-    val pin: String = "",
-    val sessionKey: String = "",
-    val command: String = "",
-    val value: Float = 0f,
-    val stringValue: String = "",
-    val audioStreamPort: Int = 0,
-    val udpStreamPort: Int = 0,
-    val udpReceivePort: Int = 0,
-    val syncId: Long = 0L,
-    val t0WallMs: Long = 0L,
-    val t1WallMs: Long = 0L,
-    val t2WallMs: Long = 0L,
-    val supportsRemotePtz: Boolean = false,
-    val minZoomRatio: Float = 1f,
-    val maxZoomRatio: Float = 1f,
-    val requestId: Long = 0L
-)
+internal typealias ControlMessage = CamHubControlMessage
 
 enum class DesktopCameraStatus {
     DISCOVERED,
@@ -61,8 +42,18 @@ data class CameraConnectionSnapshot(
     val framesReceived: Long = 0,
     val framesDropped: Long = 0,
     val packetLossPercent: Float = 0f,
-    val latencyMs: Long? = null,
+    val captureToDecodeP50Ms: Long? = null,
+    val captureToDecodeP95Ms: Long? = null,
+    val captureToDecodeP99Ms: Long? = null,
+    val captureToDecodeSampleCount: Int = 0,
     val width: Int = 0,
     val height: Int = 0,
-    val rotationDegrees: Int = 0
+    val rotationDegrees: Int = 0,
+    val supportsRemotePtz: Boolean = false,
+    val minZoomRatio: Float = 1f,
+    val maxZoomRatio: Float = 1f,
+    val remotePtzZoom: Float = 1f,
+    val remotePtzCenterX: Float = 0.5f,
+    val remotePtzCenterY: Float = 0.5f,
+    val ptzAppliedRequestId: Long = 0L
 )

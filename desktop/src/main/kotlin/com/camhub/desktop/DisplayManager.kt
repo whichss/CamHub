@@ -25,7 +25,7 @@ data class DisplayTarget(
     val bounds: Rectangle,
     val refreshRateHz: Int,
     val isPrimary: Boolean,
-    internal val device: GraphicsDevice? = null
+    val device: GraphicsDevice? = null
 ) {
     override fun toString(): String = label
 }
@@ -66,8 +66,15 @@ class PgmFullscreenController {
     private var window: JFrame? = null
     private var activeDisplayId: String? = null
     private val currentFrame = AtomicReference<DesktopVideoFrame?>()
+    private val transitionAlpha = AtomicReference(0f)
 
     val isOpen: Boolean get() = window?.isDisplayable == true
+
+    fun isOpenOn(displayId: String): Boolean = isOpen && activeDisplayId == displayId
+
+    fun currentFrame(): DesktopVideoFrame? = currentFrame.get()
+
+    fun transitionAlpha(): Float = transitionAlpha.get()
 
     fun open(display: DisplayTarget) {
         close()
@@ -76,7 +83,7 @@ class PgmFullscreenController {
             isUndecorated = true
             background = Color.BLACK
             defaultCloseOperation = JFrame.DISPOSE_ON_CLOSE
-            contentPane = PgmOutputPanel(currentFrame)
+            contentPane = PgmOutputPanel(currentFrame, transitionAlpha)
             rootPane.border = BorderFactory.createEmptyBorder()
             rootPane.getInputMap(JPanel.WHEN_IN_FOCUSED_WINDOW).put(
                 KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
@@ -95,9 +102,14 @@ class PgmFullscreenController {
         activeDisplayId = display.id
     }
 
-    fun reconcile(availableDisplayIds: Set<String>) {
+    fun reconcile(displays: List<DisplayTarget>) {
         val id = activeDisplayId ?: return
-        if (id !in availableDisplayIds) close()
+        val target = displays.firstOrNull { it.id == id }
+        if (target == null) {
+            close()
+        } else if (window?.bounds != target.bounds) {
+            window?.bounds = Rectangle(target.bounds)
+        }
     }
 
     fun setFrame(frame: DesktopVideoFrame) {
@@ -107,6 +119,11 @@ class PgmFullscreenController {
 
     fun clearFrame() {
         currentFrame.set(null)
+        window?.contentPane?.repaint()
+    }
+
+    fun setTransitionAlpha(alpha: Float) {
+        transitionAlpha.set(alpha.coerceIn(0f, 1f))
         window?.contentPane?.repaint()
     }
 
@@ -120,7 +137,8 @@ class PgmFullscreenController {
 }
 
 private class PgmOutputPanel(
-    private val currentFrame: AtomicReference<DesktopVideoFrame?>
+    private val currentFrame: AtomicReference<DesktopVideoFrame?>,
+    private val transitionAlpha: AtomicReference<Float>
 ) : JPanel() {
     init {
         background = Color.BLACK
@@ -142,8 +160,13 @@ private class PgmOutputPanel(
                     targetHeight = height,
                     highQualitySpatialScale = true
                 )
-                return
             }
+            val alpha = transitionAlpha.get()
+            if (alpha > 0f) {
+                g.color = Color(0, 0, 0, (alpha * 255).toInt())
+                g.fillRect(0, 0, width, height)
+            }
+            if (frame != null) return
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             g.paint = GradientPaint(
                 0f,

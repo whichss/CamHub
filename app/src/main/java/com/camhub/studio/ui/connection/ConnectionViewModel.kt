@@ -150,7 +150,8 @@ class ConnectionViewModel @Inject constructor(
                     deviceName = _uiState.value.deviceName,
                     streamPort = videoPort,
                     audioStreamPort = audioPort,
-                    udpStreamPort = streamServer.getUdpPort()
+                    udpStreamPort = streamServer.getUdpPort(),
+                    tcpStreamPort = streamServer.getTcpPort()
                 )
             }
 

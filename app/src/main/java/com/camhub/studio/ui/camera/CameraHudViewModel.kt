@@ -1,5 +1,6 @@
 package com.camhub.studio.ui.camera
 
+import android.annotation.SuppressLint
 import android.util.Log
 import android.util.Size
 import android.view.Surface
@@ -32,10 +33,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import kotlin.math.abs
@@ -101,6 +110,7 @@ class CameraHudViewModel @Inject constructor(
         return "$prefix ${streamingConfig.maxResolution}p${streamingConfig.fps} ${bitrateMbps}M V$videoClientCount"
     }
 
+    @SuppressLint("UnsafeOptInUsageError")
     private fun handleRemoteCommand(msg: HandshakeMessage) {
         viewModelScope.launch {
             when (msg.command) {
@@ -109,13 +119,16 @@ class CameraHudViewModel @Inject constructor(
                     val center = msg.stringValue.split(',')
                     val centerX = center.getOrNull(0)?.toFloatOrNull() ?: 0.5f
                     val centerY = center.getOrNull(1)?.toFloatOrNull() ?: 0.5f
-                    val applied = applyRemotePtz(msg.value, centerX, centerY)
-                    connectionManager.sendPtzAppliedToAll(
-                        requestId = msg.requestId,
-                        zoom = applied.zoomRatio,
-                        centerX = applied.centerX,
-                        centerY = applied.centerY
-                    )
+                    applyRemotePtz(msg.value, centerX, centerY) { applied ->
+                        if (applied != null) {
+                            connectionManager.sendPtzAppliedToAll(
+                                requestId = msg.requestId,
+                                zoom = applied.zoomRatio,
+                                centerX = applied.centerX,
+                                centerY = applied.centerY
+                            )
+                        }
+                    }
                 }
                 "set_iso" -> {
                     val idx = _uiState.value.isoValues.indexOf(msg.stringValue)
@@ -161,6 +174,24 @@ class CameraHudViewModel @Inject constructor(
 
     init {
         deviceMonitor.startMonitoring()
+
+        viewModelScope.launch {
+            while (isActive) {
+                delay(10_000)
+                val output = cameraGlRenderer?.outputTimings() ?: continue
+                val send = streamServer.udpSendMetrics()
+                if (output.previewSubmission.sampleCount == 0) continue
+                Log.d(TAG, "Camera pipeline wall-time us P50/P95/P99: " +
+                    "preview=${output.previewSubmission.p50Us}/${output.previewSubmission.p95Us}/${output.previewSubmission.p99Us}, " +
+                    "encoder=${output.encoderSubmission.p50Us}/${output.encoderSubmission.p95Us}/${output.encoderSubmission.p99Us}, " +
+                    "UDP duration samples=${send.queueResidence.sampleCount}, queue(us)=${send.queueResidence.p50Us}/${send.queueResidence.p95Us}/${send.queueResidence.p99Us}, " +
+                    "packetize/send(us)=${send.packetizeAndSend.p50Us}/${send.packetizeAndSend.p95Us}/${send.packetizeAndSend.p99Us}, " +
+                    "socket(us)=${send.socketSend.p50Us}/${send.socketSend.p95Us}/${send.socketSend.p99Us}, " +
+                    "keyframe samples=${send.keyFramePacketizeAndSend.sampleCount}, time(us)=${send.keyFramePacketizeAndSend.p50Us}/${send.keyFramePacketizeAndSend.p95Us}/${send.keyFramePacketizeAndSend.p99Us}, " +
+                    "latest-keyframe-packets=${send.latestKeyFramePacketCount}, " +
+                    "socket-accepted=${send.socketAcceptedDatagrams}, socket-failures=${send.socketSendFailures}")
+            }
+        }
 
         // Listen for remote commands from director
         connectionManager.onCommandReceived = { msg -> handleRemoteCommand(msg) }
@@ -265,14 +296,17 @@ class CameraHudViewModel @Inject constructor(
 
         // Timecode ticker while recording
         viewModelScope.launch {
-            while (isActive) {
-                delay(33)
-                val hw = cameraController.hardwareState.value
-                if (hw.isRecording && hw.recordingStartTimeMs > 0L) {
-                    val elapsed = System.currentTimeMillis() - hw.recordingStartTimeMs
+            cameraController.hardwareState
+                .map { if (it.isRecording) it.recordingStartTimeMs else 0L }
+                .distinctUntilChanged()
+                .collectLatest { startTimeMs ->
+                if (startTimeMs <= 0L) return@collectLatest
+                while (isActive) {
+                    val elapsed = System.currentTimeMillis() - startTimeMs
                     _uiState.update {
                         it.copy(timecode = CameraValueMapper.formatTimecode(elapsed))
                     }
+                    delay(33)
                 }
             }
         }
@@ -297,6 +331,7 @@ class CameraHudViewModel @Inject constructor(
     private var lastIsPortraitOutput: Boolean = false
     private var lastTargetRotation: Int = Surface.ROTATION_0
     private var streamRestartJob: Job? = null
+    private var surfaceStartupJob: Job? = null
     private var zoomDriveJob: Job? = null
     private var zoomVelocity: Float = 0f
 
@@ -315,108 +350,112 @@ class CameraHudViewModel @Inject constructor(
         lastIsDevicePortrait = isDevicePortrait
         lastIsPortraitOutput = isPortraitOutput
         lastTargetRotation = targetRotation
-        try {
-            val viewW = size.width
-            val viewH = size.height
+        cleanupSurfacePipeline()
+        val viewW = size.width
+        val viewH = size.height
+        val (encW, encH) = calculateStreamFrameDimensions(
+            maxResolution = streamingConfig.maxResolution,
+            isPortrait = isPortraitOutput
+        )
+        val (bufW, bufH) = if (isDevicePortrait && !isPortraitOutput) encH to encW else encW to encH
+        val encoder = H264Encoder(
+            encW,
+            encH,
+            bitrate = streamingConfig.bitrateBytes,
+            frameRate = streamingConfig.fps
+        )
 
-            // Stream dimensions follow device orientation rather than the transient
-            // TextureView size reported while Android is rotating the layout.
-            val maxRes = streamingConfig.maxResolution
-            val (encW, encH) = calculateStreamFrameDimensions(
-                maxResolution = maxRes,
-                isPortrait = isPortraitOutput
-            )
-            // CameraX still receives an upright portrait buffer while the phone is
-            // held vertically. A 16:9 portrait-UI mode crops that upright source
-            // into the landscape encoder surface instead of rotating the UI.
-            val (bufW, bufH) = if (isDevicePortrait && !isPortraitOutput) {
-                encH to encW
-            } else {
-                encW to encH
-            }
+        surfaceStartupJob = viewModelScope.launch {
+            var glRenderer: CameraGlRenderer? = null
+            var resourcesTransferred = false
+            try {
+                // Codec creation/configuration/start may block on device-specific
+                // implementations. Keep it off the UI dispatcher; CameraX binding
+                // remains on the main dispatcher below.
+                if (!withContext(Dispatchers.IO) { encoder.startSurface() }) {
+                    Log.w(TAG, "Surface encoder failed, falling back to buffer mode")
+                    fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
+                    return@launch
+                }
 
-            // 1. Start Surface-mode encoder at 16:9
-            val fps = streamingConfig.fps
-            val bitrate = streamingConfig.bitrateBytes
-            val encoder = H264Encoder(encW, encH, bitrate = bitrate, frameRate = fps)
-            if (!encoder.startSurface()) {
-                Log.w(TAG, "Surface encoder failed, falling back to buffer mode")
-                encoder.release()
-                fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
-                return
-            }
+                val encoderInputSurface = encoder.inputSurface
+                if (encoderInputSurface == null) {
+                    Log.w(TAG, "Encoder input surface is null, falling back to buffer mode")
+                    fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
+                    return@launch
+                }
 
-            val encoderInputSurface = encoder.inputSurface
-            if (encoderInputSurface == null) {
-                Log.w(TAG, "Encoder input surface is null, falling back to buffer mode")
-                encoder.release()
-                fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
-                return
-            }
+                val renderer = CameraGlRenderer()
+                glRenderer = renderer
+                val surfaceReady = CompletableDeferred<Surface?>()
+                renderer.start(
+                    encW, encH, viewfinderSurface, encoderInputSurface,
+                    viewW, viewH, bufW, bufH, isDevicePortrait
+                ) { surfaceReady.complete(it) }
+                renderer.updateRotation(surfaceRotationToDegrees(targetRotation))
+                renderer.onFrameSubmitted = { presentationTimeUs, captureAtWallMs ->
+                    encoder.registerInputTiming(presentationTimeUs, captureAtWallMs)
+                }
 
-            // 2. Start GL renderer: camera buffer at 16:9 → [viewfinder, encoder]
-            //    Viewfinder uses actual surface dimensions; encoder uses 16-aligned dims
-            val glRenderer = CameraGlRenderer()
-            glRenderer.start(encW, encH, viewfinderSurface, encoderInputSurface, viewW, viewH, bufW, bufH, isDevicePortrait)
-            glRenderer.updateRotation(surfaceRotationToDegrees(targetRotation))
-            glRenderer.onFrameSubmitted = { presentationTimeUs, captureAtWallMs ->
-                encoder.registerInputTiming(presentationTimeUs, captureAtWallMs)
-            }
+                val cameraSurface = withTimeoutOrNull(2_000L) { surfaceReady.await() }
+                if (cameraSurface == null) {
+                    Log.w(TAG, "GL renderer cameraSurface is null, falling back to buffer mode")
+                    fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
+                    return@launch
+                }
 
-            // Wait for GL thread to create cameraSurface (poll instead of fixed sleep)
-            var waitMs = 0
-            while (glRenderer.cameraSurface == null && waitMs < 200) {
-                Thread.sleep(5)
-                waitMs += 5
-            }
-
-            val cameraSurface = glRenderer.cameraSurface
-            if (cameraSurface == null) {
-                Log.w(TAG, "GL renderer cameraSurface is null, falling back to buffer mode")
-                glRenderer.stop()
-                encoder.release()
-                fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
-                return
-            }
-
-            // 3. Async encoding callback: encoder delivers frames via callback (zero-latency)
-            // Rotation is applied in GL renderer, so always send rotation=0
-            encoder.onEncodedFrame = { frame ->
-                streamServer.broadcastEncodedFrame(frame, encW, encH, 0)
-            }
-
-            // 4. Bind CameraX to GL renderer's surface
-            // SurfaceTexture.getTransformMatrix() already includes sensor→display rotation,
-            // so no additional rotation is needed from TransformationInfo.
-            // Don't hardcode targetRotation — CameraController uses actual display rotation
-            cameraController.onPreviewTransformChanged = { rotationDegrees ->
-                glRenderer.updateRotation(rotationDegrees)
-            }
-            cameraController.bindCameraWithSurface(
-                lifecycleOwner = lifecycleOwner,
-                cameraSurface = cameraSurface,
-                resolution = Size(bufW, bufH),
-                targetRotation = targetRotation
-            )
-
-            cameraGlRenderer = glRenderer
-            surfaceEncoder = encoder
-            streamServer.keyFrameRequester = {
-                surfaceEncoder?.requestKeyFrame()
-            }
-            usingSurfaceMode = true
-            _uiState.update {
-                it.copy(
-                    bitrate = streamStatusText(isLive = true),
-                    codec = "H.264",
-                    format = "${encW}x${encH}"
+                cameraGlRenderer = renderer
+                surfaceEncoder = encoder
+                resourcesTransferred = true
+                encoder.onEncodedFrame = { frame ->
+                    if (frame.isConfig) {
+                        streamServer.broadcastEncodedFrame(frame, encW, encH, 0)
+                    }
+                }
+                encoder.onEncodedBuffer = { buffer, offset, count, isKeyFrame, _, captureAtWallMs ->
+                    streamServer.broadcastEncodedBuffer(
+                        buffer = buffer,
+                        offset = offset,
+                        size = count,
+                        width = encW,
+                        height = encH,
+                        rotation = 0,
+                        isKeyFrame = isKeyFrame,
+                        captureAtWallMs = captureAtWallMs
+                    )
+                }
+                cameraController.onPreviewTransformChanged = { rotationDegrees ->
+                    renderer.updateRotation(rotationDegrees)
+                }
+                cameraController.bindCameraWithSurface(
+                    lifecycleOwner = lifecycleOwner,
+                    cameraSurface = cameraSurface,
+                    resolution = Size(bufW, bufH),
+                    targetRotation = targetRotation
                 )
+
+                streamServer.keyFrameRequester = { surfaceEncoder?.requestKeyFrame() }
+                usingSurfaceMode = true
+                _uiState.update {
+                    it.copy(
+                        bitrate = streamStatusText(isLive = true),
+                        codec = "H.264",
+                        format = "${encW}x${encH}"
+                    )
+                }
+                Log.d(TAG, "Surface encoding pipeline started: ${encW}x${encH}")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Log.e(TAG, "Surface pipeline setup failed", e)
+                if (resourcesTransferred) cleanupSurfacePipeline()
+                fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
+            } finally {
+                if (!resourcesTransferred) {
+                    glRenderer?.stop()
+                    withContext(NonCancellable + Dispatchers.IO) { encoder.release() }
+                }
             }
-            Log.d(TAG, "Surface encoding pipeline started: ${encW}x${encH} (16:9)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Surface pipeline setup failed", e)
-            cleanupSurfacePipeline()
-            fallbackToBufferMode(lifecycleOwner, viewfinderSurface, size)
         }
     }
 
@@ -440,6 +479,9 @@ class CameraHudViewModel @Inject constructor(
     }
 
     private fun cleanupSurfacePipeline() {
+        cameraController.invalidatePendingCameraBind()
+        surfaceStartupJob?.cancel()
+        surfaceStartupJob = null
         cameraGlRenderer?.stop()
         cameraGlRenderer = null
         surfaceEncoder?.release()
@@ -467,7 +509,7 @@ class CameraHudViewModel @Inject constructor(
     }
 
     private fun scheduleSurfacePipelineRestart() {
-        if (!usingSurfaceMode) return
+        if (!usingSurfaceMode && surfaceStartupJob?.isActive != true) return
         if (lastLifecycleOwner == null || lastViewfinderSurface == null || lastSurfaceSize == null) return
         streamRestartJob?.cancel()
         _uiState.update {
@@ -479,8 +521,9 @@ class CameraHudViewModel @Inject constructor(
         }
     }
 
+    @SuppressLint("UnsafeOptInUsageError")
     private fun restartSurfacePipelineIfActive() {
-        if (!usingSurfaceMode) return
+        if (!usingSurfaceMode && surfaceStartupJob?.isActive != true) return
         val lifecycleOwner = lastLifecycleOwner ?: return
         val surface = lastViewfinderSurface ?: return
         val size = lastSurfaceSize ?: return
@@ -641,19 +684,16 @@ class CameraHudViewModel @Inject constructor(
     private fun applyRemotePtz(
         ratio: Float,
         centerX: Float,
-        centerY: Float
-    ): AppliedCameraPtz {
+        centerY: Float,
+        onResult: (AppliedCameraPtz?) -> Unit
+    ) {
         val clamped = ratio.coerceIn(_uiState.value.minZoomRatio, _uiState.value.maxZoomRatio)
-        val applied = cameraController.setPtz(clamped, centerX, centerY)
-        if (applied == null) {
-            cameraController.setZoomRatio(clamped)
+        cameraController.setPtz(clamped, centerX, centerY) { applied ->
+            if (applied != null) {
+                _uiState.update { it.copy(zoomRatio = applied.zoomRatio) }
+            }
+            onResult(applied)
         }
-        _uiState.update { it.copy(zoomRatio = clamped) }
-        return applied ?: AppliedCameraPtz(
-            zoomRatio = clamped,
-            centerX = 0.5f,
-            centerY = 0.5f
-        )
     }
 
     fun setZoomByIndex(index: Int) {

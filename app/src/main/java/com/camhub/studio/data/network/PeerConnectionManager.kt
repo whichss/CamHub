@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
@@ -33,34 +32,7 @@ enum class PeerConnectionState {
     DISCONNECTED, CONNECTING, CONNECTED, ERROR
 }
 
-@Serializable
-data class HandshakeMessage(
-    val type: String,        // "hello", "hello_ack", "ping", "pong", "error", "command"
-    val deviceName: String = "",
-    val streamPort: Int = 0,
-    val pin: String = "",
-    val sessionKey: String = "",   // Base64-encoded AES-256 key (sent after PIN auth)
-    // Command fields (used when type == "command")
-    val command: String = "",
-    val value: Float = 0f,
-    val stringValue: String = "",
-    val audioStreamPort: Int = 0,
-    // Low-latency video negotiation. Camera advertises udpStreamPort and the
-    // authenticated hub replies with udpReceivePort in an udp_subscribe command.
-    val udpStreamPort: Int = 0,
-    val udpReceivePort: Int = 0,
-    // NTP-style clock synchronization fields used by ping/pong.
-    val syncId: Long = 0L,
-    val t0WallMs: Long = 0L,
-    val t1WallMs: Long = 0L,
-    val t2WallMs: Long = 0L,
-    // Camera capability negotiation fields.
-    val supportsRemotePtz: Boolean = false,
-    val minZoomRatio: Float = 1f,
-    val maxZoomRatio: Float = 1f,
-    // Correlates state-changing commands with camera acknowledgements.
-    val requestId: Long = 0L
-)
+typealias HandshakeMessage = CamHubControlMessage
 
 data class PtzAppliedEvent(
     val cameraName: String,
@@ -75,6 +47,8 @@ data class ConnectedPeer(
     val ip: String,
     val signalingPort: Int,
     val streamPort: Int,
+    val tcpStreamPort: Int = 0,
+    val tcpAuthToken: ByteArray? = null,
     val audioStreamPort: Int = 0,
     val udpStreamPort: Int = 0,
     val supportsRemotePtz: Boolean = false,
@@ -83,12 +57,13 @@ data class ConnectedPeer(
     val network: Network? = null,
     val transport: NetworkTransport = NetworkTransport.NONE,
     val socket: Socket? = null,
-    val streamKey: ByteArray? = null
+    val streamKey: ByteArray? = null,
+    val supportsAuthenticatedTcp: Boolean = false
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ConnectedPeer) return false
-        return name == other.name && ip == other.ip && signalingPort == other.signalingPort && streamPort == other.streamPort && audioStreamPort == other.audioStreamPort && udpStreamPort == other.udpStreamPort && supportsRemotePtz == other.supportsRemotePtz && minZoomRatio == other.minZoomRatio && maxZoomRatio == other.maxZoomRatio && network == other.network && transport == other.transport
+        return name == other.name && ip == other.ip && signalingPort == other.signalingPort && streamPort == other.streamPort && tcpStreamPort == other.tcpStreamPort && audioStreamPort == other.audioStreamPort && udpStreamPort == other.udpStreamPort && supportsRemotePtz == other.supportsRemotePtz && minZoomRatio == other.minZoomRatio && maxZoomRatio == other.maxZoomRatio && network == other.network && transport == other.transport && supportsAuthenticatedTcp == other.supportsAuthenticatedTcp
     }
 
     override fun hashCode(): Int {
@@ -96,6 +71,7 @@ data class ConnectedPeer(
         result = 31 * result + ip.hashCode()
         result = 31 * result + signalingPort
         result = 31 * result + streamPort
+        result = 31 * result + tcpStreamPort
         result = 31 * result + audioStreamPort
         result = 31 * result + udpStreamPort
         result = 31 * result + supportsRemotePtz.hashCode()
@@ -103,6 +79,7 @@ data class ConnectedPeer(
         result = 31 * result + maxZoomRatio.hashCode()
         result = 31 * result + (network?.hashCode() ?: 0)
         result = 31 * result + transport.hashCode()
+        result = 31 * result + supportsAuthenticatedTcp.hashCode()
         return result
     }
 }
@@ -188,6 +165,7 @@ class PeerConnectionManager @Inject constructor(
 
     var localDeviceName: String = ""
     var localStreamPort: Int = 0
+    var localTcpStreamPort: Int = 0
     var localAudioStreamPort: Int = 0
     var localUdpStreamPort: Int = 0
     @Volatile private var localSupportsRemotePtz: Boolean = false
@@ -293,11 +271,13 @@ class PeerConnectionManager @Inject constructor(
         deviceName: String,
         streamPort: Int,
         audioStreamPort: Int = 0,
-        udpStreamPort: Int = 0
+        udpStreamPort: Int = 0,
+        tcpStreamPort: Int = 0
     ): Int {
         isServerMode = true
         localDeviceName = deviceName
         localStreamPort = streamPort
+        localTcpStreamPort = tcpStreamPort
         localAudioStreamPort = audioStreamPort
         localUdpStreamPort = udpStreamPort
         _connectionState.value = PeerConnectionState.DISCONNECTED
@@ -384,9 +364,11 @@ class PeerConnectionManager @Inject constructor(
                 type = "hello_ack",
                 deviceName = localDeviceName,
                 streamPort = localStreamPort,
+                tcpStreamPort = localTcpStreamPort,
                 sessionKey = sessionKeyB64,
                 audioStreamPort = localAudioStreamPort,
                 udpStreamPort = localUdpStreamPort,
+                supportsAuthenticatedTcp = localTcpStreamPort in 1..65_535 && sessionKey.size == 32,
                 supportsRemotePtz = localSupportsRemotePtz,
                 minZoomRatio = localMinZoomRatio,
                 maxZoomRatio = localMaxZoomRatio
@@ -443,6 +425,7 @@ class PeerConnectionManager @Inject constructor(
                     throw IOException("No allowed local network is available")
                 }
                 var lastError: Exception? = null
+                var changedFingerprint: String? = null
                 for (network in candidates) {
                     try {
                         socket = tlsHelper.createClientSocket(peer.ip, peer.port, network)
@@ -450,11 +433,27 @@ class PeerConnectionManager @Inject constructor(
                         break
                     } catch (error: Exception) {
                         lastError = error
+                        changedFingerprint = findPeerFingerprintMismatch(error)
+                        if (changedFingerprint != null) break
                         Log.d(
                             TAG,
                             "${networkTransportManager.transportOf(network)} route failed for ${peer.ip}: ${error.message}"
                         )
                     }
+                }
+                if (changedFingerprint != null) {
+                    val request = PeerTrustRequest(
+                        id = trustRequestSequence.incrementAndGet(),
+                        peer = peer,
+                        directorName = directorName,
+                        fingerprint = changedFingerprint,
+                        requiresFingerprintConfirmation = true
+                    )
+                    _peerTrustRequests.update { requests ->
+                        requests.filterNot { it.peer.ip == peer.ip } + request
+                    }
+                    _connectionState.value = PeerConnectionState.DISCONNECTED
+                    return@launch
                 }
                 if (socket == null) throw lastError ?: IOException("No reachable local route")
                 val fingerprint = tlsHelper.certificateFingerprint(socket)
@@ -507,8 +506,7 @@ class PeerConnectionManager @Inject constructor(
                         return@launch
                     }
                     if (
-                        ack?.type == "error" && resolvedPin != null &&
-                        ack.stringValue in setOf("invalid_pairing_pin", "")
+                        ack?.stringValue in setOf("invalid_pairing_pin", "")
                     ) {
                         tlsHelper.removePeerPairingPin(peer.ip)
                         val request = PeerTrustRequest(
@@ -551,6 +549,19 @@ class PeerConnectionManager @Inject constructor(
                     decoded
                 } else null
 
+                val tcpAuthToken = try {
+                    decodeTcpStreamAuthToken(
+                        encodedToken = ack.tcpAuthToken,
+                        supportsAuthenticatedTcp = ack.supportsAuthenticatedTcp,
+                        tcpPort = ack.tcpStreamPort,
+                        sessionKey = sessionKey
+                    )
+                } catch (_: IllegalArgumentException) {
+                    _connectionFailureMessage.value = "${peer.name} returned an invalid TCP authorization configuration."
+                    _connectionState.value = PeerConnectionState.ERROR
+                    return@launch
+                }
+
                 // Handshake done — use generous timeout for heartbeat phase
                 socket.soTimeout = (HEARTBEAT_TIMEOUT_MS + 5000).toInt()
                 socket.keepAlive = true
@@ -563,6 +574,8 @@ class PeerConnectionManager @Inject constructor(
                     ip = peer.ip,
                     signalingPort = peer.port,
                     streamPort = ack.streamPort,
+                    tcpStreamPort = ack.tcpStreamPort,
+                    tcpAuthToken = tcpAuthToken,
                     audioStreamPort = ack.audioStreamPort,
                     udpStreamPort = ack.udpStreamPort,
                     supportsRemotePtz = ack.supportsRemotePtz,
@@ -571,7 +584,8 @@ class PeerConnectionManager @Inject constructor(
                     network = selectedNetwork,
                     transport = networkTransportManager.transportOf(selectedNetwork),
                     socket = socket,
-                    streamKey = sessionKey
+                    streamKey = sessionKey,
+                    supportsAuthenticatedTcp = ack.supportsAuthenticatedTcp
                 )
                 addPeer(connectedPeer)
                 tlsHelper.savePeerPairingPin(peer.ip, resolvedPin)
@@ -762,6 +776,18 @@ class PeerConnectionManager @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun findPeerFingerprintMismatch(error: Throwable): String? {
+        val visited = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<Throwable, Boolean>()
+        )
+        var current: Throwable? = error
+        while (current != null && visited.add(current)) {
+            if (current is PeerFingerprintMismatchException) return current.actualFingerprint
+            current = current.cause
+        }
+        return null
     }
 
     @Synchronized

@@ -38,6 +38,21 @@ class LatestAccessUnitInputStreamTest {
         assertEquals(250L, metadata?.decoderResidenceMs)
     }
 
+    @Test
+    fun `network discontinuity skips deltas until the next key frame`() {
+        val now = 30_000L
+        val input = LatestAccessUnitInputStream { now }
+        input.submit(frame(sequence = 1, capturedAt = now, keyFrame = true))
+        input.recoverFromDiscontinuity()
+        input.submit(frame(sequence = 2, capturedAt = now))
+        input.submit(frame(sequence = 3, capturedAt = now, keyFrame = true))
+
+        val bytes = ByteArray(1)
+        assertEquals(1, input.read(bytes))
+        assertArrayEquals(byteArrayOf(3), bytes)
+        assertEquals(3L, input.takeOutputMetadata()?.payload?.frameSequence)
+    }
+
     private fun frame(
         sequence: Long,
         capturedAt: Long,

@@ -18,6 +18,8 @@ import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class DecoderRenderMetrics(
     val renderedFrames: Long,
@@ -60,6 +62,7 @@ class DecoderGlRenderer(
         private const val GPU_COMPLETION_SAMPLE_INTERVAL = 10L
         private const val GPU_COMPLETION_MAX_PENDING = 8
         private const val GPU_COMPLETION_WINDOW_SIZE = 120
+        private const val GPU_PERCENTILE_REFRESH_INTERVAL = 4
 
         private val QUAD_COORDS = floatArrayOf(
             -1f, -1f,
@@ -78,6 +81,7 @@ class DecoderGlRenderer(
 
     private var glThread: HandlerThread? = null
     private var glHandler: Handler? = null
+    private val surfaceReady = CompletableDeferred<Surface>()
 
     private var eglHelper: EglHelper? = null
     private var pbufferSurface: android.opengl.EGLSurface? = null
@@ -123,6 +127,7 @@ class DecoderGlRenderer(
     private val gpuCompletionDurationsUs = ArrayDeque<Int>()
     private val gpuCompletionP95Us = AtomicInteger(0)
     private val gpuCompletionSampleCount = AtomicInteger(0)
+    private var gpuSamplesSincePercentileRefresh = 0
     @Volatile private var outputFpsLimit = 30
     @Volatile private var sharedGpuOutputEnabled = false
     @Volatile private var bitmapOutputEnabled = true
@@ -243,6 +248,7 @@ class DecoderGlRenderer(
                 st.setDefaultBufferSize(width, height)
                 surfaceTexture = st
                 surface = Surface(st)
+                surfaceReady.complete(surface!!)
 
                 st.setOnFrameAvailableListener({ _ ->
                     scheduleRender()
@@ -251,12 +257,18 @@ class DecoderGlRenderer(
                 Log.d(TAG, "DecoderGlRenderer started: ${width}x${height} (PBO async readback)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start DecoderGlRenderer", e)
+                surfaceReady.completeExceptionally(e)
                 releaseInternal()
             }
         }
     }
 
+    /** Waits without blocking the decoder or UI thread for GL surface initialization. */
+    suspend fun awaitSurface(timeoutMs: Long = 200L): Surface? =
+        withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) { surfaceReady.await() }
+
     fun release() {
+        surfaceReady.cancel()
         glHandler?.post { releaseInternal() }
         glThread?.quitSafely()
         glThread = null
@@ -503,11 +515,17 @@ class DecoderGlRenderer(
                     while (gpuCompletionDurationsUs.size > GPU_COMPLETION_WINDOW_SIZE) {
                         gpuCompletionDurationsUs.removeFirst()
                     }
-                    val sorted = gpuCompletionDurationsUs.sorted()
-                    val p95Index = ((sorted.size * 95 + 99) / 100 - 1)
-                        .coerceIn(0, sorted.lastIndex)
-                    gpuCompletionP95Us.set(sorted[p95Index])
-                    gpuCompletionSampleCount.set(sorted.size)
+                    gpuCompletionSampleCount.set(gpuCompletionDurationsUs.size)
+                    gpuSamplesSincePercentileRefresh++
+                    if (gpuCompletionDurationsUs.size == 1 ||
+                        gpuSamplesSincePercentileRefresh >= GPU_PERCENTILE_REFRESH_INTERVAL
+                    ) {
+                        val sorted = gpuCompletionDurationsUs.sorted()
+                        val p95Index = ((sorted.size * 95 + 99) / 100 - 1)
+                            .coerceIn(0, sorted.lastIndex)
+                        gpuCompletionP95Us.set(sorted[p95Index])
+                        gpuSamplesSincePercentileRefresh = 0
+                    }
                     iterator.remove()
                 }
                 GLES30.GL_WAIT_FAILED -> {
@@ -554,6 +572,7 @@ class DecoderGlRenderer(
     }
 
     private fun releaseInternal() {
+        surfaceReady.cancel()
         try { surfaceTexture?.release() } catch (_: Exception) {}
         surfaceTexture = null
         surface = null
@@ -579,6 +598,7 @@ class DecoderGlRenderer(
         gpuCompletionFences.forEach { GLES30.glDeleteSync(it.fence) }
         gpuCompletionFences.clear()
         gpuCompletionDurationsUs.clear()
+        gpuSamplesSincePercentileRefresh = 0
         gpuCompletionP95Us.set(0)
         gpuCompletionSampleCount.set(0)
         if (oesTexId != 0) {

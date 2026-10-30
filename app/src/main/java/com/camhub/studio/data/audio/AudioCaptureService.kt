@@ -1,6 +1,7 @@
 package com.camhub.studio.data.audio
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
@@ -254,6 +255,8 @@ class AudioCaptureService @Inject constructor(
         }
     }
 
+    // startCapture checks RECORD_AUDIO before calling this and handles permission revocation.
+    @SuppressLint("MissingPermission")
     private fun createAudioRecord(bufferSize: Int): AudioRecord {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return AudioRecord(
@@ -365,7 +368,7 @@ class AudioCaptureService @Inject constructor(
             )
 
             // Accumulator for resampled samples to fill complete Opus frames
-            var resampledAccum = ShortArray(0)
+            val resampledAccum = PcmFrameAccumulator(OpusEncoder.FRAME_SIZE)
 
             while (isActive) {
                 val read = try {
@@ -390,20 +393,10 @@ class AudioCaptureService @Inject constructor(
                 val dbLevel = rmsToNormalizedDb(rms)
                 _audioLevels.value = listOf(dbLevel, dbLevel)
 
-                val resampled = if (SAMPLE_RATE == OPUS_SAMPLE_RATE) {
-                    buffer.copyOf(read)
-                } else {
-                    OpusEncoder.resample44100to48000(buffer, read)
-                }
-
-                // Accumulate resampled samples
-                resampledAccum = resampledAccum + resampled
-
-                // Encode complete Opus frames (960 samples each)
-                while (resampledAccum.size >= OpusEncoder.FRAME_SIZE) {
-                    val frame = resampledAccum.copyOfRange(0, OpusEncoder.FRAME_SIZE)
-                    resampledAccum = resampledAccum.copyOfRange(OpusEncoder.FRAME_SIZE, resampledAccum.size)
-
+                val resampled = if (SAMPLE_RATE == OPUS_SAMPLE_RATE) buffer
+                    else OpusEncoder.resample44100to48000(buffer, read)
+                val resampledCount = if (SAMPLE_RATE == OPUS_SAMPLE_RATE) read else resampled.size
+                resampledAccum.offer(resampled, resampledCount) { frame ->
                     val encoded = opusEncoder?.encode(frame)
                     if (encoded != null) {
                         val payload = metaHeader + encoded

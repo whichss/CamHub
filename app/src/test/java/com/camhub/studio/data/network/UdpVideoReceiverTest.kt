@@ -15,6 +15,46 @@ import org.junit.Test
 class UdpVideoReceiverTest {
 
     @Test
+    fun `receiver accepts native IPv6 source address`() {
+        val loopback = InetAddress.getByName("::1")
+        val senderSocket = DatagramSocket(0, loopback)
+        val received = AtomicReference<ByteArray>()
+        val completed = CountDownLatch(1)
+        val receiver = UdpVideoReceiver(
+            cameraName = "IPv6 Camera",
+            expectedHost = loopback.hostAddress ?: "::1",
+            expectedSourcePort = senderSocket.localPort,
+            frameDeadlineMs = 500,
+            onFrame = { bytes, _, _ ->
+                received.set(bytes)
+                completed.countDown()
+            }
+        )
+
+        try {
+            val port = receiver.start()
+            val source = ByteArray(2_048) { (it % 239).toByte() }
+            val packets = RtpVideoPacketCodec.packetize(
+                frame = source,
+                transportFrameId = 9,
+                rtpTimestamp = 91_000,
+                ssrc = 17,
+                firstRtpSequence = 22,
+                isKeyFrame = true
+            )
+            packets.forEach { packet ->
+                senderSocket.send(DatagramPacket(packet, packet.size, loopback, port))
+            }
+
+            assertTrue("IPv6 frame was not received", completed.await(2, TimeUnit.SECONDS))
+            assertArrayEquals(source, received.get())
+        } finally {
+            receiver.stop()
+            senderSocket.close()
+        }
+    }
+
+    @Test
     fun `receiver completes out of order frame on its camera thread`() {
         val loopback = InetAddress.getLoopbackAddress()
         val senderSocket = DatagramSocket(0, loopback)

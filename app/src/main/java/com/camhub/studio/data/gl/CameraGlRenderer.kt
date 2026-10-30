@@ -10,11 +10,23 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.camhub.studio.data.metrics.DurationPercentilesUs
+import com.camhub.studio.data.metrics.RollingDurationTracker
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 class CameraGlRenderer {
+    data class OutputTimings(
+        val previewSubmission: DurationPercentilesUs,
+        val encoderSubmission: DurationPercentilesUs
+    )
+
+    private val previewSubmission = RollingDurationTracker()
+    private val encoderSubmission = RollingDurationTracker()
+
+    /** CPU wall time including swapBuffers; not GPU execution time. */
+    fun outputTimings() = OutputTimings(previewSubmission.snapshot(), encoderSubmission.snapshot())
 
     companion object {
         private const val TAG = "CameraGlRenderer"
@@ -45,6 +57,11 @@ class CameraGlRenderer {
     private var program = 0
     private var surfaceTexture: SurfaceTexture? = null
     private val texMatrix = FloatArray(16)
+    private val rotationMatrix = FloatArray(16)
+    private val combinedMatrix = FloatArray(16)
+    /** Reused by viewport calculations, which run only on the CameraGL thread. */
+    private val viewportResult = IntArray(4)
+    private var matrixRotationDegrees = Int.MIN_VALUE
 
     private var vertexBuffer: FloatBuffer? = null
     private var texCoordBuffer: FloatBuffer? = null
@@ -83,7 +100,8 @@ class CameraGlRenderer {
         vfHeight: Int = height,
         bufW: Int = width,
         bufH: Int = height,
-        centerCrop: Boolean = false
+        centerCrop: Boolean = false,
+        onReady: (Surface?) -> Unit = {}
     ) {
         stopped = false
         val thread = HandlerThread("CameraGL").also { it.start() }
@@ -131,10 +149,12 @@ class CameraGlRenderer {
                     glHandler?.post { drawFrame() }
                 }, handler)
 
+                onReady(cameraSurface)
                 Log.d(TAG, "CameraGlRenderer started: ${width}x${height}, vf=${vfWidth}x${vfHeight}")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start CameraGlRenderer", e)
                 releaseInternal()
+                onReady(null)
             }
         }
     }
@@ -164,17 +184,20 @@ class CameraGlRenderer {
 
             // Apply rotation to texMatrix
             if (rotationDegrees != 0) {
-                val rotMatrix = FloatArray(16)
-                Matrix.setIdentityM(rotMatrix, 0)
-                Matrix.translateM(rotMatrix, 0, 0.5f, 0.5f, 0f)
-                Matrix.rotateM(rotMatrix, 0, rotationDegrees.toFloat(), 0f, 0f, 1f)
-                Matrix.translateM(rotMatrix, 0, -0.5f, -0.5f, 0f)
-                val combined = FloatArray(16)
-                Matrix.multiplyMM(combined, 0, rotMatrix, 0, texMatrix, 0)
-                System.arraycopy(combined, 0, texMatrix, 0, 16)
+                val degrees = rotationDegrees
+                if (matrixRotationDegrees != degrees) {
+                    Matrix.setIdentityM(rotationMatrix, 0)
+                    Matrix.translateM(rotationMatrix, 0, 0.5f, 0.5f, 0f)
+                    Matrix.rotateM(rotationMatrix, 0, degrees.toFloat(), 0f, 0f, 1f)
+                    Matrix.translateM(rotationMatrix, 0, -0.5f, -0.5f, 0f)
+                    matrixRotationDegrees = degrees
+                }
+                Matrix.multiplyMM(combinedMatrix, 0, rotationMatrix, 0, texMatrix, 0)
+                System.arraycopy(combinedMatrix, 0, texMatrix, 0, 16)
             }
 
             // Draw to viewfinder
+            val previewStartedNs = System.nanoTime()
             egl.makeCurrent(vfSurface)
             GLES20.glViewport(0, 0, viewfinderWidth, viewfinderHeight)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -184,8 +207,10 @@ class CameraGlRenderer {
             GLES20.glViewport(vp[0], vp[1], vp[2], vp[3])
             drawQuad()
             egl.swapBuffers(vfSurface)
+            previewSubmission.recordNanos((System.nanoTime() - previewStartedNs).coerceAtLeast(0L))
 
             // Draw to encoder
+            val encoderStartedNs = System.nanoTime()
             egl.makeCurrent(encSurface)
             GLES20.glViewport(0, 0, renderWidth, renderHeight)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -201,6 +226,7 @@ class CameraGlRenderer {
             egl.setPresentationTime(encSurface, captureTimestampNs)
             onFrameSubmitted?.invoke(captureTimestampNs / 1_000L, captureAtWallMs)
             egl.swapBuffers(encSurface)
+            encoderSubmission.recordNanos((System.nanoTime() - encoderStartedNs).coerceAtLeast(0L))
         } catch (e: Exception) {
             Log.e(TAG, "drawFrame error", e)
         }
@@ -243,19 +269,19 @@ class CameraGlRenderer {
 
         // If aspect ratios are close enough, use full viewport
         if (kotlin.math.abs(contentAspect - viewAspect) < 0.05f) {
-            return intArrayOf(0, 0, surfaceW, surfaceH)
+            return setViewport(0, 0, surfaceW, surfaceH)
         }
 
         return if (contentAspect < viewAspect) {
             // Content is narrower than viewport → pillarbox (black bars on sides)
             val fitW = (surfaceH * contentAspect).toInt()
             val offsetX = (surfaceW - fitW) / 2
-            intArrayOf(offsetX, 0, fitW, surfaceH)
+            setViewport(offsetX, 0, fitW, surfaceH)
         } else {
             // Content is wider than viewport → letterbox (black bars top/bottom)
             val fitH = (surfaceW / contentAspect).toInt()
             val offsetY = (surfaceH - fitH) / 2
-            intArrayOf(0, offsetY, surfaceW, fitH)
+            setViewport(0, offsetY, surfaceW, fitH)
         }
     }
 
@@ -276,21 +302,29 @@ class CameraGlRenderer {
         val viewAspect = surfaceW.toFloat() / surfaceH.toFloat()
 
         if (kotlin.math.abs(contentAspect - viewAspect) < 0.05f) {
-            return intArrayOf(0, 0, surfaceW, surfaceH)
+            return setViewport(0, 0, surfaceW, surfaceH)
         }
 
         return if (contentAspect < viewAspect) {
             // Content narrower than viewport → fill width, crop top/bottom
             val fitH = (surfaceW / contentAspect).toInt()
             val offsetY = (surfaceH - fitH) / 2
-            intArrayOf(0, offsetY, surfaceW, fitH)
+            setViewport(0, offsetY, surfaceW, fitH)
         } else {
             // Content wider than viewport → fill height, crop left/right
             val fitW = (surfaceH * contentAspect).toInt()
             val offsetX = (surfaceW - fitW) / 2
-            intArrayOf(offsetX, 0, fitW, surfaceH)
+            setViewport(offsetX, 0, fitW, surfaceH)
         }
     }
+
+    private fun setViewport(x: Int, y: Int, width: Int, height: Int): IntArray =
+        viewportResult.apply {
+            this[0] = x
+            this[1] = y
+            this[2] = width
+            this[3] = height
+        }
 
     private fun drawQuad() {
         GLES20.glUseProgram(program)

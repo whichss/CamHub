@@ -3,6 +3,7 @@
 CONTENTS_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 exec "$CONTENTS_DIR/runtime/bin/java" \
+    --add-modules jdk.httpserver \
     -Xdock:name="CamHub Desktop" \
     -Dapple.awt.application.name="CamHub Desktop" \
     -cp "$CONTENTS_DIR/app/lib/*" \

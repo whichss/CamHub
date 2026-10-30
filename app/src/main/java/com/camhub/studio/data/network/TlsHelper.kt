@@ -1,5 +1,6 @@
 package com.camhub.studio.data.network
 
+import android.annotation.SuppressLint
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -13,6 +14,7 @@ import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.Date
 import java.security.MessageDigest
@@ -25,12 +27,17 @@ import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.X509TrustManager
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.X509ExtendedTrustManager
+import java.net.Socket as JSocket
+
+internal class PeerFingerprintMismatchException(val actualFingerprint: String) :
+    CertificateException("Peer certificate fingerprint changed")
 
 /**
  * Provides TLS socket creation for encrypted signaling.
- * Uses a stable self-signed camera certificate. Clients pin its SHA-256 fingerprint
- * only after the operator compares it with the value shown on the camera device.
+ * Clients validate that the peer presents a valid, self-signed CamHub certificate, then
+ * pin its SHA-256 fingerprint only after the operator compares it with the camera display.
  */
 @Singleton
 class TlsHelper @Inject constructor(
@@ -44,12 +51,6 @@ class TlsHelper @Inject constructor(
 
     @Volatile private var serverCertificate: X509Certificate? = null
     private val serverSslContext: SSLContext by lazy { buildServerContext() }
-    private val clientSslContext: SSLContext by lazy {
-        SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(trustAllManager), SecureRandom())
-        }
-    }
-
     private fun buildServerContext(): SSLContext {
         val identityFile = File(context.filesDir, "camhub-tls-identity.p12")
         val password = loadOrCreateIdentityPassword()
@@ -79,7 +80,8 @@ class TlsHelper @Inject constructor(
         kmf.init(ks, password)
 
         return SSLContext.getInstance("TLS").apply {
-            init(kmf.keyManagers, arrayOf(trustAllManager), SecureRandom())
+            // This socket does not request client certificates, so it has no peer chain to validate.
+            init(kmf.keyManagers, null, SecureRandom())
         }
     }
 
@@ -169,12 +171,17 @@ class TlsHelper @Inject constructor(
 
     /** Director side: establish TLS; the camera fingerprint is checked before app data is sent. */
     fun createClientSocket(ip: String, port: Int, network: Network? = null): SSLSocket {
+        val expectedFingerprint = context.getSharedPreferences("camhub_trusted_peers", Context.MODE_PRIVATE)
+            .getString(ip, null)
+        val clientContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(camHubCertificateTrustManager(expectedFingerprint)), SecureRandom())
+        }
         val transport = (network?.socketFactory?.createSocket() ?: Socket()).apply {
             tcpNoDelay = true
             connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
         }
         return try {
-            (clientSslContext.socketFactory.createSocket(transport, ip, port, true) as SSLSocket).apply {
+            (clientContext.socketFactory.createSocket(transport, ip, port, true) as SSLSocket).apply {
                 soTimeout = TLS_HANDSHAKE_TIMEOUT_MS
                 startHandshake()
             }
@@ -184,10 +191,77 @@ class TlsHelper @Inject constructor(
         }
     }
 
-    private val trustAllManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+    // CamHub identities are self-signed. This validates their shape/signature and pins known peers;
+    // first pairing still requires an explicit fingerprint comparison before any app data is sent.
+    @SuppressLint("CustomX509TrustManager")
+    private fun camHubCertificateTrustManager(expectedFingerprint: String?) = object : X509ExtendedTrustManager() {
+        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+            throw CertificateException("CamHub does not accept client certificates")
+        }
+
+        override fun checkClientTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            socket: JSocket?
+        ) = checkClientTrusted(chain, authType)
+
+        override fun checkClientTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            engine: SSLEngine?
+        ) = checkClientTrusted(chain, authType)
+
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+            validateCamHubCertificate(chain, authType, expectedFingerprint)
+        }
+
+        override fun checkServerTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            socket: JSocket?
+        ) = checkServerTrusted(chain, authType)
+
+        override fun checkServerTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            engine: SSLEngine?
+        ) = checkServerTrusted(chain, authType)
+
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+
+    private fun validateCamHubCertificate(
+        chain: Array<out X509Certificate>?,
+        authType: String?,
+        expectedFingerprint: String?
+    ) {
+        if (authType.isNullOrBlank() || chain?.size != 1) {
+            throw CertificateException("Expected a single CamHub identity certificate")
+        }
+        val certificate = chain[0]
+        try {
+            certificate.checkValidity()
+            if (certificate.subjectX500Principal != certificate.issuerX500Principal ||
+                certificate.subjectX500Principal.name != "CN=CamHub"
+            ) {
+                throw CertificateException("Peer certificate is not a self-signed CamHub identity")
+            }
+            certificate.verify(certificate.publicKey)
+            if (expectedFingerprint != null) {
+                val actualFingerprint = fingerprint(certificate)
+                if (!MessageDigest.isEqual(
+                        expectedFingerprint.uppercase().toByteArray(Charsets.US_ASCII),
+                        actualFingerprint.toByteArray(Charsets.US_ASCII)
+                    )
+                ) {
+                    throw PeerFingerprintMismatchException(actualFingerprint)
+                }
+            }
+        } catch (error: CertificateException) {
+            throw error
+        } catch (error: Exception) {
+            throw CertificateException("Invalid CamHub identity certificate", error)
+        }
     }
 
     // ---- Self-signed X.509 certificate via raw DER ----

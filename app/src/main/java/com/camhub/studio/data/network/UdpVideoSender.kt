@@ -1,5 +1,7 @@
 package com.camhub.studio.data.network
 
+import com.camhub.studio.data.metrics.DurationPercentilesUs
+import com.camhub.studio.data.metrics.RollingDurationTracker
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -30,6 +32,16 @@ class UdpVideoSender(
         }
     }
 ) {
+    data class SendMetrics(
+        val queueResidence: DurationPercentilesUs,
+        val packetizeAndSend: DurationPercentilesUs,
+        val keyFramePacketizeAndSend: DurationPercentilesUs,
+        val socketSend: DurationPercentilesUs,
+        // Lifetime counters; UDP socket acceptance does not imply delivery.
+        val socketAcceptedDatagrams: Long,
+        val socketSendFailures: Long,
+        val latestKeyFramePacketCount: Long
+    )
     companion object {
         private const val MAX_CLIENTS = 4
         private const val SOCKET_SEND_BUFFER_BYTES = 256 * 1024
@@ -38,12 +50,19 @@ class UdpVideoSender(
     private data class QueuedFrame(
         val bytes: ByteArray,
         val isKeyFrame: Boolean,
-        val isCodecConfig: Boolean
+        val isCodecConfig: Boolean,
+        val enqueuedAtNs: Long = System.nanoTime()
     )
 
     private data class ClientEndpoint(
         val address: InetSocketAddress,
         @Volatile var needsCodecConfig: Boolean = true
+    )
+
+    private data class PacketizedSendResult(
+        val packetCount: Int,
+        val sentSuccessfully: BooleanArray,
+        val socketSendNs: Long
     )
 
     private val clients = ConcurrentHashMap<String, ClientEndpoint>()
@@ -55,6 +74,15 @@ class UdpVideoSender(
     private val cachedConfig = AtomicReference<QueuedFrame?>()
     private val transportFrameSequence = AtomicLong(0)
     private val _droppedBeforeSend = AtomicLong(0)
+    private val queueResidence = RollingDurationTracker()
+    private val packetizeAndSend = RollingDurationTracker()
+    private val keyFramePacketizeAndSend = RollingDurationTracker()
+    private val socketSend = RollingDurationTracker()
+    private val socketAcceptedDatagrams = AtomicLong(0)
+    private val socketSendFailures = AtomicLong(0)
+    private val latestKeyFramePacketCount = AtomicLong(0)
+    /** Reused by the single sender thread; packetizeEach callbacks consume it synchronously. */
+    private val packetScratch = ByteArray(RtpVideoPacketCodec.MAX_DATAGRAM_BYTES)
     private val lifecycleLock = Any()
     private val ssrc = SecureRandom().nextInt().toLong() and 0xffff_ffffL
 
@@ -67,6 +95,12 @@ class UdpVideoSender(
     val clientCount: Int get() = clients.size
     val localPort: Int get() = socket?.localPort ?: 0
     val droppedBeforeSend: Long get() = _droppedBeforeSend.get()
+
+    fun sendMetrics(): SendMetrics = SendMetrics(
+        queueResidence.snapshot(), packetizeAndSend.snapshot(), keyFramePacketizeAndSend.snapshot(),
+        socketSend.snapshot(), socketAcceptedDatagrams.get(), socketSendFailures.get(),
+        latestKeyFramePacketCount.get()
+    )
 
     fun setSessionKey(key: ByteArray) {
         frameCipher = FrameCipher(key)
@@ -93,7 +127,7 @@ class UdpVideoSender(
 
         val endpoint = ClientEndpoint(InetSocketAddress(InetAddress.getByName(host), port))
         clients[clientId] = endpoint
-        cachedConfig.get()?.let { replacePending(pendingConfig, it) }
+        cachedConfig.get()?.let { replacePending(pendingConfig, it.copy(enqueuedAtNs = System.nanoTime())) }
         signalSender()
         keyFrameRequester?.invoke()
         return true
@@ -175,55 +209,81 @@ class UdpVideoSender(
         val activeClients = clients.entries.toList()
         if (activeClients.isEmpty()) return
 
-        val regularPackets = packetize(frame)
-        var cachedConfigPackets: List<ByteArray>? = null
-        for ((_, client) in activeClients) {
-            if (!frame.isCodecConfig && client.needsCodecConfig) {
-                val config = cachedConfig.get()
-                if (config != null) {
-                    val packets = cachedConfigPackets ?: packetize(config).also {
-                        cachedConfigPackets = it
-                    }
-                    if (sendPackets(activeSocket, client.address, packets)) {
-                        client.needsCodecConfig = false
-                    }
+        val startNs = System.nanoTime()
+        queueResidence.recordNanos((startNs - frame.enqueuedAtNs).coerceAtLeast(0L))
+
+        // Allocate RTP sequence numbers in wire order: configuration precedes
+        // the media frame for clients that have not received it yet.
+        var socketSendNs = 0L
+        val clientsNeedingConfig = if (!frame.isCodecConfig) {
+            activeClients.filter { it.value.needsCodecConfig }
+        } else {
+            emptyList()
+        }
+        if (clientsNeedingConfig.isNotEmpty()) {
+            cachedConfig.get()?.let { config ->
+                val configResult = packetizeAndSend(activeSocket, config, clientsNeedingConfig)
+                socketSendNs += configResult.socketSendNs
+                clientsNeedingConfig.forEachIndexed { index, client ->
+                    if (configResult.sentSuccessfully[index]) client.value.needsCodecConfig = false
                 }
             }
+        }
 
-            if (sendPackets(activeSocket, client.address, regularPackets) && frame.isCodecConfig) {
-                client.needsCodecConfig = false
+        val mediaResult = packetizeAndSend(activeSocket, frame, activeClients)
+        socketSendNs += mediaResult.socketSendNs
+        if (frame.isKeyFrame) latestKeyFramePacketCount.set(mediaResult.packetCount.toLong())
+        if (frame.isCodecConfig) {
+            activeClients.forEachIndexed { index, client ->
+                if (mediaResult.sentSuccessfully[index]) client.value.needsCodecConfig = false
             }
         }
+        val durationNs = (System.nanoTime() - startNs).coerceAtLeast(0L)
+        socketSend.recordNanos(socketSendNs)
+        packetizeAndSend.recordNanos(durationNs)
+        if (frame.isKeyFrame) keyFramePacketizeAndSend.recordNanos(durationNs)
     }
 
-    private fun packetize(frame: QueuedFrame): List<ByteArray> {
+    private fun packetizeAndSend(
+        activeSocket: DatagramSocket,
+        frame: QueuedFrame,
+        destinations: List<Map.Entry<String, ClientEndpoint>>
+    ): PacketizedSendResult {
+        if (destinations.isEmpty()) return PacketizedSendResult(0, BooleanArray(0), 0L)
         val wireBytes = frameCipher?.encrypt(frame.bytes) ?: frame.bytes
         val frameId = transportFrameSequence.incrementAndGet()
         val timestamp90Khz = (System.nanoTime() / 1_000_000L * 90L) and 0xffff_ffffL
-        val packets = RtpVideoPacketCodec.packetize(
+        val successful = BooleanArray(destinations.size) { true }
+        var socketSendNs = 0L
+        val datagram = DatagramPacket(packetScratch, packetScratch.size)
+        val packetCount = RtpVideoPacketCodec.packetizeEach(
             frame = wireBytes,
             transportFrameId = frameId,
             rtpTimestamp = timestamp90Khz,
             ssrc = ssrc,
             firstRtpSequence = nextRtpSequence,
+            scratch = packetScratch,
             isKeyFrame = frame.isKeyFrame,
             isCodecConfig = frame.isCodecConfig
-        )
-        nextRtpSequence = (nextRtpSequence + packets.size) and 0xffff
-        return packets
-    }
-
-    private fun sendPackets(
-        activeSocket: DatagramSocket,
-        destination: InetSocketAddress,
-        packets: List<ByteArray>
-    ): Boolean = try {
-        for (bytes in packets) {
-            activeSocket.send(DatagramPacket(bytes, bytes.size, destination))
+        ) { bytes, length ->
+            destinations.forEachIndexed { index, entry ->
+                if (!successful[index]) return@forEachIndexed
+                val socketStartedNs = System.nanoTime()
+                try {
+                    datagram.setSocketAddress(entry.value.address)
+                    datagram.setLength(length)
+                    activeSocket.send(datagram)
+                    socketAcceptedDatagrams.incrementAndGet()
+                } catch (_: Exception) {
+                    successful[index] = false
+                    socketSendFailures.incrementAndGet()
+                } finally {
+                    socketSendNs += (System.nanoTime() - socketStartedNs).coerceAtLeast(0L)
+                }
+            }
         }
-        true
-    } catch (_: Exception) {
-        false
+        nextRtpSequence = (nextRtpSequence + packetCount) and 0xffff
+        return PacketizedSendResult(packetCount, successful, socketSendNs)
     }
 
     private fun replacePending(slot: AtomicReference<QueuedFrame?>, frame: QueuedFrame) {

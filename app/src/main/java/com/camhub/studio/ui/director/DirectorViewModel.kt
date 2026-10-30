@@ -24,6 +24,7 @@ import com.camhub.studio.data.capability.RuntimePressure
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmGpuTransitionFrame
 import com.camhub.studio.data.gl.PgmTransitionMode
+import com.camhub.studio.data.gl.BitmapOutputTargetPolicy
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
 import com.camhub.studio.data.gl.SharedGpuVideoSurfaceView
 import com.camhub.studio.data.ptz.HybridPtzState
@@ -33,6 +34,7 @@ import com.camhub.studio.data.ptz.PtzMode
 import com.camhub.studio.data.network.ConnectedPeer
 import com.camhub.studio.data.network.AdaptiveBitrateController
 import com.camhub.studio.data.network.AdaptiveBitrateSample
+import com.camhub.studio.data.network.RecoveryProbeScheduler
 import com.camhub.studio.data.network.DiscoveredPeer
 import com.camhub.studio.data.network.NsdDiscoveryManager
 import com.camhub.studio.data.network.NetworkTransportManager
@@ -62,6 +64,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -118,11 +123,13 @@ class DirectorViewModel @Inject constructor(
     private var wasAutomaticHubProfileEnabled = false
     private var wasAdaptiveBitrateEnabled = false
     private val adaptiveBitrateControllers = mutableMapOf<String, AdaptiveBitrateController>()
+    private val recoveryProbeScheduler = RecoveryProbeScheduler<android.net.Network>()
     private val adaptiveCounterSnapshots = mutableMapOf<String, AdaptiveCounterSnapshot>()
     private var lastAutomaticPeerNames: Set<String> = emptySet()
     private var lastPriorityLiveCameraCount = -1
     private var lastPgmComposedFrameCount = 0L
     private var lastPgmMetricsSampleAtMs = 0L
+    private var lastUdpIngressBurstLogAtMs = 0L
     private val ptzCommandJobs = mutableMapOf<String, Job>()
     private val pendingRemotePtz = mutableMapOf<String, PendingRemotePtz>()
     private val ptzRequestSequence = AtomicLong(0L)
@@ -424,6 +431,23 @@ class DirectorViewModel @Inject constructor(
                 recorder.refreshThroughputMetrics()
                 val pgmMetrics = pgmOutputManager.gpuCompositorMetrics()
                 val pgmNowMs = SystemClock.elapsedRealtime()
+                val ingressBurst = streamClient.udpIngressBurstMetrics(pgmNowMs)
+                if (ingressBurst.activeCameraCount >= 2 &&
+                    pgmNowMs - lastUdpIngressBurstLogAtMs >= 10_000L
+                ) {
+                    lastUdpIngressBurstLogAtMs = pgmNowMs
+                    Log.d(
+                        TAG,
+                        "Hub UDP ingress 1s/${ingressBurst.activeCameraCount} cameras: " +
+                            "${ingressBurst.bytesPerSecond}B/s, " +
+                            "5ms bytes P95/P99/max=" +
+                            "${ingressBurst.p95BytesPer5Ms}/${ingressBurst.p99BytesPer5Ms}/" +
+                            "${ingressBurst.maxBytesPer5Ms}, " +
+                            "5ms packets P95/max=${ingressBurst.p95PacketsPer5Ms}/" +
+                            "${ingressBurst.maxPacketsPer5Ms}, " +
+                            "20ms max=${ingressBurst.maxBytesPer20Ms}B"
+                    )
+                }
                 val pgmElapsedMs = if (lastPgmMetricsSampleAtMs == 0L) 0L else {
                     (pgmNowMs - lastPgmMetricsSampleAtMs).coerceAtLeast(1L)
                 }
@@ -468,14 +492,17 @@ class DirectorViewModel @Inject constructor(
 
         // Timecode ticker while recording (skip updates when paused)
         viewModelScope.launch {
-            while (isActive) {
-                delay(33)
-                val info = recorder.recordingInfo.value
-                if (info.isRecording && info.startTimeMs > 0L && !info.isPaused) {
-                    val elapsed = System.currentTimeMillis() - info.startTimeMs - info.pausedDurationMs
+            recorder.recordingInfo
+                .map { Triple(it.isRecording && !it.isPaused, it.startTimeMs, it.pausedDurationMs) }
+                .distinctUntilChanged()
+                .collectLatest { (active, startTimeMs, pausedDurationMs) ->
+                if (!active || startTimeMs <= 0L) return@collectLatest
+                while (isActive) {
+                    val elapsed = System.currentTimeMillis() - startTimeMs - pausedDurationMs
                     _uiState.update {
                         it.copy(timecode = CameraValueMapper.formatTimecode(elapsed))
                     }
+                    delay(33)
                 }
             }
         }
@@ -814,6 +841,7 @@ class DirectorViewModel @Inject constructor(
             wasAdaptiveBitrateEnabled = false
             adaptiveBitrateControllers.clear()
             adaptiveCounterSnapshots.clear()
+            recoveryProbeScheduler.clear()
             return
         }
 
@@ -821,6 +849,14 @@ class DirectorViewModel @Inject constructor(
         val nowMs = SystemClock.elapsedRealtime()
         val streams = streamClient.streams.value.filterValues { it.isConnected }
         val activeNames = streams.keys
+        // A shared Android Network does not prove a shared Wi-Fi bottleneck. It
+        // only provides a conservative grouping for staggering upward probes.
+        val groups = connectionManager.connectedPeers.value
+            .filter { it.name in activeNames }
+            .mapNotNull { peer -> peer.network?.let { it to peer.name } }
+            .groupBy({ it.first }, { it.second })
+        val recoverySlots = recoveryProbeScheduler.select(groups).values.toSet()
+        val groupedNames = groups.values.filter { it.distinct().size > 1 }.flatten().toSet()
         adaptiveBitrateControllers.keys.retainAll(activeNames)
         adaptiveCounterSnapshots.keys.retainAll(activeNames)
         val targetByCamera = mutableMapOf<String, Pair<Int, String>>()
@@ -859,6 +895,16 @@ class DirectorViewModel @Inject constructor(
                     latencyP99Ms = stream.latencyP99Ms,
                     hasLatencySample = stream.isClockSynchronized &&
                         stream.latencySampleCount > 0,
+                    encodeToReceiveMs = stream.pipelineLatency
+                        ?.takeIf { stream.isClockSynchronized }
+                        ?.encodeToReceiveMs,
+                    networkFrameSequence = stream.pipelineLatency
+                        ?.takeIf { stream.isClockSynchronized && stream.ingressFps > 0 }
+                        ?.frameSequence,
+                    receiveToReadyMs = stream.pipelineLatency?.let {
+                        it.receiveToDecodeMs + it.decodeToReadyMs
+                    },
+                    allowRecovery = cameraName !in groupedNames || cameraName in recoverySlots,
                     recentPacketLossPercent = recentLoss,
                     droppedFrameDelta = droppedDelta,
                     actualFps = stream.ingressFps,
@@ -1037,6 +1083,8 @@ class DirectorViewModel @Inject constructor(
             cameraName = peer.name,
             ip = peer.ip,
             streamPort = peer.streamPort,
+            tcpStreamPort = peer.tcpStreamPort,
+            tcpAuthToken = peer.tcpAuthToken,
             sessionKey = peer.streamKey,
             network = peer.network,
             fallbackReason = fallbackReason
@@ -1536,13 +1584,20 @@ class DirectorViewModel @Inject constructor(
         }
         streamClient.setSharedGpuFrameTargets(targets)
 
-        val bitmapTargets = currentState.cameras
-            .filter { it.name !in targets }
-            .mapTo(mutableSetOf()) { it.name }
-        if (externalDisplayManager.isOutputEnabled.value && !externalGpuOutputEnabled) {
-            pgmCameraName?.let(bitmapTargets::add)
-            pvwCameraName?.let(bitmapTargets::add)
+        val externalBitmapTargets = if (
+            externalDisplayManager.isOutputEnabled.value && !externalGpuOutputEnabled
+        ) {
+            listOfNotNull(pgmCameraName, pvwCameraName).toSet()
+        } else {
+            emptySet()
         }
+        val bitmapTargets = BitmapOutputTargetPolicy.select(
+            activeCameraNames = currentState.cameras.mapTo(mutableSetOf()) { it.name },
+            sharedGpuTargets = targets,
+            pgmCameraName = pgmCameraName,
+            pvwCameraName = pvwCameraName,
+            externalBitmapTargets = externalBitmapTargets
+        )
         streamClient.setBitmapOutputTargets(bitmapTargets)
     }
 
@@ -1589,6 +1644,26 @@ class DirectorViewModel @Inject constructor(
 
     private fun handleSharedGpuFrame(cameraName: String, frame: SharedGpuVideoFrame) {
         val state = _uiState.value
+        val isQuarterTurn = ((frame.rotationDegrees % 180) + 180) % 180 != 0
+        val displayWidth = if (isQuarterTurn) frame.height else frame.width
+        val displayHeight = if (isQuarterTurn) frame.width else frame.height
+        val dimensionIndex = state.cameras.indexOfFirst { it.name == cameraName }
+        if (dimensionIndex >= 0) {
+            val camera = state.cameras[dimensionIndex]
+            if (camera.frameWidth != displayWidth || camera.frameHeight != displayHeight) {
+                _uiState.update { current ->
+                    val cameras = current.cameras.toMutableList()
+                    val currentIndex = cameras.indexOfFirst { it.name == cameraName }
+                    if (currentIndex < 0) current else {
+                        cameras[currentIndex] = cameras[currentIndex].copy(
+                            frameWidth = displayWidth,
+                            frameHeight = displayHeight
+                        )
+                        current.copy(cameras = cameras)
+                    }
+                }
+            }
+        }
         val pgmCamera = state.cameras.getOrNull(state.pgmCameraIndex)
         val pvwCamera = state.cameras.getOrNull(state.pvwCameraIndex)
         val transitionActive = state.transitionProgress > 0f &&

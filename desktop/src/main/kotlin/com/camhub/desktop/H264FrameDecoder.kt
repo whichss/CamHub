@@ -1,7 +1,6 @@
 package com.camhub.desktop
 
 import com.camhub.studio.data.network.CamHubVideoPayload
-import java.awt.Graphics2D
 import java.awt.image.BufferedImage
 import java.io.InputStream
 import java.util.concurrent.LinkedBlockingDeque
@@ -40,6 +39,10 @@ class H264FrameDecoder(
         if (running.get()) input.submit(payload)
     }
 
+    fun recoverFromDiscontinuity() {
+        if (running.get()) input.recoverFromDiscontinuity()
+    }
+
     override fun close() {
         running.set(false)
         input.close()
@@ -49,6 +52,7 @@ class H264FrameDecoder(
 
     private fun decodeLoop() {
         val converter = Java2DFrameConverter()
+        var convertedImage: BufferedImage? = null
         val grabber = FFmpegFrameGrabber(input, 0).apply {
             format = "h264"
             setOption("fflags", "nobuffer")
@@ -60,16 +64,22 @@ class H264FrameDecoder(
             setVideoOption("threads", "1")
         }
         try {
-            grabber.start()
+            // This is a live Annex-B stream that stays open. SPS/PPS arrives as
+            // a separate config access unit before video, so probing a finite
+            // sample here only consumes frames from the bounded startup queue.
+            grabber.start(false)
             while (running.get()) {
                 val frame = grabber.grabImage() ?: continue
-                val converted = converter.convert(frame) ?: continue
                 val metadata = input.takeOutputMetadata() ?: continue
                 if (metadata.decoderResidenceMs > LatestAccessUnitInputStream.MAX_FRAME_AGE_MS) {
                     input.recoverFromLateDecode()
                     continue
                 }
-                onImage(deepCopy(converted), metadata.payload)
+                convertedImage = DesktopVideoImageGuard.convertAndPublish(
+                    previousImage = convertedImage,
+                    convert = { converter.convert(frame) },
+                    onPublished = { image -> onImage(image, metadata.payload) }
+                ) ?: convertedImage
             }
         } catch (error: Throwable) {
             if (running.get()) onError(error)
@@ -81,17 +91,6 @@ class H264FrameDecoder(
         }
     }
 
-    private fun deepCopy(source: BufferedImage): BufferedImage {
-        val copy = BufferedImage(source.width, source.height, BufferedImage.TYPE_3BYTE_BGR)
-        copy.createGraphics().use { it.drawImage(source, 0, 0, null) }
-        return copy
-    }
-
-    private inline fun <T : Graphics2D, R> T.use(block: (T) -> R): R = try {
-        block(this)
-    } finally {
-        dispose()
-    }
 }
 
 internal class LatestAccessUnitInputStream(
@@ -175,6 +174,10 @@ internal class LatestAccessUnitInputStream(
     }
 
     fun recoverFromLateDecode() {
+        recoverFromDiscontinuity()
+    }
+
+    fun recoverFromDiscontinuity() {
         droppedFrames.incrementAndGet()
         enterKeyFrameRecovery()
     }

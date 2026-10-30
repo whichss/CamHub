@@ -77,6 +77,13 @@ class DesktopHubController(
         publishDiscovery("Camera disconnected")
     }
 
+    fun requestPtz(slot: Int, zoom: Float, centerX: Float, centerY: Float): Boolean {
+        val connection = synchronized(lock) {
+            slots.entries.firstOrNull { it.value == slot }?.key?.let(connections::get)
+        } ?: return false
+        return connection.requestPtz(zoom, centerX, centerY)
+    }
+
     override fun close() {
         discovery.close()
         val active = synchronized(lock) {
@@ -92,12 +99,16 @@ class DesktopHubController(
         connection: DesktopCameraConnection,
         snapshot: CameraConnectionSnapshot
     ) {
-        val slot = synchronized(lock) { slots[connection.endpoint.id] } ?: return
+        val slot = synchronized(lock) {
+            if (connections[connection.endpoint.id] !== connection) null else slots[connection.endpoint.id]
+        } ?: return
         listener.onCameraStateChanged(slot, snapshot)
     }
 
     override fun onImage(connection: DesktopCameraConnection, image: BufferedImage) {
-        val slot = synchronized(lock) { slots[connection.endpoint.id] } ?: return
+        val slot = synchronized(lock) {
+            if (connections[connection.endpoint.id] !== connection) null else slots[connection.endpoint.id]
+        } ?: return
         listener.onCameraImage(slot, image)
     }
 

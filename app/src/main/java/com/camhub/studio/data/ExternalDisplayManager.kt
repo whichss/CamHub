@@ -14,6 +14,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
+import androidx.appcompat.widget.AppCompatImageView
 import com.camhub.studio.data.gl.PgmTransitionFrame
 import com.camhub.studio.data.gl.PgmGpuTransitionFrame
 import com.camhub.studio.data.gl.SharedGpuVideoFrame
@@ -338,7 +339,7 @@ private class PgmPresentation(
     }
 }
 
-private class MeasuredPgmImageView(context: Context) : ImageView(context) {
+private class MeasuredPgmImageView(context: Context) : AppCompatImageView(context) {
     @Volatile private var pendingFrame: PgmOutputFrame? = null
     private var lastDrawnCameraName: String = ""
     private var lastDrawnFrameSequence: Long = 0L

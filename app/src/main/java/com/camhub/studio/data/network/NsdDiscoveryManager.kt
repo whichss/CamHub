@@ -11,6 +11,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,7 +29,8 @@ data class DiscoveredPeer(
 @Singleton
 class NsdDiscoveryManager @Inject constructor(
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
-    private val networkTransportManager: NetworkTransportManager
+    private val networkTransportManager: NetworkTransportManager,
+    private val peerConnectionManager: PeerConnectionManager
 ) {
     companion object {
         private const val TAG = "NsdDiscovery"
@@ -61,6 +63,16 @@ class NsdDiscoveryManager @Inject constructor(
 
     private val resolveQueue = Channel<NsdServiceInfo>(Channel.UNLIMITED)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    init {
+        scope.launch {
+            peerConnectionManager.connectedPeers.collect { connected ->
+                val addresses = connected.mapTo(mutableSetOf()) { it.ip }
+                _discoveredPeers.update { peers ->
+                    peers.map { it.copy(isConnected = it.ip in addresses) }
+                }
+            }
+        }
+    }
     private var resolveLoopStarted = false
 
     // UDP broadcast jobs
@@ -71,7 +83,8 @@ class NsdDiscoveryManager @Inject constructor(
     private data class UdpAnnounce(
         val service: String = "camhub",
         val ip: String,
-        val port: Int
+        val port: Int,
+        val deviceName: String = ""
     )
 
     @Suppress("deprecation")
@@ -224,7 +237,8 @@ class NsdDiscoveryManager @Inject constructor(
         acquireMulticastLock()
 
         // Clear only non-connected peers; connected ones are preserved
-        _discoveredPeers.value = _discoveredPeers.value.filter { it.isConnected }
+        val connectedIps = peerConnectionManager.connectedPeers.value.mapTo(mutableSetOf()) { it.ip }
+        _discoveredPeers.update { peers -> peers.filter { it.ip in connectedIps } }
         startResolveLoop()
 
         // 1) NSD discovery
@@ -245,7 +259,8 @@ class NsdDiscoveryManager @Inject constructor(
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 Log.d(TAG, "NSD service lost: ${serviceInfo.serviceName}")
                 val name = serviceInfo.serviceName.removePrefix(SERVICE_NAME_PREFIX)
-                _discoveredPeers.value = _discoveredPeers.value.filter { it.name != name }
+                val connectedIps = peerConnectionManager.connectedPeers.value.mapTo(mutableSetOf()) { it.ip }
+                _discoveredPeers.update { peers -> peers.filter { it.name != name || it.ip in connectedIps } }
             }
 
             override fun onDiscoveryStopped(serviceType: String) {
@@ -372,7 +387,7 @@ class NsdDiscoveryManager @Inject constructor(
                             val localIp = networkTransportManager.localIpv4Address(network)
                                 ?.hostAddress ?: continue
                             val message = json.encodeToString(
-                                UdpAnnounce(ip = localIp, port = port)
+                                UdpAnnounce(ip = localIp, port = port, deviceName = deviceName)
                             ).toByteArray()
                             val destinations = listOfNotNull(
                                 limitedBroadcast,
@@ -433,8 +448,8 @@ class NsdDiscoveryManager @Inject constructor(
                         // Don't add ourselves
                         val localIp = getLocalIpAddress()
                         val sourceIp = packet.address.hostAddress ?: announce.ip
-                        if (sourceIp != localIp && announce.service == "camhub") {
-                            val peerName = "Camera-$sourceIp"
+                        if (sourceIp != localIp && announce.service == "camhub" && announce.port in 1..65535) {
+                            val peerName = announce.deviceName.take(64).ifBlank { "Camera-$sourceIp" }
                             val isNew = _discoveredPeers.value.none { it.ip == sourceIp && it.port == announce.port }
                             if (isNew) {
                                 Log.d(TAG, "UDP discovered: $peerName at $sourceIp:${announce.port}")
@@ -477,15 +492,18 @@ class NsdDiscoveryManager @Inject constructor(
     // ==================== Shared helpers ====================
 
     private fun addOrUpdatePeer(peer: DiscoveredPeer) {
-        val current = _discoveredPeers.value.toMutableList()
-        // Match by IP to avoid duplicates from NSD + UDP
-        val existingIndex = current.indexOfFirst { it.ip == peer.ip && it.port == peer.port }
-        if (existingIndex >= 0) {
-            current[existingIndex] = peer.copy(isConnected = current[existingIndex].isConnected)
-        } else {
-            current.add(peer)
+        _discoveredPeers.update { previous ->
+            val current = previous.toMutableList()
+            val existingIndex = current.indexOfFirst { it.ip == peer.ip && it.port == peer.port }
+            if (existingIndex >= 0) {
+                val existing = current[existingIndex]
+                val name = if (peer.name == "Camera-${peer.ip}") existing.name else peer.name
+                current[existingIndex] = peer.copy(name = name, isConnected = existing.isConnected)
+            } else {
+                current.add(peer.copy(isConnected = peerConnectionManager.connectedPeers.value.any { it.ip == peer.ip }))
+            }
+            current
         }
-        _discoveredPeers.value = current
     }
 
     fun cleanup() {

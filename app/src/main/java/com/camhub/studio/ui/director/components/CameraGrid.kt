@@ -212,6 +212,8 @@ private fun CameraCard(
                     .aspectRatio(
                         camera.previewSourceBitmap?.takeIf { it.width > 0 && it.height > 0 }
                             ?.let { it.width.toFloat() / it.height }
+                            ?: camera.takeIf { it.frameWidth > 0 && it.frameHeight > 0 }
+                                ?.let { it.frameWidth.toFloat() / it.frameHeight }
                             ?: 16f / 9f
                     )
                     .background(BackgroundDarker)

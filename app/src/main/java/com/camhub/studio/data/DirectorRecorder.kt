@@ -25,6 +25,7 @@ import com.camhub.studio.data.ptz.HubPtzTransform
 import com.camhub.studio.data.ptz.HybridPtzController
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -101,6 +102,7 @@ class DirectorRecorder @Inject constructor(
     private var audioFormatReady = false
     @Volatile private var audioExpected = false
     private val audioInputQueue = ArrayBlockingQueue<AudioInputChunk>(MAX_PENDING_AUDIO_CHUNKS)
+    private val audioInputWake = Channel<Unit>(Channel.CONFLATED)
     private val preMuxSamples = ArrayDeque<PendingMuxSample>()
     private var recordingStartedElapsedMs = 0L
     private var frameCount = 0
@@ -278,6 +280,7 @@ class DirectorRecorder @Inject constructor(
             audioInputQueue.poll()
             audioInputQueue.offer(chunk)
         }
+        audioInputWake.trySend(Unit)
     }
 
     private fun createAudioEncoder(): MediaCodec? {
@@ -311,7 +314,10 @@ class DirectorRecorder @Inject constructor(
             while (isActive && (_recordingInfo.value.isRecording || audioInputQueue.isNotEmpty())) {
                 val chunk = audioInputQueue.poll()
                 if (chunk == null) {
-                    delay(5)
+                    // Wake only on new input or stop; recheck after subscribing so a
+                    // stop between the loop condition and receive cannot strand join().
+                    if (!_recordingInfo.value.isRecording && audioInputQueue.isEmpty()) break
+                    audioInputWake.receive()
                     continue
                 }
                 val codec = audioEncoder ?: break
@@ -700,6 +706,7 @@ class DirectorRecorder @Inject constructor(
             isPaused = false,
             isSpatialUpscaling = false
         )
+        audioInputWake.trySend(Unit)
 
         scope.launch {
             finishRecording(path)
@@ -800,10 +807,7 @@ class DirectorRecorder @Inject constructor(
                         startMuxerWhenReady()
                     }
                     videoIndex >= 0 -> {
-                        copyEncodedSample(enc, videoIndex, videoInfo)?.let { bytes ->
-                            enqueueOrWriteSample(
-                                PendingMuxSample(false, bytes, videoInfo.presentationTimeUs, videoInfo.flags)
-                            )
+                        if (writeCodecOutputSample(enc, videoIndex, videoInfo, isAudio = false)) {
                             drainedFrames++
                         }
                         videoEos = videoInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
@@ -821,11 +825,7 @@ class DirectorRecorder @Inject constructor(
                             startMuxerWhenReady()
                         }
                         audioIndex >= 0 -> {
-                            copyEncodedSample(audio, audioIndex, audioInfo)?.let { bytes ->
-                                enqueueOrWriteSample(
-                                    PendingMuxSample(true, bytes, audioInfo.presentationTimeUs, audioInfo.flags)
-                                )
-                            }
+                            writeCodecOutputSample(audio, audioIndex, audioInfo, isAudio = true)
                             audioEos = audioInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                             audio.releaseOutputBuffer(audioIndex, false)
                         }
@@ -857,6 +857,32 @@ class DirectorRecorder @Inject constructor(
             }
             if (shouldFinalize) scope.launch { finishRecording(currentOutputPath) }
         }
+    }
+
+    /** Writes directly from MediaCodec's owned output buffer once muxing has started. */
+    private fun writeCodecOutputSample(
+        codec: MediaCodec,
+        outputIndex: Int,
+        info: MediaCodec.BufferInfo,
+        isAudio: Boolean
+    ): Boolean {
+        if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return false
+        val mux = muxer ?: return false
+        if (muxerStarted) {
+            val track = if (isAudio) audioTrackIndex else videoTrackIndex
+            if (track < 0) return false
+            val output = codec.getOutputBuffer(outputIndex) ?: return false
+            output.position(info.offset)
+            output.limit(info.offset + info.size)
+            mux.writeSampleData(track, output, info)
+            return true
+        }
+
+        val bytes = copyEncodedSample(codec, outputIndex, info) ?: return false
+        enqueueOrWriteSample(
+            PendingMuxSample(isAudio, bytes, info.presentationTimeUs, info.flags)
+        )
+        return true
     }
 
     private fun copyEncodedSample(

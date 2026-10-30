@@ -1,5 +1,7 @@
 package com.camhub.studio.ui.camera
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.SurfaceTexture
 import android.util.Size
 import android.view.Surface
@@ -82,7 +84,9 @@ import com.camhub.studio.ui.theme.TextSecondary
 import com.camhub.studio.ui.theme.TextTertiary
 import com.camhub.studio.ui.theme.GlassBorder
 
-@OptIn(ExperimentalCamera2Interop::class)
+// CameraX's interop marker is not a Kotlin @RequiresOptIn marker, so Android Lint cannot use
+// Kotlin's @OptIn at this call site even though the camera-specific helpers declare the marker.
+@SuppressLint("UnsafeOptInUsageError")
 @Composable
 fun CameraHudScreen(
     viewModel: CameraHudViewModel = hiltViewModel()
@@ -927,7 +931,11 @@ private fun CameraPreview(
 ) {
     AndroidView(
         factory = { ctx ->
-            TextureView(ctx).apply {
+            CameraFocusTextureView(ctx).apply {
+                isClickable = true
+                onFocusTap = { x, y ->
+                    onTapToFocus(x, y, width.toFloat(), height.toFloat())
+                }
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(
                         surfaceTexture: SurfaceTexture,
@@ -972,12 +980,18 @@ private fun CameraPreview(
                 }
 
                 // Handle touch events for pinch zoom and tap-to-focus
+                var scaleGestureWasActive = false
                 setOnTouchListener { v, event ->
+                    val scaleWasActive = scaleGestureDetector.isInProgress
                     scaleGestureDetector.onTouchEvent(event)
-                    if (event.action == android.view.MotionEvent.ACTION_UP &&
-                        !scaleGestureDetector.isInProgress
-                    ) {
-                        onTapToFocus(event.x, event.y, v.width.toFloat(), v.height.toFloat())
+                    val scaleIsActive = scaleGestureDetector.isInProgress
+                    if (scaleWasActive || scaleIsActive) scaleGestureWasActive = true
+                    if (event.action == android.view.MotionEvent.ACTION_UP) {
+                        if (!scaleGestureWasActive && !scaleIsActive) {
+                            (v as CameraFocusTextureView).recordTap(event.x, event.y)
+                            v.performClick()
+                        }
+                        scaleGestureWasActive = false
                     }
                     true
                 }
@@ -985,6 +999,23 @@ private fun CameraPreview(
         },
         modifier = modifier
     )
+}
+
+private class CameraFocusTextureView(context: Context) : TextureView(context) {
+    var onFocusTap: ((Float, Float) -> Unit)? = null
+    private var tapX = 0f
+    private var tapY = 0f
+
+    fun recordTap(x: Float, y: Float) {
+        tapX = x
+        tapY = y
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        onFocusTap?.invoke(tapX, tapY)
+        return true
+    }
 }
 
 @Composable

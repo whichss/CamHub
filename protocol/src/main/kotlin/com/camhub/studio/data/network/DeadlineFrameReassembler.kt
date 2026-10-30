@@ -19,6 +19,7 @@ class DeadlineFrameReassembler(
         const val DEFAULT_MAX_PENDING_FRAMES = 8
         const val DEFAULT_MAX_FRAME_BYTES = 2 * 1024 * 1024
         private const val MAX_TERMINAL_FRAME_IDS = 64
+        private val EMPTY_PAYLOAD = ByteArray(0)
     }
 
     init {
@@ -62,13 +63,15 @@ class DeadlineFrameReassembler(
     private data class PendingFrame(
         val packet: RtpVideoPacketCodec.Packet,
         val firstPacketAtMs: Long,
-        val fragments: Array<ByteArray?> = arrayOfNulls(packet.fragmentCount),
+        val bytes: ByteArray = ByteArray(packet.totalFrameBytes),
+        val received: BooleanArray = BooleanArray(packet.fragmentCount),
         var receivedFragments: Int = 0,
         var receivedBytes: Int = 0
     )
 
     private val pending = LinkedHashMap<Long, PendingFrame>()
     private val terminalFrameIds = LinkedHashSet<Long>()
+    private val packetScratch = RtpVideoPacketCodec.ReusablePacketView()
 
     fun offer(
         datagram: ByteArray,
@@ -76,8 +79,10 @@ class DeadlineFrameReassembler(
         length: Int = datagram.size
     ): OfferResult {
         expire(nowMs)
-        val packet = RtpVideoPacketCodec.decode(datagram, length)
-            ?: return OfferResult.Dropped(DropReason.MALFORMED_PACKET)
+        if (!RtpVideoPacketCodec.decodeInto(datagram, length, packetScratch)) {
+            return OfferResult.Dropped(DropReason.MALFORMED_PACKET)
+        }
+        val packet = packetScratch
         if (packet.totalFrameBytes > maxFrameBytes) {
             rememberTerminal(packet.transportFrameId)
             return OfferResult.Dropped(DropReason.FRAME_TOO_LARGE)
@@ -93,7 +98,8 @@ class DeadlineFrameReassembler(
                 pending.remove(oldestFrameId)
                 rememberTerminal(oldestFrameId)
             }
-            assembly = PendingFrame(packet = packet, firstPacketAtMs = nowMs)
+            // Retain metadata only, never the receiver's reusable datagram buffer.
+            assembly = PendingFrame(packet = packet.toPacket(EMPTY_PAYLOAD), firstPacketAtMs = nowMs)
             pending[packet.transportFrameId] = assembly
         } else if (!metadataMatches(assembly.packet, packet)) {
             pending.remove(packet.transportFrameId)
@@ -106,11 +112,14 @@ class DeadlineFrameReassembler(
             rememberTerminal(packet.transportFrameId)
             return OfferResult.Dropped(DropReason.DEADLINE_EXPIRED)
         }
-        if (assembly.fragments[packet.fragmentIndex] != null) return OfferResult.Duplicate
+        if (assembly.received[packet.fragmentIndex]) return OfferResult.Duplicate
 
-        assembly.fragments[packet.fragmentIndex] = packet.payload
+        val payloadSize = length - RtpVideoPacketCodec.HEADER_BYTES
+        val offset = packet.fragmentIndex * RtpVideoPacketCodec.MAX_FRAGMENT_PAYLOAD_BYTES
+        datagram.copyInto(assembly.bytes, offset, RtpVideoPacketCodec.HEADER_BYTES, length)
+        assembly.received[packet.fragmentIndex] = true
         assembly.receivedFragments++
-        assembly.receivedBytes += packet.payload.size
+        assembly.receivedBytes += payloadSize
         if (assembly.receivedFragments != packet.fragmentCount) return OfferResult.Accepted
         if (assembly.receivedBytes != packet.totalFrameBytes) {
             pending.remove(packet.transportFrameId)
@@ -118,18 +127,11 @@ class DeadlineFrameReassembler(
             return OfferResult.Dropped(DropReason.CONFLICTING_METADATA)
         }
 
-        val frameBytes = ByteArray(packet.totalFrameBytes)
-        var offset = 0
-        for (fragment in assembly.fragments) {
-            val bytes = fragment ?: return OfferResult.Accepted
-            bytes.copyInto(frameBytes, destinationOffset = offset)
-            offset += bytes.size
-        }
         pending.remove(packet.transportFrameId)
         rememberTerminal(packet.transportFrameId)
         return OfferResult.Complete(
             CompletedFrame(
-                bytes = frameBytes,
+                bytes = assembly.bytes,
                 transportFrameId = packet.transportFrameId,
                 rtpTimestamp = packet.rtpTimestamp,
                 ssrc = packet.ssrc,
@@ -145,17 +147,20 @@ class DeadlineFrameReassembler(
     fun expire(nowMs: Long): Int = expireDetailed(nowMs).frameCount
 
     fun expireDetailed(nowMs: Long): ExpirationStats {
-        val expired = pending
-            .filterValues { nowMs - it.firstPacketAtMs >= frameDeadlineMs }
-            .toList()
+        var expiredFrames = 0
         var missingFragments = 0
-        expired.forEach { (frameId, assembly) ->
-            missingFragments += assembly.packet.fragmentCount - assembly.receivedFragments
-            pending.remove(frameId)
-            rememberTerminal(frameId)
+        val iterator = pending.entries.iterator()
+        while (iterator.hasNext()) {
+            val (frameId, assembly) = iterator.next()
+            if (nowMs - assembly.firstPacketAtMs >= frameDeadlineMs) {
+                missingFragments += assembly.packet.fragmentCount - assembly.receivedFragments
+                expiredFrames++
+                iterator.remove()
+                rememberTerminal(frameId)
+            }
         }
         return ExpirationStats(
-            frameCount = expired.size,
+            frameCount = expiredFrames,
             missingFragmentCount = missingFragments
         )
     }
@@ -169,7 +174,7 @@ class DeadlineFrameReassembler(
 
     private fun metadataMatches(
         first: RtpVideoPacketCodec.Packet,
-        next: RtpVideoPacketCodec.Packet
+        next: RtpVideoPacketCodec.ReusablePacketView
     ): Boolean = first.transportFrameId == next.transportFrameId &&
         first.rtpTimestamp == next.rtpTimestamp &&
         first.ssrc == next.ssrc &&

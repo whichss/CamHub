@@ -5,6 +5,19 @@ import org.junit.Test
 
 class HybridPtzControllerTest {
     @Test
+    fun `hub pan moves composition in both axes within zoom bounds`() {
+        val initial = HybridPtzState(zoom = 2f)
+        val first = HybridPtzController.applyGesture(initial, 1f, -0.2f, 0.2f, 4f, false)
+        val second = HybridPtzController.applyGesture(initial, 1f, 0.2f, -0.2f, 4f, false)
+
+        assertEquals(0.6f, first.centerX, 0.0001f)
+        assertEquals(0.4f, first.centerY, 0.0001f)
+        assertEquals(0.4f, second.centerX, 0.0001f)
+        assertEquals(0.6f, second.centerY, 0.0001f)
+        assertEquals(2f, HybridPtzController.hubTransform(first).scale, 0.0001f)
+    }
+
+    @Test
     fun `unsupported camera keeps composition on hub`() {
         val state = HybridPtzController.applyGesture(
             state = HybridPtzState(),

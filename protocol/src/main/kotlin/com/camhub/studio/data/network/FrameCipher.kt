@@ -1,6 +1,5 @@
 package com.camhub.studio.data.network
 
-import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
@@ -40,8 +39,11 @@ class FrameCipher(key: ByteArray) {
         val iv = buildIv(counter.getAndIncrement())
         val cipher = Cipher.getInstance(ALGORITHM)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(TAG_BITS, iv))
-        val encrypted = cipher.doFinal(plaintext)
-        return iv + encrypted
+        val output = ByteArray(IV_SIZE + cipher.getOutputSize(plaintext.size))
+        iv.copyInto(output)
+        val written = cipher.doFinal(plaintext, 0, plaintext.size, output, IV_SIZE)
+        check(written == output.size - IV_SIZE)
+        return output
     }
 
     /**
@@ -51,17 +53,22 @@ class FrameCipher(key: ByteArray) {
      */
     fun decrypt(data: ByteArray): ByteArray {
         require(data.size > IV_SIZE) { "Data too short" }
-        val iv = data.copyOfRange(0, IV_SIZE)
-        val ciphertext = data.copyOfRange(IV_SIZE, data.size)
         val cipher = Cipher.getInstance(ALGORITHM)
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(TAG_BITS, iv))
-        return cipher.doFinal(ciphertext)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            secretKey,
+            GCMParameterSpec(TAG_BITS, data, 0, IV_SIZE)
+        )
+        return cipher.doFinal(data, IV_SIZE, data.size - IV_SIZE)
     }
 
     private fun buildIv(counter: Long): ByteArray {
-        val buf = ByteBuffer.allocate(IV_SIZE)
-        buf.put(ivPrefix)          // 4 bytes
-        buf.putLong(counter)       // 8 bytes
-        return buf.array()
+        return ByteArray(IV_SIZE).also { iv ->
+            ivPrefix.copyInto(iv)
+            for (index in 0 until Long.SIZE_BYTES) {
+                val shift = (Long.SIZE_BYTES - 1 - index) * Byte.SIZE_BITS
+                iv[ivPrefix.size + index] = (counter ushr shift).toByte()
+            }
+        }
     }
 }

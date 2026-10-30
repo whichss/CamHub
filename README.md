@@ -33,9 +33,17 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - Windows와 macOS에서 같은 코드로 실행되는 별도 JVM 데스크톱 모듈
 - 연결된 모니터의 이름·해상도·주사율 탐지
 - 선택한 모니터에 테두리 없는 PGM 전체화면 출력
+- 모니터 위에서 드래그해 선택한 화면 영역을 PVW에서 확인한 뒤 CUT/AUTO로 PGM에 송출
+- 화면 입력은 카메라 4개 슬롯과 독립된 PGM 소스로 관리하고, 같은 모니터 캡처·출력 피드백을 차단
+- 선택 화면을 독립 CamHub 카메라 소스로 광고하고, Android 허브의 TLS 지문/PIN 페어링과 UDP/RTP 구독 수락
+- 화면 캡처·최신 프레임 인코딩·암호화 UDP 송신을 각각 분리하고, 대기열 적체 시 키프레임부터 복구
+- 현재 PGM을 OBS Browser Source에 전달하는 loopback MJPEG 출력(최대 1080p, 15fps)과 로컬 `/healthz` 상태 조회
 - `ESC` 전체화면 종료와 출력 중 모니터 분리 감지
 - Android와 데스크톱이 함께 사용하는 RTP 재조립·AES-256-GCM 공통 모듈
-- 최대 4대 멀티뷰, PVW/PGM, 연결 및 출력 상태를 위한 데스크톱 허브 화면 골격
+- 최대 4대 멀티뷰와 분리된 PVW/PGM 버스, 카메라·화면 입력 선택, CUT 전환
+- 300ms 페이드-블랙 AUTO 전환을 데스크톱 전체화면 PGM과 OBS 출력에 동일 적용
+- 데스크톱 PGM을 H.264 MP4로 저장하고 AUTO 페이드 결과까지 녹화
+- 녹화는 전용 인코딩·파일 I/O 스레드와 최신 프레임 1개 대기열을 사용해 UI·수신 경로의 적체를 제한
 - Android 카메라의 mDNS·UDP 이중 검색 목록과 `REFRESH`, `CONNECT`, `CONNECT ALL`, `DISCONNECT`
 - 자동 검색이 제한된 네트워크를 위한 숨김형 `IP:포트` 수동 연결
 - 카메라 화면으로 이동한 뒤에도 검색 광고와 제어 서버 유지
@@ -43,12 +51,28 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 카메라별 수신·프레임 마감·FFmpeg H.264 디코딩 전용 스레드
 - 데스크톱 디코더 입력을 2프레임으로 제한하고 적체 시 다음 키프레임부터 복구
 - 컴퓨터 도착 이후 180ms를 넘긴 디코더 출력 폐기와 저지연 FFmpeg 옵션
-- 멀티뷰 선택으로 PGM 지정, 선택 영상의 PGM 미리보기와 모니터 전체화면 공간 확대
+- 멀티뷰 선택으로 PVW 구도 확인 후 CUT/AUTO로 PGM 지정, 모니터 전체화면 공간 확대
 - 프레임 상태 UI를 초당 4회로 제한하고 영상 표시는 최신 이미지로 교체
 - 핑/퐁 시계 보정 이후에만 카메라 촬영부터 데스크톱 표시까지의 지연 계산
 - 카메라 연결 단절 감지와 지수 백오프 자동 재연결
 
-현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰와 PGM 전체화면에 표시할 수 있습니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩, GPU FSR 샤프닝, PVW/CUT/AUTO와 PGM 녹화는 다음 단계입니다.
+현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다.
+
+화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. macOS arm64 `.app`과 ZIP은 패키징·서명·압축 무결성을 확인했지만 실행하지 않았고, 화면 캡처 권한과 실기기 상호운용은 별도 확인이 남아 있습니다. Windows 설치 파일은 CI 패키징 경로가 준비되어 있으나 실제 생성·실행 검증은 남아 있습니다. OBS 연결은 네이티브 플러그인이 아니라 기본 Browser Source용 로컬 MJPEG URL입니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Debug·Release `.app` 빌드가 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
+
+### iOS 카메라 소스 (arm64 기기용 unsigned Debug/Release 빌드 확인)
+
+- SwiftUI 카메라 화면과 720p30 H.264 VideoToolbox 인코딩
+- 로컬 Bonjour 검색 광고와 TLS 지문 표시·8자리 PIN 페어링
+- CamHub 제어 메시지와 AES-256-GCM으로 보호된 UDP/RTP 영상 송신
+- 실제 영상 방향 메타데이터 반영 및 허브 구독 중에만 인코딩 수행
+- 지원 기기에서는 1080p30 소스 프레임을 720p30으로 크롭·축소해 전송하며, 원격 PTZ 크롭은 인코딩 전에 적용
+- 같은 VideoToolbox H.264 인코딩 출력을 MOV 파일로 저장하는 카메라 로컬 녹화와 공유 내보내기
+- 촬영 해상도에 추가 픽셀이 없는 기기는 원격 PTZ를 광고하지 않고 허브 크롭으로 처리
+- 네트워크가 인코더보다 느릴 때 오래된 영상이 쌓이지 않도록 송신 대기열 제한
+- IPv4-mapped/native IPv6 UDP 목적지와 링크 로컬 주소 scope 처리를 구현했고, 공통 wire fixture로 프로토콜 형식을 검증
+- 인증 토큰으로 허브를 확인하는 AES-GCM TCP 영상 폴백 구현 및 loopback 스모크 검증 완료
+- SRT 폴백, 현재 변경을 포함한 iOS 앱 전체 재빌드, 서명·설치 및 실기기 상호운용 검증은 미완료
 
 ### 카메라 모드
 
@@ -222,6 +246,12 @@ Camera 4 ─┘                 USB-C LAN ─┘
 # 클린 검증
 ./gradlew clean testDebugUnitTest assembleDebug
 
+# Android/데스크톱 공통 wire 프로토콜
+./gradlew :protocol:test
+
+# iOS/Swift 공통 wire 프로토콜 (앱을 실행하지 않음)
+swift test --package-path ios/CamHubCore
+
 # 데스크톱 허브 실행
 ./gradlew :desktop:run
 
@@ -239,6 +269,8 @@ gradlew.bat :desktop:packageWindowsExe
 # Release AAB
 ./gradlew bundleRelease
 ```
+
+Kotlin과 Swift 프로토콜 테스트는 [`protocol/src/test/resources/camhub-wire-golden.properties`](protocol/src/test/resources/camhub-wire-golden.properties)의 동일한 payload, RTP, AES-GCM 벡터를 읽습니다. 이는 wire-format 일치를 검증하며 카메라 실기기와 허브 간 네트워크 상호운용까지 증명하지는 않습니다.
 
 `.github/workflows/desktop-packages.yml`을 수동 실행하거나 데스크톱 관련 변경을 `main`에 푸시하면 macOS arm64 앱과 Windows x64 설치 파일을 각각 해당 운영체제에서 빌드합니다.
 
