@@ -18,12 +18,13 @@ pairing, Bonjour discovery, TLS control and UDP/RTP sender paths.
 1. Cross-language golden fixtures for payload v4, RTP packetization and AES-GCM known-answer
    decryption are shared with the Kotlin `protocol` tests.
 2. IPv4-mapped and native IPv6 UDP destinations are implemented, including link-local scope.
-   Reliable TCP/SRT fallback is still pending.
-3. Build the iOS app target and validate sender compatibility with Android and desktop receivers;
-   the shared vectors verify serialization, not end-to-end network interoperability.
+   The iOS app target includes an authenticated, AES-GCM protected TCP video fallback; SRT is not
+   implemented by the iOS source.
+3. The iOS app target now builds in GitHub Actions for arm64. Validate sender compatibility with
+   Android and desktop receivers on devices; the shared vectors verify serialization, not
+   end-to-end network interoperability.
 
 `swift test --package-path ios/CamHubCore` builds the Swift core and passes the shared vectors. The
-app sources have been type-checked and linked for arm64 iOS 16, but the Xcode app target build is
-still unverified because the installed iOS platform and CoreSimulator components do not match the
-local Xcode version. The app has not been launched, and device-to-device compatibility remains
-unverified.
+arm64 iOS app target also builds in CI. Local simulator execution is unavailable because the
+installed CoreSimulator components do not match the local Xcode version. The app has not been
+launched, and device-to-device compatibility remains unverified.
