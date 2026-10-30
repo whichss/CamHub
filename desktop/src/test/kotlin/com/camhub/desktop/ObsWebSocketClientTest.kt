@@ -24,10 +24,10 @@ import org.junit.Test
 
 class ObsWebSocketClientTest {
     @Test
-    fun `creates authenticated browser input in current program scene`() {
+    fun `creates authenticated low buffering media input in current program scene`() {
         MockObsServer(authentication = true).use { obs ->
             val result = ObsWebSocketClient(obs.port, "obs-secret".toCharArray()).use {
-                it.addPgmBrowserSource("http://127.0.0.1:48765/")
+                it.addPgmSource("http://127.0.0.1:48765/")
             }
 
             assertEquals("Added 'CamHub PGM' to 'Program'.", result)
@@ -38,11 +38,13 @@ class ObsWebSocketClientTest {
             )
             val create = obs.requests.last()["requestData"]!!.jsonObject
             assertEquals("Program", create["sceneName"]?.jsonPrimitive?.content)
-            assertEquals("browser_source", create["inputKind"]?.jsonPrimitive?.content)
+            assertEquals("ffmpeg_source", create["inputKind"]?.jsonPrimitive?.content)
             val settings = create["inputSettings"]!!.jsonObject
-            assertEquals("http://127.0.0.1:48765/", settings["url"]?.jsonPrimitive?.content)
-            assertEquals("1920", settings["width"]?.jsonPrimitive?.content)
-            assertEquals("1080", settings["height"]?.jsonPrimitive?.content)
+            assertEquals("http://127.0.0.1:48765/pgm.mjpg", settings["input"]?.jsonPrimitive?.content)
+            assertEquals("mpjpeg", settings["input_format"]?.jsonPrimitive?.content)
+            assertEquals("false", settings["is_local_file"]?.jsonPrimitive?.content)
+            assertEquals("0", settings["buffering_mb"]?.jsonPrimitive?.content)
+            assertEquals("false", settings["restart_on_activate"]?.jsonPrimitive?.content)
             assertEquals(expectedAuthentication("obs-secret", "salt-value", "challenge-value"), obs.authentication)
         }
     }
@@ -51,7 +53,7 @@ class ObsWebSocketClientTest {
     fun `updates an existing input and adds it to the current scene`() {
         MockObsServer(authentication = false, sourceAlreadyExists = true).use { obs ->
             val result = ObsWebSocketClient(obs.port, charArrayOf()).use {
-                it.addPgmBrowserSource("http://127.0.0.1:48765/")
+                it.addPgmSource("http://127.0.0.1:48765/")
             }
 
             assertEquals("Updated and added 'CamHub PGM' to 'Program'.", result)
@@ -67,7 +69,7 @@ class ObsWebSocketClientTest {
     fun `updates an existing input already present in the current scene`() {
         MockObsServer(authentication = false, sourceAlreadyExists = true, sourceInCurrentScene = true).use { obs ->
             val result = ObsWebSocketClient(obs.port, charArrayOf()).use {
-                it.addPgmBrowserSource("http://127.0.0.1:48765/")
+                it.addPgmSource("http://127.0.0.1:48765/")
             }
 
             assertEquals("Updated 'CamHub PGM' in 'Program'.", result)
@@ -77,15 +79,31 @@ class ObsWebSocketClientTest {
     }
 
     @Test
-    fun `does not overwrite a same named non browser obs input`() {
+    fun `keeps an existing browser source working`() {
+        MockObsServer(authentication = false, sourceAlreadyExists = true, existingInputKind = "browser_source").use { obs ->
+            val result = ObsWebSocketClient(obs.port, charArrayOf()).use {
+                it.addPgmSource("http://127.0.0.1:48765/")
+            }
+
+            assertEquals("Updated and added 'CamHub PGM' to 'Program'.", result)
+            val settingsRequest = obs.requests.first {
+                it["requestType"]?.jsonPrimitive?.content == "SetInputSettings"
+            }
+            val settings = settingsRequest["requestData"]!!.jsonObject["inputSettings"]!!.jsonObject
+            assertEquals("http://127.0.0.1:48765/", settings["url"]?.jsonPrimitive?.content)
+        }
+    }
+
+    @Test
+    fun `does not overwrite an incompatible obs input`() {
         MockObsServer(authentication = false, sourceAlreadyExists = true, existingInputKind = "image_source").use { obs ->
             val failure = runCatching {
                 ObsWebSocketClient(obs.port, charArrayOf()).use {
-                    it.addPgmBrowserSource("http://127.0.0.1:48765/")
+                    it.addPgmSource("http://127.0.0.1:48765/")
                 }
             }.exceptionOrNull()
 
-            assertTrue(failure?.message?.contains("non-Browser source") == true)
+            assertTrue(failure?.message?.contains("incompatible source") == true)
             obs.awaitRequests(2)
             assertEquals(listOf("GetCurrentProgramScene", "GetInputList"),
                 obs.requests.map { it["requestType"]?.jsonPrimitive?.content })
@@ -96,7 +114,7 @@ class ObsWebSocketClientTest {
         authentication: Boolean,
         private val sourceAlreadyExists: Boolean = false,
         private val sourceInCurrentScene: Boolean = false,
-        private val existingInputKind: String = "browser_source"
+        private val existingInputKind: String = "ffmpeg_source"
     ) : AutoCloseable {
         private val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         private val threadFailure = AtomicReference<Throwable?>()

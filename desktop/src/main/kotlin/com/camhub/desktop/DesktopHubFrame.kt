@@ -423,7 +423,7 @@ class DesktopHubFrame(
             add(portField)
             add(JLabel("OBS WebSocket password (leave empty if authentication is disabled)"))
             add(passwordField)
-            add(JLabel("CamHub connects to OBS on this computer and adds a Browser source to the current scene."))
+            add(JLabel("CamHub connects to OBS on this computer and adds a low-buffering Media Source to the current scene."))
         }
         if (JOptionPane.showConfirmDialog(
                 this,
@@ -440,12 +440,13 @@ class DesktopHubFrame(
             return
         }
         val password = passwordField.password
+        val manualSourceUrl = java.net.URI(url).resolve("pgm.mjpg").toString()
         obsSourceButton.isEnabled = false
         obsStatus.text = "Connecting to OBS WebSocket…"
         object : SwingWorker<String, Void>() {
             override fun doInBackground(): String = try {
                 ObsWebSocketClient(port, password).use { client ->
-                    client.addPgmBrowserSource(url)
+                    client.addPgmSource(url)
                 }
             } finally {
                 password.fill('\u0000')
@@ -458,7 +459,7 @@ class DesktopHubFrame(
                         obsStatus.text = "OBS connected · CamHub PGM source active"
                         JOptionPane.showMessageDialog(
                             this@DesktopHubFrame,
-                            "$message\n\nOBS uses the local MJPEG PGM feed at up to 30 fps.",
+                            "$message\n\nOBS uses its built-in FFmpeg Media Source with a zero-MB buffering setting for the local MJPEG PGM feed (up to 30 fps).",
                             "CamHub added to OBS",
                             JOptionPane.INFORMATION_MESSAGE
                         )
@@ -466,12 +467,12 @@ class DesktopHubFrame(
                     .onFailure { error ->
                         val detail = error.cause?.message ?: error.message ?: "Unknown OBS connection error."
                         val copied = runCatching {
-                            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(url), null)
+                            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(manualSourceUrl), null)
                         }.isSuccess
                         obsStatus.text = "OBS connection failed · " + if (copied) "manual URL copied" else "manual URL available"
                         JOptionPane.showMessageDialog(
                             this@DesktopHubFrame,
-                            "Could not add the source through OBS WebSocket. Check that OBS is open, WebSocket is enabled, and the port/password are correct.\n\n$detail\n\nManual fallback: OBS → Sources → Browser → URL\n$url",
+                            "Could not add the source through OBS WebSocket. Check that OBS is open, WebSocket is enabled, and the port/password are correct.\n\n$detail\n\nManual fallback: OBS → Sources → Media Source → disable Local File → Input URL\n$manualSourceUrl\nInput Format: mpjpeg\nBuffering MB: 0",
                             "OBS connection failed",
                             JOptionPane.WARNING_MESSAGE
                         )

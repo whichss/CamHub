@@ -37,7 +37,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 화면 입력은 카메라 4개 슬롯과 독립된 PGM 소스로 관리하고, 같은 모니터 캡처·출력 피드백을 차단
 - 선택 화면을 독립 CamHub 카메라 소스로 광고하고, Android 허브의 TLS 지문/PIN 페어링과 UDP/RTP 구독 수락
 - 화면 캡처·최신 프레임 인코딩·암호화 UDP 송신을 각각 분리하고, 대기열 적체 시 키프레임부터 복구
-- 현재 PGM을 OBS Browser Source에 전달하는 loopback MJPEG 출력(최대 1080p, 최대 30fps), OBS WebSocket으로 현재 장면에 자동 추가, 로컬 `/healthz` 상태 조회
+- 현재 PGM을 OBS 내장 FFmpeg Media Source에 전달하는 loopback MJPEG 출력(최대 1080p, 최대 30fps, 입력 버퍼 0MB 설정), OBS WebSocket으로 현재 장면에 자동 추가, 로컬 `/healthz` 상태 조회
 - `ESC` 전체화면 종료와 출력 중 모니터 분리 감지
 - Android와 데스크톱이 함께 사용하는 RTP 재조립·AES-256-GCM 공통 모듈
 - 최대 4대 멀티뷰와 분리된 PVW/PGM 버스, 카메라·화면 입력 선택, CUT 전환
@@ -59,7 +59,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 
 현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다. 포함된 macOS FFmpeg 빌드에서는 VideoToolbox 인코더를 사용할 수 있지만 H.264 하드웨어 디코더는 등록되지 않는 것을 확인했습니다. 따라서 macOS 디코딩은 단순 JavaCV 옵션으로 활성화할 수 없으며, FFmpeg 하드웨어 디바이스·프레임 전달 경로를 별도로 통합해야 합니다. Windows 디코더 지원 여부는 아직 확인되지 않았습니다.
 
-화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 버튼은 OBS WebSocket으로 현재 프로그램 장면에 CamHub Browser Source를 자동 추가하고, 연결할 수 없으면 로컬 MJPEG URL을 수동 입력용으로 제공합니다. 네이티브 OBS 플러그인은 아닙니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Release `.app` 빌드가 GitHub Actions에서 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
+화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 버튼은 OBS WebSocket으로 현재 프로그램 장면에 CamHub Media Source를 자동 추가하고, 연결할 수 없으면 로컬 MJPEG 스트림 URL을 수동 입력용으로 제공합니다. 새 소스는 OBS 내장 FFmpeg 입력을 사용하며, 별도 설치형 네이티브 OBS 플러그인은 아직 없습니다. 기존 Browser Source는 호환 유지합니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Release `.app` 빌드가 GitHub Actions에서 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 이제 CI에서 iOS Simulator Debug 타깃을 실행 없이 컴파일합니다. 이 Mac에서는 CoreSimulator 버전이 Xcode와 맞지 않아 시뮬레이터 앱 실행 검증은 하지 못했습니다.
 
 ### iOS 카메라 소스 (arm64 기기용 unsigned Release 빌드 확인)
 

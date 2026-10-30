@@ -10,17 +10,21 @@ region overlapping the visible CamHub control window; minimize or move the contr
 selected region to avoid capturing CamHub's own controls. The desktop capture can also be started as
 a separate network camera source without consuming one of the four camera slots.
 
-The OBS action exposes the current PGM using a loopback-only HTTP Browser Source page. It serves
-up to 30 fps multipart MJPEG, capped at 1920×1080. After starting the output, CamHub can connect to OBS's
-local WebSocket server (default port 4455) and add or update a `CamHub PGM` Browser source in the
-current program scene. The WebSocket password is used for that connection only and is not saved. If
-OBS is unavailable or the connection fails, CamHub copies the source URL for manual setup in OBS's
-built-in Browser source. The source prefers `http://127.0.0.1:48765/` so the URL can remain stable
-across restarts. If that port is occupied, it uses another local port and exposes the actual URL.
+The OBS action exposes the current PGM as a loopback-only multipart MJPEG stream capped at
+1920×1080 and 30 fps. CamHub connects to OBS's local WebSocket server (default port 4455) and adds
+or updates a `CamHub PGM` built-in Media Source in the current program scene. The source reads the
+`mpjpeg` stream through OBS's FFmpeg media input with its buffering setting set to 0 MB; this avoids
+the Browser Source rendering path, but actual end-to-end latency still needs measurement in OBS.
+The WebSocket password is used for that connection only and is not saved. Existing `CamHub PGM`
+Browser Sources continue to be updated for compatibility. If OBS is unavailable or the connection
+fails, CamHub copies the direct stream URL for manual setup in OBS's Media Source (`Input Format:
+mpjpeg`, `Buffering MB: 0`). The server prefers
+`http://127.0.0.1:48765/` so the stream URL can remain stable across restarts. If that port is
+occupied, it uses another local port and exposes the actual URL.
 Up to two simultaneous video connections are supported; further connections receive HTTP 503 until
 a slot is available. JPEG encoding is shared across clients for an unchanged PGM frame. The OBS
-control path uses OBS WebSocket to configure its built-in Browser source; it is not a native OBS
-plugin and does not change the Android or shared video wire protocol.
+control path configures OBS's built-in Media Source through WebSocket; a separately installed native
+OBS plugin is not included. This path does not change the Android or shared video wire protocol.
 
 Local integrations can poll `/healthz` for a small JSON status payload containing `status`, `pgm`
 (`active` or `no_signal`), and the current `transitionAlpha`. The endpoint is served by the same
@@ -28,7 +32,7 @@ loopback-only HTTP server and does not expose camera or network details.
 
 PVW selection does not change the live program source. CUT switches immediately. AUTO performs a
 300 ms fade to black, switches at black, and fades the new source in. The same transition is applied
-to the local PGM preview, fullscreen output, and OBS Browser Source.
+to the local PGM preview, fullscreen output, and OBS Media Source.
 
 When a camera is in PVW, drag the PVW output to pan, use the mouse wheel to zoom around the pointer,
 and double-click to zoom toward that point or reset the framing. CUT/AUTO copies the preview framing
@@ -78,9 +82,9 @@ The macOS arm64 app ZIP and Windows x64 installer have both been generated and v
 the JDK and WiX toolchain; the macOS bundle is produced on an arm64 macOS host. Neither packaged app
 was launched. Screen-capture permissions, installation behavior, and camera-to-hub interoperability
 still need runtime verification on each platform. The OBS path uses local WebSocket control plus a
-loopback Browser Source, not a native OBS plugin. Platform hardware decoding and GPU upscaling remain
-future work; they need cross-platform frame-transfer and fallback validation before replacing the
-current software path.
+loopback FFmpeg Media Source, not a separately installed native OBS plugin. Platform hardware
+decoding and GPU upscaling remain future work; they need cross-platform frame-transfer and fallback
+validation before replacing the current software path.
 
 The Windows package derives its modular Java runtime from the installed distribution with `jdeps`
 instead of relying on a hand-maintained module list. The `verifyDesktopRuntimeModules` Gradle task

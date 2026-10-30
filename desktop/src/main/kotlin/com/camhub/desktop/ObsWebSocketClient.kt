@@ -20,7 +20,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
-/** Small OBS WebSocket 5 client for adding CamHub's loopback PGM as a Browser source. */
+/** Small OBS WebSocket 5 client for adding CamHub's loopback PGM to the current scene. */
 internal class ObsWebSocketClient(
     private val port: Int,
     password: CharArray
@@ -37,7 +37,7 @@ internal class ObsWebSocketClient(
         require(port in 1..65_535) { "OBS WebSocket port must be between 1 and 65535." }
     }
 
-    fun addPgmBrowserSource(url: String, sourceName: String = "CamHub PGM"): String {
+    fun addPgmSource(url: String, sourceName: String = "CamHub PGM"): String {
         val uri = URI("ws://127.0.0.1:$port")
         socket = httpClient.newWebSocketBuilder()
             .connectTimeout(java.time.Duration.ofSeconds(timeoutSeconds))
@@ -54,12 +54,15 @@ internal class ObsWebSocketClient(
         val existingInput = inputs.firstOrNull { element ->
             element.jsonObject["inputName"]?.jsonPrimitive?.contentOrNull == sourceName
         }?.jsonObject
-        if (existingInput != null &&
-            existingInput["inputKind"]?.jsonPrimitive?.contentOrNull != "browser_source"
-        ) {
-            error("OBS already has a non-Browser source named '$sourceName'. Rename that source before connecting CamHub.")
+        val inputKind = existingInput?.get("inputKind")?.jsonPrimitive?.contentOrNull
+            ?: MEDIA_SOURCE_KIND
+        if (inputKind !in SUPPORTED_SOURCE_KINDS) {
+            error("OBS already has an incompatible source named '$sourceName'. Rename that source before connecting CamHub.")
         }
-        val settings = browserSettings(url)
+        val settings = when (inputKind) {
+            BROWSER_SOURCE_KIND -> browserSettings(url)
+            else -> mediaSourceSettings(url)
+        }
 
         if (existingInput == null) {
             listener.request(
@@ -67,7 +70,7 @@ internal class ObsWebSocketClient(
                 requestData = buildJsonObject {
                     put("sceneName", currentScene)
                     put("inputName", sourceName)
-                    put("inputKind", "browser_source")
+                    put("inputKind", inputKind)
                     put("inputSettings", settings)
                     put("sceneItemEnabled", true)
                 }
@@ -136,6 +139,17 @@ internal class ObsWebSocketClient(
         put("height", 1080)
         put("shutdown", false)
         put("reroute_audio", false)
+    }
+
+    private fun mediaSourceSettings(baseUrl: String): JsonObject = buildJsonObject {
+        put("input", URI(baseUrl).resolve("pgm.mjpg").toString())
+        put("input_format", "mpjpeg")
+        put("is_local_file", false)
+        put("buffering_mb", 0)
+        put("restart_on_activate", false)
+        put("close_when_inactive", false)
+        put("hw_decode", false)
+        put("seekable", false)
     }
 
     private inner class ObsListener(private val password: CharArray) : WebSocket.Listener {
@@ -226,6 +240,10 @@ internal class ObsWebSocketClient(
     private data class RequestResult(val responseData: JsonObject)
 
     companion object {
+        private const val MEDIA_SOURCE_KIND = "ffmpeg_source"
+        private const val BROWSER_SOURCE_KIND = "browser_source"
+        private val SUPPORTED_SOURCE_KINDS = setOf(MEDIA_SOURCE_KIND, BROWSER_SOURCE_KIND)
+
         internal fun createAuthentication(password: String, salt: String, challenge: String): String {
             val secret = Base64.getEncoder().encodeToString(sha256(password + salt))
             return Base64.getEncoder().encodeToString(sha256(secret + challenge))
