@@ -25,6 +25,7 @@ pairing, Bonjour discovery, TLS control and UDP/RTP sender paths.
    end-to-end network interoperability.
 
 `swift test --package-path ios/CamHubCore` builds the Swift core and passes the shared vectors. The
-arm64 iOS app target also builds in CI. Local simulator execution is unavailable because the
-installed CoreSimulator components do not match the local Xcode version. The app has not been
+arm64 device Debug/Release targets and an unsigned iOS Simulator Debug target also build in CI;
+the app is not launched. Local simulator execution is unavailable because the installed
+CoreSimulator components do not match the local Xcode version. The app has not been
 launched, and device-to-device compatibility remains unverified.

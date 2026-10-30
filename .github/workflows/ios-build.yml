@@ -79,6 +79,20 @@ jobs:
           CODE_SIGNING_ALLOWED=NO
           build
 
+      - name: Build unsigned iOS Simulator Debug app target
+        run: >-
+          xcodebuild
+          -project ios/CamHubCameraApp.xcodeproj
+          -scheme CamHubCamera
+          -configuration Debug
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/CamHub-iOS-Simulator-DerivedData"
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/CamHub-iOS-Simulator-Packages"
+          -packageCachePath "$RUNNER_TEMP/CamHub-iOS-PackageCache"
+          CODE_SIGNING_ALLOWED=NO
+          build
+
       - name: Build unsigned iOS Release app target
         run: >-
           xcodebuild

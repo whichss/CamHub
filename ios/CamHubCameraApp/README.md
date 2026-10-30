@@ -128,8 +128,9 @@ addresses, including interface scope for link-local IPv6. The shared payload, RT
 vectors pass in the Swift core package tests. An authenticated, AES-GCM protected TCP video fallback
 is included in the app target; its loopback smoke test verifies the session token, framing, codec
 configuration and keyframe. The current app target builds and links into unsigned arm64/iOS 16
-Debug and Release bundles in GitHub Actions without launching the app.
-The simulator remains unavailable because this Mac's CoreSimulator components do not match the
+Debug and Release bundles in GitHub Actions without launching the app. CI also compiles an
+unsigned iOS Simulator Debug target without launching it. The simulator runtime remains
+unavailable locally because this Mac's CoreSimulator components do not match the
 installed Xcode. Android/desktop
 interoperability, IPv6-only hub receive behavior, device signing/install, and iPhone runtime behavior
 remain unverified. SRT fallback is not implemented by the iOS camera source.
