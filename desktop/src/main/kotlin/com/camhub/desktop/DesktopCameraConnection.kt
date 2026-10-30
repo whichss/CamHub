@@ -1,6 +1,7 @@
 package com.camhub.desktop
 
 import com.camhub.studio.data.network.CamHubVideoPayload
+import com.camhub.studio.data.network.decodeTcpStreamAuthToken
 import java.awt.image.BufferedImage
 import java.io.BufferedReader
 import java.io.IOException
@@ -220,10 +221,15 @@ class DesktopCameraConnection(
         val key = runCatching { Base64.getDecoder().decode(ack.sessionKey) }
             .getOrElse { throw IOException("Invalid camera session key", it) }
         if (key.size != 32) throw IOException("Invalid camera session key size")
-        val tcpAuthToken = if (ack.tcpAuthToken.isBlank()) null else {
-            runCatching { Base64.getDecoder().decode(ack.tcpAuthToken) }
-                .getOrElse { throw IOException("Invalid TCP authorization token", it) }
-                .also { if (it.size != 32) throw IOException("Invalid TCP authorization token size") }
+        val tcpAuthToken = try {
+            decodeTcpStreamAuthToken(
+                encodedToken = ack.tcpAuthToken,
+                supportsAuthenticatedTcp = ack.supportsAuthenticatedTcp,
+                tcpPort = ack.tcpStreamPort,
+                sessionKey = key
+            )
+        } catch (error: IllegalArgumentException) {
+            throw IOException("Invalid authenticated TCP configuration", error)
         }
         val udpAvailable = ack.udpStreamPort in 1..65_535
         val tcpAvailable = ack.supportsAuthenticatedTcp && ack.tcpStreamPort in 1..65_535

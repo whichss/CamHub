@@ -1,5 +1,6 @@
 package com.camhub.studio.data.network
 
+import com.camhub.studio.data.network.decodeTcpStreamAuthToken
 import java.io.ByteArrayOutputStream
 import java.util.Base64
 import org.junit.Assert.assertArrayEquals
@@ -44,12 +45,22 @@ class TcpStreamAuthTest {
     fun `accepts legacy responses that do not advertise a token`() {
         val decoded = decodeTcpStreamAuthToken(
             encodedToken = "",
+            supportsAuthenticatedTcp = false,
+            tcpPort = 0,
+            sessionKey = null
+        )
+
+        assertTrue(decoded == null)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `rejects an advertised authenticated tcp endpoint without its token`() {
+        decodeTcpStreamAuthToken(
+            encodedToken = "",
             supportsAuthenticatedTcp = true,
             tcpPort = 8_123,
             sessionKey = ByteArray(32)
         )
-
-        assertTrue(decoded == null)
     }
 
     @Test(expected = IllegalArgumentException::class)
