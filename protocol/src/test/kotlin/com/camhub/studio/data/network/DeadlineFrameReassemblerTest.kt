@@ -8,6 +8,27 @@ import org.junit.Test
 
 class DeadlineFrameReassemblerTest {
     @Test
+    fun `default pending frame limit keeps jitter headroom and releases oldest assembly`() {
+        val assembler = DeadlineFrameReassembler(frameDeadlineMs = 35)
+        val firstFragments = (1L..DeadlineFrameReassembler.DEFAULT_MAX_PENDING_FRAMES + 1L).map { frameId ->
+            RtpVideoPacketCodec.packetize(ByteArray(3_000), frameId, frameId, 3, frameId.toInt()).first()
+        }
+
+        firstFragments.forEachIndexed { index, packet ->
+            assertEquals(DeadlineFrameReassembler.OfferResult.Accepted, assembler.offer(packet, index.toLong()))
+        }
+
+        assertEquals(DeadlineFrameReassembler.DEFAULT_MAX_PENDING_FRAMES, assembler.pendingFrameCount())
+        assertEquals(
+            DeadlineFrameReassembler.OfferResult.Dropped(DeadlineFrameReassembler.DropReason.ALREADY_FINISHED),
+            assembler.offer(
+                RtpVideoPacketCodec.packetize(ByteArray(3_000), 1, 1, 3, 1)[1],
+                5
+            )
+        )
+    }
+
+    @Test
     fun `deadline expiry reports all missing fragments across pending frames`() {
         val assembler = DeadlineFrameReassembler(frameDeadlineMs = 35)
         val first = RtpVideoPacketCodec.packetize(ByteArray(3000), 10, 2, 3, 4)

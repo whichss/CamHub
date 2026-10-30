@@ -16,7 +16,9 @@ class DeadlineFrameReassembler(
 ) {
     companion object {
         const val DEFAULT_FRAME_DEADLINE_MS = 35L
-        const val DEFAULT_MAX_PENDING_FRAMES = 8
+        // At 30 fps with a 35 ms deadline, four slots cover normal frame overlap
+        // plus jitter while halving the worst-case assembly memory per camera.
+        const val DEFAULT_MAX_PENDING_FRAMES = 4
         const val DEFAULT_MAX_FRAME_BYTES = 2 * 1024 * 1024
         private const val MAX_TERMINAL_FRAME_IDS = 64
         private val EMPTY_PAYLOAD = ByteArray(0)

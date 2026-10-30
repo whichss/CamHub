@@ -192,6 +192,28 @@ final class CamHubWireProtocolTests: XCTestCase {
         XCTAssertEqual(limited.offer(first[0], nowMs: 0), .dropped)
     }
 
+    func testDefaultFrameReassemblerLimitDropsOldestPartialFrame() throws {
+        let frame = Data(repeating: 5, count: 2_000)
+        let reassembler = CamHubFrameReassembler()
+        var firstFramePackets: [Data] = []
+
+        for frameID in 1...CamHubFrameReassembler.defaultMaxPendingFrames + 1 {
+            let packets = try CamHubRtpPacketCodec.packetize(
+                frame,
+                frameID: UInt64(frameID),
+                timestamp: UInt32(frameID),
+                ssrc: 1,
+                firstSequence: UInt16(frameID * 10)
+            )
+            if frameID == 1 { firstFramePackets = packets }
+            XCTAssertEqual(reassembler.offer(try XCTUnwrap(packets.first), nowMs: UInt64(frameID)), .accepted)
+        }
+
+        XCTAssertEqual(reassembler.pendingFrameCount, CamHubFrameReassembler.defaultMaxPendingFrames)
+        XCTAssertEqual(reassembler.droppedFrameCount, 1)
+        XCTAssertEqual(reassembler.offer(try XCTUnwrap(firstFramePackets.last), nowMs: 10), .dropped)
+    }
+
     func testEncryptedIngressReassemblesAndAuthenticatesPayload() throws {
         let key = Data(repeating: 0x21, count: 32)
         let payload = CamHubVideoPayload(width: 1280, height: 720, rotationDegrees: 90,

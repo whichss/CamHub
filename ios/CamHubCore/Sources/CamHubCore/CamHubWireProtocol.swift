@@ -589,6 +589,7 @@ public enum CamHubRtpPacketCodec {
 
 /// Bounded, deadline-based assembly for one camera. Call from a single receive queue.
 public final class CamHubFrameReassembler {
+    public static let defaultMaxPendingFrames = 4
     public enum Result: Equatable {
         case accepted, duplicate, dropped
         case complete(Data)
@@ -607,7 +608,7 @@ public final class CamHubFrameReassembler {
     public private(set) var droppedFrameCount: UInt64 = 0
     public var pendingFrameCount: Int { pending.count }
 
-    public init(deadlineMs: UInt64 = 35, maxFrames: Int = 8, maxFrameBytes: Int = 2 * 1024 * 1024) {
+    public init(deadlineMs: UInt64 = 35, maxFrames: Int = CamHubFrameReassembler.defaultMaxPendingFrames, maxFrameBytes: Int = 2 * 1024 * 1024) {
         precondition(deadlineMs > 0 && maxFrames > 0 && maxFrameBytes > 0)
         self.deadlineMs = deadlineMs
         self.maxFrames = maxFrames
