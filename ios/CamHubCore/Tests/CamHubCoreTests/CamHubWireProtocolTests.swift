@@ -211,7 +211,20 @@ final class CamHubWireProtocolTests: XCTestCase {
 
         XCTAssertEqual(reassembler.pendingFrameCount, CamHubFrameReassembler.defaultMaxPendingFrames)
         XCTAssertEqual(reassembler.droppedFrameCount, 1)
+        XCTAssertEqual(reassembler.takeCapacityDropCount(), 1)
+        XCTAssertEqual(reassembler.takeCapacityDropCount(), 0)
         XCTAssertEqual(reassembler.offer(try XCTUnwrap(firstFramePackets.last), nowMs: 10), .dropped)
+    }
+
+    func testExpiredFrameDoesNotCountAsCapacityEviction() throws {
+        let frame = Data(repeating: 5, count: 2_000)
+        let packets = try CamHubRtpPacketCodec.packetize(frame, frameID: 1, timestamp: 1,
+                                                           ssrc: 1, firstSequence: 1)
+        let reassembler = CamHubFrameReassembler(deadlineMs: 10, maxFrames: 1)
+        XCTAssertEqual(reassembler.offer(try XCTUnwrap(packets.first), nowMs: 0), .accepted)
+        reassembler.expire(nowMs: 10)
+        XCTAssertEqual(reassembler.droppedFrameCount, 1)
+        XCTAssertEqual(reassembler.takeCapacityDropCount(), 0)
     }
 
     func testEncryptedIngressReassemblesAndAuthenticatesPayload() throws {

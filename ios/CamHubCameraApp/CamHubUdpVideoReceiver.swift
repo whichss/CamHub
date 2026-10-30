@@ -122,8 +122,11 @@ final class CamHubUdpVideoReceiver {
                 let now = DispatchTime.now().uptimeNanoseconds / 1_000_000
                 let droppedBefore = self.ingress.droppedFrameCount
                 let result = self.ingress.offer(data, nowMs: now)
+                let capacityDropped = self.ingress.takeCapacityDropCount()
                 if self.ingress.pendingFrameCount > 0 { self.startExpiryTimer() }
-                if self.ingress.droppedFrameCount != droppedBefore { self.onDroppedFrame() }
+                if capacityDropped > 0 || self.ingress.droppedFrameCount != droppedBefore {
+                    self.onDroppedFrame()
+                }
                 if case let .frame(frame) = result { self.onFrame(frame) }
             }
             self.receive(current)
@@ -148,7 +151,9 @@ final class CamHubUdpVideoReceiver {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let now = DispatchTime.now().uptimeNanoseconds / 1_000_000
-            if self.ingress.expire(nowMs: now) > 0 { self.onDroppedFrame() }
+            let expired = self.ingress.expire(nowMs: now)
+            let capacityDropped = self.ingress.takeCapacityDropCount()
+            if expired > 0 || capacityDropped > 0 { self.onDroppedFrame() }
             if self.ingress.pendingFrameCount == 0 {
                 self.expiryTimer?.cancel()
                 self.expiryTimer = nil

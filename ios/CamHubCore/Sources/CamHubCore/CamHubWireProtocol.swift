@@ -606,6 +606,7 @@ public final class CamHubFrameReassembler {
     private var order: [UInt64] = []
     private var terminal: [UInt64] = []
     public private(set) var droppedFrameCount: UInt64 = 0
+    private var capacityDroppedFrameCount: UInt64 = 0
     public var pendingFrameCount: Int { pending.count }
 
     public init(deadlineMs: UInt64 = 35, maxFrames: Int = CamHubFrameReassembler.defaultMaxPendingFrames, maxFrameBytes: Int = 2 * 1024 * 1024) {
@@ -629,7 +630,10 @@ public final class CamHubFrameReassembler {
               Int(part.totalFrameBytes) <= maxFrameBytes,
               !terminal.contains(part.frameID) else { return .dropped }
         if pending[part.frameID] == nil {
-            if order.count >= maxFrames, let oldest = order.first { discard(oldest) }
+            if order.count >= maxFrames, let oldest = order.first {
+                if pending[oldest] != nil { capacityDroppedFrameCount &+= 1 }
+                discard(oldest)
+            }
             pending[part.frameID] = Pending(first: part, startedAtMs: nowMs)
             order.append(part.frameID)
         }
@@ -667,6 +671,13 @@ public final class CamHubFrameReassembler {
     private func discard(_ id: UInt64) {
         if pending[id] != nil { droppedFrameCount &+= 1 }
         finish(id)
+    }
+
+    /// Returns and clears incomplete frames evicted to enforce `maxFrames`.
+    public func takeCapacityDropCount() -> UInt64 {
+        let result = capacityDroppedFrameCount
+        capacityDroppedFrameCount = 0
+        return result
     }
 }
 
@@ -720,6 +731,11 @@ public final class CamHubVideoIngress {
     private var recentNonceSet: Set<Data> = []
     public var droppedFrameCount: UInt64 { assembler.droppedFrameCount &+ corruptFrames }
     public var pendingFrameCount: Int { assembler.pendingFrameCount }
+
+    /// Returns and clears incomplete frames evicted by the assembler capacity limit.
+    public func takeCapacityDropCount() -> UInt64 {
+        assembler.takeCapacityDropCount()
+    }
 
     public init(sessionKey: Data) throws {
         cipher = try CamHubFrameCipher(key: sessionKey)
