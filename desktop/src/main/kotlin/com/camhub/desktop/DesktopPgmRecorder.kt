@@ -223,7 +223,7 @@ class DesktopPgmRecorder(
         .distinct()
         .take(3)
         .joinToString(": ")
-        .take(160)
+        .take(480)
         .ifEmpty { "PGM recording failed" }
 
     private fun publish(value: DesktopRecordingSnapshot) {

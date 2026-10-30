@@ -21,13 +21,16 @@ class H264FrameDecoder(
 ) : AutoCloseable {
     private val input = LatestAccessUnitInputStream()
     private val running = AtomicBoolean(false)
+    private val decoderInitialized = AtomicBoolean(false)
     private val threadName = "DesktopH264Decode-" + cameraName
         .replace(Regex("[^A-Za-z0-9_-]"), "_")
         .take(30)
 
     @Volatile private var thread: Thread? = null
 
+    @Synchronized
     fun start() {
+        if (thread?.isAlive == true) return
         if (!running.compareAndSet(false, true)) return
         thread = Thread(::decodeLoop, threadName).apply {
             isDaemon = true
@@ -43,11 +46,14 @@ class H264FrameDecoder(
         if (running.get()) input.recoverFromDiscontinuity()
     }
 
+    @Synchronized
     override fun close() {
         running.set(false)
         input.close()
-        thread?.interrupt()
-        thread = null
+        // Closing the input wakes JavaCV when it is waiting for access units. Do not interrupt
+        // JavaCPP while it is loading native libraries: an interrupted file-lock wait poisons
+        // FFmpeg class initialization for the rest of this process.
+        if (decoderInitialized.get()) thread?.interrupt()
     }
 
     private fun decodeLoop() {
@@ -68,6 +74,7 @@ class H264FrameDecoder(
             // a separate config access unit before video, so probing a finite
             // sample here only consumes frames from the bounded startup queue.
             grabber.start(false)
+            decoderInitialized.set(true)
             while (running.get()) {
                 val frame = grabber.grabImage() ?: continue
                 val metadata = input.takeOutputMetadata() ?: continue
@@ -87,7 +94,11 @@ class H264FrameDecoder(
             runCatching { grabber.stop() }
             runCatching { grabber.release() }
             converter.close()
+            decoderInitialized.set(false)
             running.set(false)
+            synchronized(this) {
+                if (thread === Thread.currentThread()) thread = null
+            }
         }
     }
 
