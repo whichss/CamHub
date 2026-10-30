@@ -33,7 +33,7 @@ import javax.inject.Singleton
 
 @Singleton
 class ExternalDisplayManager @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var presentation: PgmPresentation? = null

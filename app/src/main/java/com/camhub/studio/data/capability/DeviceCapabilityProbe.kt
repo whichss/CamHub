@@ -12,7 +12,7 @@ import javax.inject.Singleton
 
 @Singleton
 class DeviceCapabilityProbe @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
     fun probe(): HubCapabilityReport {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager

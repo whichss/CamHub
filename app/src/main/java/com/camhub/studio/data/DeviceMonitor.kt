@@ -29,7 +29,7 @@ private const val THERMAL_STATUS_UNKNOWN = -1
 
 @Singleton
 class DeviceMonitor @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

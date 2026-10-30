@@ -64,7 +64,7 @@ data class RecordingInfo(
 
 @Singleton
 class DirectorRecorder @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
     companion object {
         private const val TAG = "DirectorRecorder"

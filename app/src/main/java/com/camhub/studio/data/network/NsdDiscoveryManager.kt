@@ -28,7 +28,7 @@ data class DiscoveredPeer(
 
 @Singleton
 class NsdDiscoveryManager @Inject constructor(
-    @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
+    @param:dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
     private val networkTransportManager: NetworkTransportManager,
     private val peerConnectionManager: PeerConnectionManager
 ) {

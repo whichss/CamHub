@@ -37,7 +37,7 @@ data class AudioCaptureStatus(
 
 @Singleton
 class AudioCaptureService @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
 
     companion object {

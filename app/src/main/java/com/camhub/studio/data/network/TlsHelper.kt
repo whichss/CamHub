@@ -41,7 +41,7 @@ internal class PeerFingerprintMismatchException(val actualFingerprint: String) :
  */
 @Singleton
 class TlsHelper @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
     companion object {
         private const val KEY_ALIAS = "camhub"
