@@ -47,7 +47,13 @@ class DesktopPgmRecorderTest {
             }
             recorder.offerFrame(DesktopVideoFrame(redImage), transitionAlpha = 1f)
             recorder.stop()
-            assertTrue(await { snapshot.get()?.state == DesktopRecordingState.IDLE })
+            assertTrue(
+                "Recorder finalization timed out: ${snapshot.get()}",
+                await(timeoutMs = 30_000) {
+                    snapshot.get()?.state in setOf(DesktopRecordingState.IDLE, DesktopRecordingState.FAILED)
+                }
+            )
+            assertTrue("Recorder finalization failed: ${snapshot.get()}", snapshot.get()?.state == DesktopRecordingState.IDLE)
             assertTrue(Files.size(output) > 1_000)
             assertTrue(snapshot.get().framesWritten >= 2)
 
