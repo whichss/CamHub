@@ -90,9 +90,9 @@ macOS or D3D11VA on Windows when the bundled FFmpeg H.264 decoder advertises tha
 Decoded GPU frames transfer to host memory before Java2D rendering. Missing hardware support or a
 failed device setup selects FFmpeg's software format; a failed hardware-frame transfer reopens the
 software decoder and waits for a new keyframe. The camera connection detail shows which path
-produced the latest frame. Integration tests cover the decoder, transfer-compatible output,
-software fallback, and multi-camera recovery, but they do not prove hardware acceleration or a
-throughput gain on every user's GPU. GPU upscaling remains future work. The OBS path uses local
+produced the latest frame. Integration tests cover native H.264 decoding, a forced software decoding
+path, and multi-camera UDP recovery. They do not simulate a GPU transfer failure or prove hardware
+acceleration or a throughput gain on every user's GPU. GPU upscaling remains future work. The OBS path uses local
 WebSocket control plus a loopback FFmpeg Media Source, not a separately installed native OBS plugin.
 
 The Windows package derives its modular Java runtime from the installed distribution with `jdeps`

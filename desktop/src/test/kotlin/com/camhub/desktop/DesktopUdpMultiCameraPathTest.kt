@@ -84,6 +84,7 @@ class DesktopUdpMultiCameraPathTest {
         val dropCounts = AtomicIntegerArray(4)
         val unexpectedFrameCount = AtomicIntegerArray(4)
         val images = Array(2) { AtomicReference<BufferedImage?>() }
+        val decodePaths = Array(2) { AtomicReference<String?>() }
         val failure = AtomicReference<Throwable?>()
         val decoders = (0..1).map { camera ->
             H264FrameDecoder(
@@ -92,7 +93,8 @@ class DesktopUdpMultiCameraPathTest {
                     images[camera].set(image)
                     displayed[camera].countDown()
                 },
-                onError = failure::set
+                onError = failure::set,
+                onDecodePath = { path -> decodePaths[camera].set(path) }
             ).apply { start() }
         }
         val receivers = (0..3).map { camera ->
@@ -256,6 +258,10 @@ class DesktopUdpMultiCameraPathTest {
                 assertArrayEquals(streamFrames.last().bytes, payload.h264Bytes)
                 assertEquals(640, requireNotNull(images[camera].get()).width)
                 assertEquals(360, requireNotNull(images[camera].get()).height)
+                assertTrue(
+                    "camera $camera did not report the active decode path",
+                    decodePaths[camera].get() in setOf("software decode", "VideoToolbox decode", "D3D11VA decode")
+                )
             }
             (2..3).forEach { camera ->
                 assertNull("damaged camera $camera frame escaped reassembly", delivered[camera].get())

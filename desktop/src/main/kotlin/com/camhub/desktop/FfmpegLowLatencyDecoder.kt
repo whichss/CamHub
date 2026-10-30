@@ -19,7 +19,9 @@ import org.bytedeco.javacpp.PointerPointer
  * Hardware frames are transferred to host memory before the existing Java2D pipeline.
  * FFmpeg may select its software pixel format if device session creation fails.
  */
-internal class FfmpegLowLatencyDecoder : AutoCloseable {
+internal class FfmpegLowLatencyDecoder(
+    forceSoftware: Boolean = false
+) : AutoCloseable {
     private val codec = avcodec.avcodec_find_decoder(avcodec.AV_CODEC_ID_H264)
         ?: error("Bundled FFmpeg has no H.264 decoder")
     private var context = avcodec.avcodec_alloc_context3(codec)
@@ -54,7 +56,7 @@ internal class FfmpegLowLatencyDecoder : AutoCloseable {
 
     init {
         configureBaseContext(context)
-        configureHardwareDevice()
+        if (!forceSoftware) configureHardwareDevice()
         var opened = avcodec.avcodec_open2(context, codec, null as org.bytedeco.ffmpeg.avutil.AVDictionary?)
         if (opened < 0 && hardwarePixelFormat != null) {
             createSoftwareFallbackContext()
