@@ -37,7 +37,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 화면 입력은 카메라 4개 슬롯과 독립된 PGM 소스로 관리하고, 같은 모니터 캡처·출력 피드백을 차단
 - 선택 화면을 독립 CamHub 카메라 소스로 광고하고, Android 허브의 TLS 지문/PIN 페어링과 UDP/RTP 구독 수락
 - 화면 캡처·최신 프레임 인코딩·암호화 UDP 송신을 각각 분리하고, 대기열 적체 시 키프레임부터 복구
-- 현재 PGM을 OBS Browser Source에 전달하는 loopback MJPEG 출력(최대 1080p, 15fps), OBS WebSocket으로 현재 장면에 자동 추가, 로컬 `/healthz` 상태 조회
+- 현재 PGM을 OBS Browser Source에 전달하는 loopback MJPEG 출력(최대 1080p, 최대 30fps), OBS WebSocket으로 현재 장면에 자동 추가, 로컬 `/healthz` 상태 조회
 - `ESC` 전체화면 종료와 출력 중 모니터 분리 감지
 - Android와 데스크톱이 함께 사용하는 RTP 재조립·AES-256-GCM 공통 모듈
 - 최대 4대 멀티뷰와 분리된 PVW/PGM 버스, 카메라·화면 입력 선택, CUT 전환

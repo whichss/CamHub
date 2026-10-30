@@ -458,7 +458,7 @@ class DesktopHubFrame(
                         obsStatus.text = "OBS connected · CamHub PGM source active"
                         JOptionPane.showMessageDialog(
                             this@DesktopHubFrame,
-                            "$message\n\nOBS uses the local 15 fps MJPEG PGM feed.",
+                            "$message\n\nOBS uses the local MJPEG PGM feed at up to 30 fps.",
                             "CamHub added to OBS",
                             JOptionPane.INFORMATION_MESSAGE
                         )

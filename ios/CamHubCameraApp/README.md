@@ -17,8 +17,8 @@ a changed fingerprint still requires confirmation. PIN, fingerprint, or initial 
 do not trigger retries; manually disconnecting or backgrounding the app clears the in-memory retry
 credentials and fingerprint trust. The app stops hub connections when
 backgrounded. Landscape places the multiview on the left and camera controls on the right; portrait
-places controls below the video. The arm64/iOS 16 unsigned Release app target is verified by
-GitHub Actions. The CI workflow now also builds Debug, pending verification on its next run. Discovery, pairing,
+places controls below the video. The arm64/iOS 16 unsigned Debug and Release app targets are verified by
+GitHub Actions. Discovery, pairing,
 decoding, rotation, CUT, four-camera load and recovery have not been validated on iOS devices or
 against Android/desktop cameras.
 The UDP receiver also has a macOS loopback smoke test in `ios/IntegrationTests/UDPReceiverSmoke.swift`;
@@ -127,9 +127,8 @@ The UDP sender binds a dual-stack IPv6 socket and supports both IPv4-mapped and 
 addresses, including interface scope for link-local IPv6. The shared payload, RTP and AES-GCM wire
 vectors pass in the Swift core package tests. An authenticated, AES-GCM protected TCP video fallback
 is included in the app target; its loopback smoke test verifies the session token, framing, codec
-configuration and keyframe. The current app target builds and links into an unsigned arm64/iOS 16
-Release bundle in GitHub Actions without launching the app. The CI workflow now also builds Debug,
-pending verification on its next run.
+configuration and keyframe. The current app target builds and links into unsigned arm64/iOS 16
+Debug and Release bundles in GitHub Actions without launching the app.
 The simulator remains unavailable because this Mac's CoreSimulator components do not match the
 installed Xcode. Android/desktop
 interoperability, IPv6-only hub receive behavior, device signing/install, and iPhone runtime behavior

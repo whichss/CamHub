@@ -11,7 +11,7 @@ selected region to avoid capturing CamHub's own controls. The desktop capture ca
 a separate network camera source without consuming one of the four camera slots.
 
 The OBS action exposes the current PGM using a loopback-only HTTP Browser Source page. It serves
-15 fps multipart MJPEG, capped at 1920×1080. After starting the output, CamHub can connect to OBS's
+up to 30 fps multipart MJPEG, capped at 1920×1080. After starting the output, CamHub can connect to OBS's
 local WebSocket server (default port 4455) and add or update a `CamHub PGM` Browser source in the
 current program scene. The WebSocket password is used for that connection only and is not saved. If
 OBS is unavailable or the connection fails, CamHub copies the source URL for manual setup in OBS's

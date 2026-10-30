@@ -19,7 +19,7 @@ import javax.imageio.ImageIO
 /** Local-only browser source for OBS. PGM is encoded as bounded-rate multipart MJPEG. */
 class DesktopPgmObsOutput(
     private val frameProvider: () -> DesktopVideoFrame?,
-    private val framesPerSecond: Int = 15,
+    private val framesPerSecond: Int = 30,
     private val maxWidth: Int = 1920,
     private val maxHeight: Int = 1080,
     private val transitionAlphaProvider: () -> Float = { 0f }
