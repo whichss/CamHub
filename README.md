@@ -59,9 +59,9 @@ Camera 4 ─┘                 USB-C LAN ─┘
 
 현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다.
 
-화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 버튼은 OBS WebSocket으로 현재 프로그램 장면에 CamHub Browser Source를 자동 추가하고, 연결할 수 없으면 로컬 MJPEG URL을 수동 입력용으로 제공합니다. 네이티브 OBS 플러그인은 아닙니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Debug·Release `.app` 빌드가 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
+화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 버튼은 OBS WebSocket으로 현재 프로그램 장면에 CamHub Browser Source를 자동 추가하고, 연결할 수 없으면 로컬 MJPEG URL을 수동 입력용으로 제공합니다. 네이티브 OBS 플러그인은 아닙니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Release `.app` 빌드가 GitHub Actions에서 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
 
-### iOS 카메라 소스 (arm64 기기용 unsigned Debug/Release 빌드 확인)
+### iOS 카메라 소스 (arm64 기기용 unsigned Release 빌드 확인)
 
 - SwiftUI 카메라 화면과 720p30 H.264 VideoToolbox 인코딩
 - 로컬 Bonjour 검색 광고와 TLS 지문 표시·8자리 PIN 페어링
@@ -73,7 +73,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 네트워크가 인코더보다 느릴 때 오래된 영상이 쌓이지 않도록 송신 대기열 제한
 - IPv4-mapped/native IPv6 UDP 목적지와 링크 로컬 주소 scope 처리를 구현했고, 공통 wire fixture로 프로토콜 형식을 검증
 - 인증 토큰으로 허브를 확인하는 AES-GCM TCP 영상 폴백 구현 및 loopback 스모크 검증 완료
-- SRT 폴백, 현재 변경을 포함한 iOS 앱 전체 재빌드, 서명·설치 및 실기기 상호운용 검증은 미완료
+- SRT 폴백, 서명·설치 및 실기기 상호운용 검증은 미완료. `8d4c2ba`의 iOS Release 앱 타깃은 GitHub Actions에서 빌드 성공
 
 ### 카메라 모드
 
