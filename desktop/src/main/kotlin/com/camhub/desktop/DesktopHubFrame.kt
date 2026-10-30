@@ -482,7 +482,7 @@ class DesktopHubFrame(
                         obsStatusOverrideUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(12)
                         JOptionPane.showMessageDialog(
                             this@DesktopHubFrame,
-                            "Could not add the source through OBS WebSocket. Check that OBS is open, WebSocket is enabled, and the port/password are correct.\n\n$detail\n\nManual fallback: OBS → Sources → Media Source → disable Local File → Input URL\n$manualSourceUrl\nInput Format: mpjpeg\nBuffering MB: 0",
+                            "Could not add the source through OBS WebSocket. Check that OBS is open, WebSocket is enabled, and the port/password are correct.\n\n$detail\n\nManual fallback: OBS → Sources → Media Source → disable Local File → Input URL\n$manualSourceUrl\nInput Format: mpjpeg\nBuffering MB: 0\nReconnect Delay: 1 second",
                             "OBS connection failed",
                             JOptionPane.WARNING_MESSAGE
                         )

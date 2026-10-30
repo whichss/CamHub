@@ -147,6 +147,7 @@ internal class ObsWebSocketClient(
         put("is_local_file", false)
         put("buffering_mb", 0)
         put("restart_on_activate", false)
+        put("reconnect_delay_sec", 1)
         put("close_when_inactive", false)
         put("hw_decode", false)
         put("seekable", false)

@@ -45,6 +45,7 @@ class ObsWebSocketClientTest {
             assertEquals("false", settings["is_local_file"]?.jsonPrimitive?.content)
             assertEquals("0", settings["buffering_mb"]?.jsonPrimitive?.content)
             assertEquals("false", settings["restart_on_activate"]?.jsonPrimitive?.content)
+            assertEquals("1", settings["reconnect_delay_sec"]?.jsonPrimitive?.content)
             assertEquals(expectedAuthentication("obs-secret", "salt-value", "challenge-value"), obs.authentication)
         }
     }
