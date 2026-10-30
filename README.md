@@ -57,7 +57,7 @@ Camera 4 ─┘                 USB-C LAN ─┘
 - 핑/퐁 시계 보정 이후에만 카메라 촬영부터 데스크톱 표시까지의 지연 계산
 - 카메라 연결 단절 감지와 지수 백오프 자동 재연결
 
-현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다.
+현재 데스크톱 단계는 검색 목록에서 선택한 휴대폰 한 대 또는 최대 네 대를 연결하고 실영상을 멀티뷰, PVW/PGM, PGM 전체화면에 표시하고 PGM을 H.264 MP4로 녹화할 수 있습니다. 녹화 입력은 PGM 버스이므로 AUTO 전환을 포함하며, 녹화 처리는 제한된 최신 프레임 대기열과 독립 작업 스레드를 사용합니다. AUTO는 300ms 페이드-블랙 전환입니다. 현재 PGM 확대는 데스크톱 그래픽 파이프라인의 bicubic 공간 필터를 사용합니다. VideoToolbox/Media Foundation 하드웨어 디코딩과 GPU FSR 샤프닝은 다음 단계입니다. 포함된 macOS FFmpeg 빌드에서는 VideoToolbox 인코더를 사용할 수 있지만 H.264 하드웨어 디코더는 등록되지 않는 것을 확인했습니다. 따라서 macOS 디코딩은 단순 JavaCV 옵션으로 활성화할 수 없으며, FFmpeg 하드웨어 디바이스·프레임 전달 경로를 별도로 통합해야 합니다. Windows 디코더 지원 여부는 아직 확인되지 않았습니다.
 
 화면 영역은 로컬 PGM 입력과 CamHub 카메라 소스로 선택할 수 있습니다. 데스크톱 카메라 소스와 기존 Android 허브 간 인증·송신 경로는 코드로 연결했습니다. 화면 송신은 macOS VideoToolbox 또는 Windows Media Foundation H.264 하드웨어 인코더를 먼저 시도하고, RTP에 필요한 연속 Annex-B 프레임 및 SPS/PPS/IDR 출력이 확인되지 않으면 소프트웨어 인코더로 폴백합니다. 결과는 같은 실행 중 같은 스트림 형식에서 재사용합니다. macOS arm64 앱 ZIP과 Windows x64 설치 파일은 GitHub Actions에서 생성 및 패키지 검증을 통과했습니다. 앱 실행은 하지 않았으므로 화면 캡처 권한, 설치 후 동작과 실기기 상호운용은 별도 확인이 남아 있습니다. OBS 버튼은 OBS WebSocket으로 현재 프로그램 장면에 CamHub Browser Source를 자동 추가하고, 연결할 수 없으면 로컬 MJPEG URL을 수동 입력용으로 제공합니다. 네이티브 OBS 플러그인은 아닙니다. 현재 iOS TCP 송신 변경을 포함한 arm64 기기용 unsigned Release `.app` 빌드가 GitHub Actions에서 성공했으며, 서명·설치·실기기 송출과 상호운용 검증은 남아 있습니다. 시뮬레이터 검증은 이 Mac의 CoreSimulator 버전이 Xcode와 맞지 않아 진행하지 못했습니다.
 
