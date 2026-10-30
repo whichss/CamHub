@@ -173,7 +173,7 @@ class DesktopPgmRecorder(
                 DesktopRecordingState.FAILED,
                 outputFile,
                 framesWritten.get(),
-                error.message?.take(160) ?: "PGM recording failed"
+                errorSummary(error)
             ))
         } finally {
             converter.close()
@@ -217,6 +217,14 @@ class DesktopPgmRecorder(
         }
         throw IllegalStateException("No supported H.264 encoder is available for MP4 recording", lastError)
     }
+
+    private fun errorSummary(error: Throwable): String = generateSequence(error) { it.cause }
+        .mapNotNull { it.message?.trim()?.takeIf { message -> message.isNotEmpty() } }
+        .distinct()
+        .take(3)
+        .joinToString(": ")
+        .take(160)
+        .ifEmpty { "PGM recording failed" }
 
     private fun publish(value: DesktopRecordingSnapshot) {
         snapshot = value
