@@ -3,6 +3,7 @@ package com.camhub.studio.data.network
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.SocketException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -10,9 +11,43 @@ import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class UdpVideoReceiverTest {
+
+    @Test
+    fun `receiver closes socket when receive configuration fails`() {
+        val closeCalled = AtomicReference(false)
+        val failingSocket = object : DatagramSocket() {
+            override fun setReceiveBufferSize(size: Int) {
+                throw SocketException("test receive buffer failure")
+            }
+
+            override fun close() {
+                closeCalled.set(true)
+                super.close()
+            }
+        }
+        val receiver = UdpVideoReceiver(
+            cameraName = "Socket Setup Failure",
+            expectedHost = "127.0.0.1",
+            expectedSourcePort = 0,
+            socketFactory = { failingSocket },
+            onFrame = { _, _, _ -> }
+        )
+
+        try {
+            receiver.start()
+            fail("socket configuration failure was not propagated")
+        } catch (_: SocketException) {
+            // start must close the partially configured socket before propagating.
+        } finally {
+            receiver.stop()
+        }
+
+        assertTrue("partially configured socket leaked", closeCalled.get())
+    }
 
     @Test
     fun `stopping and restarting creates an isolated receiver run`() {

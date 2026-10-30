@@ -67,12 +67,11 @@ class UdpVideoReceiver(
         synchronized(lifecycleLock) {
             if (running?.get() == true) return@synchronized localPort
 
-            val newSocket = socketFactory().apply {
-                reuseAddress = true
-                receiveBufferSize = SOCKET_RECEIVE_BUFFER_BYTES
-                soTimeout = frameDeadlineMs.coerceIn(10L, 1_000L).toInt()
-            }
+            val newSocket = socketFactory()
             try {
+                newSocket.reuseAddress = true
+                newSocket.receiveBufferSize = SOCKET_RECEIVE_BUFFER_BYTES
+                newSocket.soTimeout = frameDeadlineMs.coerceIn(10L, 1_000L).toInt()
                 socketBinder?.invoke(newSocket)
                 if (!newSocket.isBound) newSocket.bind(InetSocketAddress(0))
             } catch (error: Throwable) {
