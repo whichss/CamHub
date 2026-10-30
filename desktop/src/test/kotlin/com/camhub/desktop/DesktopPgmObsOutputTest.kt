@@ -235,6 +235,57 @@ class DesktopPgmObsOutputTest {
         }
     }
 
+    @Test
+    fun `health endpoint reports stream clients and frame freshness`() {
+        val frame = DesktopVideoFrame(BufferedImage(32, 18, BufferedImage.TYPE_INT_RGB))
+        val output = DesktopPgmObsOutput(frameProvider = { frame })
+        var connection: HttpURLConnection? = null
+        try {
+            val baseUrl = output.start()
+            val healthUrl = URI(baseUrl).resolve("healthz").toURL()
+            fun readHealth(): String = (healthUrl.openConnection() as HttpURLConnection).run {
+                try {
+                    connectTimeout = 2_000
+                    readTimeout = 2_000
+                    assertEquals(200, responseCode)
+                    inputStream.bufferedReader().use { it.readText() }
+                } finally {
+                    disconnect()
+                }
+            }
+
+            val idle = readHealth()
+            assertTrue(idle.contains("\"activeClients\":0"))
+            assertTrue(idle.contains("\"framesSent\":0"))
+            assertTrue(idle.contains("\"lastFrameAgeMs\":null"))
+
+            connection = URI(baseUrl).resolve("pgm.mjpg").toURL()
+                .openConnection() as HttpURLConnection
+            connection.readTimeout = 2_000
+            val input = DataInputStream(connection.inputStream)
+            readFrame(input)
+            val connected = readHealth()
+            assertTrue(connected.contains("\"activeClients\":1"))
+            assertTrue(connected.contains("\"framesSent\":") &&
+                !connected.contains("\"framesSent\":0"))
+            assertTrue(connected.contains("\"lastFrameAgeMs\":") &&
+                !connected.contains("\"lastFrameAgeMs\":null"))
+
+            input.close()
+            connection.disconnect()
+            connection = null
+            val deadline = System.nanoTime() + 2_000_000_000L
+            while (output.activeStreamClientCount > 0 && System.nanoTime() < deadline) {
+                Thread.sleep(10)
+            }
+            assertEquals(0, output.activeStreamClientCount)
+            assertTrue(readHealth().contains("\"activeClients\":0"))
+        } finally {
+            connection?.disconnect()
+            output.close()
+        }
+    }
+
     private fun assertLandingPage(url: String) {
         val connection = URI(url).toURL().openConnection() as HttpURLConnection
         try {

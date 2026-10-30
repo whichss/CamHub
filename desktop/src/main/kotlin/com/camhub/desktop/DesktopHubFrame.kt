@@ -23,6 +23,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.TimeUnit
 import javax.swing.BorderFactory
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -144,6 +145,8 @@ class DesktopHubFrame(
         frameProvider = pgmController::currentFrame,
         transitionAlphaProvider = pgmController::transitionAlpha
     )
+    private var obsStatusOverrideUntilNanos = 0L
+    private val obsOutputStatusTimer = Timer(500) { refreshObsOutputStatus() }
     private val screenCapture = DesktopScreenCapture(
         onFrame = { image ->
             latestScreenFrame.set(DesktopVideoFrame(image))
@@ -329,6 +332,8 @@ class DesktopHubFrame(
                     obsStopButton.isEnabled = true
                     obsStatus.text = "Local PGM source ready · connecting to OBS…"
                     obsStatus.toolTipText = url
+                    obsStatusOverrideUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
+                    obsOutputStatusTimer.start()
                     connectPgmToObs(url)
                 }
                 .onFailure { error ->
@@ -342,6 +347,8 @@ class DesktopHubFrame(
                 }
         }
         obsStopButton.addActionListener {
+            obsOutputStatusTimer.stop()
+            obsStatusOverrideUntilNanos = 0L
             obsOutput.close()
             obsStopButton.isEnabled = false
             obsStatus.text = "OBS output inactive"
@@ -388,6 +395,7 @@ class DesktopHubFrame(
                 closing = true
                 displayPollTimer.stop()
                 screenPgmRefreshTimer.stop()
+                obsOutputStatusTimer.stop()
                 screenCapture.close()
                 autoTransitionTimer?.stop()
                 remotePtzDebounceTimer.stop()
@@ -456,7 +464,8 @@ class DesktopHubFrame(
                 obsSourceButton.isEnabled = true
                 runCatching { get() }
                     .onSuccess { message ->
-                        obsStatus.text = "OBS connected · CamHub PGM source active"
+                        obsStatus.text = "OBS source configured · waiting for video"
+                        obsStatusOverrideUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
                         JOptionPane.showMessageDialog(
                             this@DesktopHubFrame,
                             "$message\n\nOBS uses its built-in FFmpeg Media Source with a zero-MB buffering setting for the local MJPEG PGM feed (up to 30 fps).",
@@ -470,6 +479,7 @@ class DesktopHubFrame(
                             Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(manualSourceUrl), null)
                         }.isSuccess
                         obsStatus.text = "OBS connection failed · " + if (copied) "manual URL copied" else "manual URL available"
+                        obsStatusOverrideUntilNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(12)
                         JOptionPane.showMessageDialog(
                             this@DesktopHubFrame,
                             "Could not add the source through OBS WebSocket. Check that OBS is open, WebSocket is enabled, and the port/password are correct.\n\n$detail\n\nManual fallback: OBS → Sources → Media Source → disable Local File → Input URL\n$manualSourceUrl\nInput Format: mpjpeg\nBuffering MB: 0",
@@ -479,6 +489,25 @@ class DesktopHubFrame(
                     }
             }
         }.execute()
+    }
+
+    private fun refreshObsOutputStatus() {
+        if (!obsOutput.isRunning) {
+            obsOutputStatusTimer.stop()
+            return
+        }
+        if (System.nanoTime() < obsStatusOverrideUntilNanos) return
+
+        val clients = obsOutput.activeStreamClientCount
+        val frameAge = obsOutput.lastFrameAgeMs
+        obsStatus.text = when {
+            clients == 0 -> "Waiting for OBS stream · check source visibility"
+            frameAge == null -> "OBS connected · waiting for first frame"
+            frameAge > 2_000L -> "OBS stream stalled · reconnect the source"
+            !obsOutput.hasProgramSignal -> "OBS stream active · PGM has no signal"
+            clients == 1 -> "OBS stream active · PGM signal"
+            else -> "OBS stream active · $clients local clients"
+        }
     }
 
     private fun buildContent(): JPanel = JPanel(BorderLayout(12, 12)).apply {

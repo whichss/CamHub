@@ -14,9 +14,11 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
 
-/** Local-only browser source for OBS. PGM is encoded as bounded-rate multipart MJPEG. */
+/** Local-only OBS PGM output. Frames are sent as bounded-rate multipart MJPEG. */
 class DesktopPgmObsOutput(
     private val frameProvider: () -> DesktopVideoFrame?,
     private val framesPerSecond: Int = 30,
@@ -29,12 +31,23 @@ class DesktopPgmObsOutput(
         private const val DEFAULT_PORT = 48765
     }
 
-    private var running: AtomicBoolean? = null
+    @Volatile private var running: AtomicBoolean? = null
+    private val activeStreamClients = AtomicInteger(0)
+    private val framesSent = AtomicLong(0)
+    private val lastFrameSentAtNanos = AtomicLong(0)
     private data class CachedJpeg(val frame: DesktopVideoFrame, val alpha: Float, val bytes: ByteArray)
     private val emptyFrame = DesktopVideoFrame(BufferedImage(320, 180, BufferedImage.TYPE_INT_RGB))
     @Volatile private var cachedJpeg: CachedJpeg? = null
     @Volatile private var executor: ExecutorService? = null
     @Volatile private var server: HttpServer? = null
+
+    val isRunning: Boolean get() = running?.get() == true
+    val activeStreamClientCount: Int get() = activeStreamClients.get()
+    val hasProgramSignal: Boolean get() = frameProvider() != null
+    val lastFrameAgeMs: Long?
+        get() = lastFrameSentAtNanos.get().takeIf { it > 0L }?.let {
+            (System.nanoTime() - it).coerceAtLeast(0L) / 1_000_000L
+        }
 
     init {
         require(framesPerSecond in 1..30)
@@ -118,7 +131,12 @@ class DesktopPgmObsOutput(
         }
         val hasProgram = frameProvider() != null
         val transitionAlpha = transitionAlphaProvider().coerceIn(0f, 1f)
-        val payload = """{"status":"ok","pgm":"${if (hasProgram) "active" else "no_signal"}","transitionAlpha":$transitionAlpha}"""
+        val activeClients = activeStreamClients.get()
+        val frames = framesSent.get()
+        val lastSentAt = lastFrameSentAtNanos.get()
+        val lastFrameAgeMs = if (lastSentAt == 0L) "null" else
+            ((System.nanoTime() - lastSentAt).coerceAtLeast(0L) / 1_000_000L).toString()
+        val payload = """{"status":"ok","pgm":"${if (hasProgram) "active" else "no_signal"}","transitionAlpha":$transitionAlpha,"activeClients":$activeClients,"framesSent":$frames,"lastFrameAgeMs":$lastFrameAgeMs}"""
             .toByteArray(Charsets.UTF_8)
         exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
         exchange.responseHeaders.set("Cache-Control", "no-store")
@@ -137,6 +155,7 @@ class DesktopPgmObsOutput(
             exchange.close()
             return
         }
+        activeStreamClients.incrementAndGet()
         try {
             exchange.responseHeaders.set("Content-Type", "multipart/x-mixed-replace; boundary=$BOUNDARY")
             exchange.responseHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -160,6 +179,8 @@ class DesktopPgmObsOutput(
                             output.write(jpeg)
                             output.write("\r\n".toByteArray(Charsets.US_ASCII))
                             output.flush()
+                            framesSent.incrementAndGet()
+                            lastFrameSentAtNanos.set(System.nanoTime())
                         }
                         val remainingNanos = intervalNanos - (System.nanoTime() - startedAt)
                         if (remainingNanos > 0) {
@@ -174,6 +195,7 @@ class DesktopPgmObsOutput(
             try {
                 exchange.close()
             } finally {
+                activeStreamClients.decrementAndGet()
                 streamSlots.release()
             }
         }
